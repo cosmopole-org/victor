@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://elpianmain0001"]
+
+[node name="Main" type="Node2D"]
+
+[node name="ElpianVM" type="ElpianVM" parent="."]
+script_path = "res://scripts/main.dart"
+autostart = true
+prepend_prelude = true

@@ -30,6 +30,14 @@ targets the Dart VM cannot serve dynamically.
   `dart:isolate`, …) plus the widget layer — as governed host-bridge calls. It
   is gated behind the `dart` cargo feature (the `--include-dart` switch): a VM
   build that does not want the Dart extras simply omits it.
+- **`godot/`** — the **Godot engine bridge**: a Godot 4 project + C++
+  GDExtension embedding the VM (dart feature on) whose `GodotController` is a
+  *reflective interpreter* over ClassDB — the same paradigm as the CanvasKit
+  bridge — so a Dart program on Elpian drives **every** engine class, method,
+  property, signal, server, and constant by name, with batching, a handle
+  table, and queued signal dispatch for performance. `godot/capi/` is the
+  Rust C-ABI crate the extension links; `godot/prelude/godot.dart` is the
+  guest library. See `godot/README.md`.
 
 The crates build and test on native **and** `wasm32-unknown-unknown`:
 

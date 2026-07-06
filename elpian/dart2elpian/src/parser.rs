@@ -175,9 +175,14 @@ impl Parser {
                 }
             }
 
-            // A getter: `[Type] get name => …` / `{ … }`.
-            let is_getter = matches!(self.peek(), Tok::Ident(s) if s == "get")
-                || (self.skip_type_at(0) > 0 && *self.peek_at(self.skip_type_at(0)) == Tok::Ident("get".into()));
+            // A getter: `[Type] get name => …` / `{ … }`. A `(` right after
+            // `get` means an ordinary method *named* `get` (e.g. a reflective
+            // proxy's `obj.get('prop')`), not a getter declaration.
+            let is_getter = (matches!(self.peek(), Tok::Ident(s) if s == "get")
+                && *self.peek_at(1) != Tok::LParen)
+                || (self.skip_type_at(0) > 0
+                    && *self.peek_at(self.skip_type_at(0)) == Tok::Ident("get".into())
+                    && *self.peek_at(self.skip_type_at(0) + 1) != Tok::LParen);
             if is_getter {
                 // Skip an optional return type, then the `get` keyword.
                 if !matches!(self.peek(), Tok::Ident(s) if s == "get") {

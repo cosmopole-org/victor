@@ -50,11 +50,20 @@ pub enum DartError {
     Frontend(String),
 }
 
+/// An embedder-supplied service for host-call namespaces this crate does not
+/// own (e.g. a game-engine bridge servicing `godot.*` names). Returning
+/// `Some(reply)` answers the call; `None` falls through to the default
+/// handling (unknown names resolve to `null`). Hooked calls are still charged
+/// to the [`ResourceMeter`], so the embedder inherits the resource governor
+/// for free and only needs to add its own capability policy if it wants one.
+pub type HostHook = Box<dyn FnMut(&str, &[Value]) -> Option<Value> + Send>;
+
 /// A single embedded Dart runtime instance.
 pub struct DartRuntime {
     machine_id: String,
     caps: DartCapabilitySet,
     meter: ResourceMeter,
+    host_hook: Option<HostHook>,
     typed_data: TypedDataStore,
     ui: SceneRecorder,
     core: CoreRuntime,
@@ -94,6 +103,7 @@ impl DartRuntime {
             machine_id,
             caps,
             meter,
+            host_hook: None,
             typed_data: TypedDataStore::new(),
             ui: SceneRecorder::new(),
             core: CoreRuntime::new(Clock::System),
@@ -183,6 +193,14 @@ impl DartRuntime {
     pub fn with_fixed_clock(mut self, millis_since_epoch: i64) -> Self {
         self.core = CoreRuntime::new(Clock::Fixed(millis_since_epoch));
         self
+    }
+
+    /// Install an embedder [`HostHook`] servicing host-call namespaces this
+    /// crate does not own (anything not `log`/`test.emit`/`dart:*`). This is
+    /// the seam a native controller — e.g. the Godot GDExtension bridge —
+    /// plugs into to receive the guest's `askHost("godot.…", […])` calls.
+    pub fn set_host_hook(&mut self, hook: HostHook) {
+        self.host_hook = Some(hook);
     }
 
     /// Values the guest pushed out via `askHost("test.emit", [v])` — a tiny
@@ -278,10 +296,19 @@ impl DartRuntime {
         }
     }
 
+    /// Drain the event loop on the embedder's schedule — the public face of
+    /// [`pump`](Self::pump) for hosts (like the Godot frame loop) that tick the
+    /// runtime once per engine frame so `Timer`/`Future` continuations run.
+    pub fn pump_events(&mut self) -> Result<(), DartError> {
+        self.pump()
+    }
+
     /// Invoke a named guest handler with a JSON argument, servicing its host
     /// calls and flushing any microtasks it schedules. A missing handler is a
-    /// harmless no-op (the VM returns without error).
-    fn invoke_handler(&mut self, name: &str, arg: Value) {
+    /// harmless no-op (the VM returns without error). Public so an embedder
+    /// can deliver its own events (engine callbacks, bridged signals, …) into
+    /// guest entrypoints beyond the built-in pointer/lifecycle/text set.
+    pub fn invoke_handler(&mut self, name: &str, arg: Value) {
         // The guest handler receives `arg` directly as its single parameter,
         // exactly like `onEvent(ev)`.
         let input = arg.to_string();
@@ -352,8 +379,29 @@ impl DartRuntime {
                 Value::Null
             }
             name if name.starts_with("dart:") => self.service_dart(&name["dart:".len()..], &args),
-            _ => Value::Null,
+            name => self.service_hook(name, &args),
         }
+    }
+
+    /// Offer a non-`dart:*` host call to the embedder hook, charging the
+    /// resource meter first (so a hooked bridge sits inside the same resource
+    /// governor as the `dart:*` libraries). No hook, or a hook that declines,
+    /// resolves to `null` — the VM's neutral answer for unknown host calls.
+    fn service_hook(&mut self, api_name: &str, args: &[Value]) -> Value {
+        if self.host_hook.is_none() {
+            return Value::Null;
+        }
+        let bytes = approx_bytes(args);
+        if let Err(e) = self.meter.charge(bytes) {
+            self.denied.push(api_name.to_string());
+            return dart_error(&e);
+        }
+        // Take the hook out for the call so `self` stays borrowable if the
+        // embedder's closure panics-safely re-enters logging paths.
+        let mut hook = self.host_hook.take().expect("checked above");
+        let reply = hook(api_name, args);
+        self.host_hook = Some(hook);
+        reply.unwrap_or(Value::Null)
     }
 
     /// Route a `dart:<library>/<method>` call through governance to the library.

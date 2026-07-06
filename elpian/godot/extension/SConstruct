@@ -1,0 +1,43 @@
+#!/usr/bin/env python
+# SConstruct — the Godot-conventional build for the Elpian GDExtension.
+#
+#   git clone -b godot-4.3-stable https://github.com/godotengine/godot-cpp
+#   cargo build -p elpian-godot-capi --release       (run from elpian/)
+#   scons                                            (in this directory)
+#
+# Mirrors CMakeLists.txt (either works); godot-cpp is expected as a ./godot-cpp
+# checkout, and the Rust archive at ../../target/release/. Output lands in
+# ../project/bin/ where the bundled elpian_godot.gdextension expects it.
+import os
+import subprocess
+
+env = SConscript("godot-cpp/SConstruct")
+
+# Generate the @GlobalScope constants table from the engine's API dump.
+gen_inc = env.Command(
+    "gen/gen/global_constants_map.inc",
+    ["tools/gen_global_constants.py", "godot-cpp/gdextension/extension_api.json"],
+    "python3 $SOURCES $TARGET".replace("$SOURCES", "tools/gen_global_constants.py godot-cpp/gdextension/extension_api.json"),
+)
+
+env.Append(CPPPATH=["src/", "gen/"])
+sources = Glob("src/*.cpp")
+env.Depends(sources, gen_inc)
+
+# The embedded Elpian VM (Rust C ABI): build it first if it is not there yet.
+capi = ARGUMENTS.get("elpian_capi", "../../target/release/libelpian_godot.a")
+if not os.path.exists(capi):
+    subprocess.check_call(["cargo", "build", "-p", "elpian-godot-capi", "--release"], cwd="../..")
+env.Append(LIBS=[File(capi)])
+if env["platform"] == "linux":
+    env.Append(LIBS=["dl", "pthread", "m"])
+elif env["platform"] == "windows":
+    env.Append(LIBS=["ws2_32", "userenv", "bcrypt", "ntdll"])
+
+# One canonical name per platform/arch (shared with CMake and the bundled
+# .gdextension): libelpian_godot.<platform>.<arch>.<so|dylib|dll>.
+library = env.SharedLibrary(
+    "../project/bin/elpian_godot.{}.{}{}".format(env["platform"], env["arch"], env["SHLIBSUFFIX"]),
+    source=sources,
+)
+Default(library)

@@ -1,0 +1,14 @@
+# C++ extension build outputs
+extension/build/
+extension/gen/
+extension/godot-cpp/
+extension/*.os
+extension/.sconsign.dblite
+
+# Built extension binaries land in the project (keep the dir, not the libs)
+project/bin/*.so
+project/bin/*.dylib
+project/bin/*.dll
+
+# Godot editor cache
+project/.godot/
