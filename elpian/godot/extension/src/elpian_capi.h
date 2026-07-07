@@ -48,8 +48,9 @@ int elpian_godot_run(ElpianGodotRuntime *rt);
  * emissions (__godotDispatch). 0 = ok. */
 int elpian_godot_invoke(ElpianGodotRuntime *rt, const char *fn_name, const char *json_arg);
 
-/* Drain due timers/microtasks — call once per engine frame. 0 = ok. */
-int elpian_godot_pump(ElpianGodotRuntime *rt);
+/* Advance the guest clock by delta_ms (the engine frame delta) and fire the
+ * timers/microtasks that became due — call once per engine frame. 0 = ok. */
+int elpian_godot_pump(ElpianGodotRuntime *rt, uint64_t delta_ms);
 
 /* New guest print/log lines since the last call, as a JSON string array
  * (caller frees with elpian_godot_string_free). NULL when nothing new. */

@@ -115,17 +115,23 @@ impl EventLoop {
         self.now
     }
 
-    /// Return the next task to run, honoring Dart ordering: any pending
-    /// microtask first; otherwise advance the virtual clock to the earliest live
-    /// timer (FIFO among equal due times) and fire it. `None` when idle.
-    pub fn next_task(&mut self) -> Option<DueTask> {
-        if let Some(cb) = self.microtasks.pop_front() {
-            return Some(DueTask { cb, is_timer: false });
-        }
-        // Pick the earliest live timer by (due, seq).
+    /// Advance the virtual clock by `delta_ms` real milliseconds. This is how a
+    /// frame-pumped embedder (the Godot node) drives timers off *real* elapsed
+    /// time: the host advances the clock each frame, then drains whatever became
+    /// due. Contrast with [`next_task`], which jumps the clock forward to force
+    /// the next timer — correct for a batch program run to completion, but a
+    /// non-terminating spin for a live `Timer.periodic` (it is always "the next
+    /// timer"). See [`next_due_task`].
+    pub fn advance(&mut self, delta_ms: u64) {
+        self.now = self.now.saturating_add(delta_ms);
+    }
+
+    /// Index of the earliest live timer by `(due, seq)`. When `due_only`, timers
+    /// scheduled in the future (`due > now`) are ignored.
+    fn earliest_timer(&self, due_only: bool) -> Option<usize> {
         let mut best: Option<usize> = None;
         for (i, t) in self.timers.iter().enumerate() {
-            if t.cancelled {
+            if t.cancelled || (due_only && t.due > self.now) {
                 continue;
             }
             match best {
@@ -138,7 +144,11 @@ impl EventLoop {
                 None => best = Some(i),
             }
         }
-        let idx = best?;
+        best
+    }
+
+    /// Fire the timer at `idx`, rescheduling it if periodic; returns its task.
+    fn fire_timer(&mut self, idx: usize) -> DueTask {
         let t = self.timers.remove(idx);
         self.now = self.now.max(t.due);
         // A periodic timer reschedules itself for the next interval.
@@ -154,7 +164,36 @@ impl EventLoop {
                 period: Some(interval),
             });
         }
-        Some(DueTask { cb: t.cb, is_timer: true })
+        DueTask { cb: t.cb, is_timer: true }
+    }
+
+    /// Return the next task to run, honoring Dart ordering: any pending
+    /// microtask first; otherwise advance the virtual clock to the earliest live
+    /// timer (FIFO among equal due times) and fire it. `None` when idle.
+    ///
+    /// This is the **batch** drain: it jumps the clock to whatever timer is next,
+    /// so a run-to-completion program observes every scheduled callback. It does
+    /// **not** terminate in the presence of a `Timer.periodic` — a real-time,
+    /// frame-pumped embedder must use [`advance`] + [`next_due_task`] instead.
+    pub fn next_task(&mut self) -> Option<DueTask> {
+        if let Some(cb) = self.microtasks.pop_front() {
+            return Some(DueTask { cb, is_timer: false });
+        }
+        let idx = self.earliest_timer(false)?;
+        Some(self.fire_timer(idx))
+    }
+
+    /// Return the next task that is due at the **current** clock, without
+    /// advancing time: any pending microtask first, otherwise the earliest live
+    /// timer whose `due <= now`. `None` once only future timers remain — so a
+    /// `Timer.periodic` fires at most as often as the clock is [`advance`]d,
+    /// making a per-frame drain terminate.
+    pub fn next_due_task(&mut self) -> Option<DueTask> {
+        if let Some(cb) = self.microtasks.pop_front() {
+            return Some(DueTask { cb, is_timer: false });
+        }
+        let idx = self.earliest_timer(true)?;
+        Some(self.fire_timer(idx))
     }
 }
 

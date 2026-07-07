@@ -243,6 +243,19 @@ impl DartRuntime {
         Ok(result)
     }
 
+    /// Run the guest's top-level program, then drain only microtasks and timers
+    /// that are **already due** — never jumping the clock forward. This is the
+    /// entry point for a real-time, frame-pumped embedder (the Godot node): a
+    /// `main()` that installs a `Timer.periodic` or a long `Timer` returns
+    /// promptly instead of the batch [`run`] spinning the event loop firing that
+    /// timer forever. Subsequent frames call [`pump_frame`] to advance the clock
+    /// by the real frame delta and fire whatever became due.
+    pub fn run_realtime(&mut self) -> Result<Value, DartError> {
+        let result = self.drive(api::execute_vm(self.machine_id.clone()));
+        self.pump_due()?;
+        Ok(result)
+    }
+
     /// Drive a single VM turn to completion, servicing every host call it makes,
     /// and return the turn's result value. Reused by both the top-level run and
     /// each scheduled-callback invocation (so callbacks may themselves make
@@ -261,6 +274,29 @@ impl DartRuntime {
     /// enqueue more) until quiescent, respecting Dart's ordering. Each callback
     /// re-enters the guest via [`DISPATCH_FN`].
     fn pump(&mut self) -> Result<(), DartError> {
+        self.pump_with(false)
+    }
+
+    /// Drain only tasks due at the current clock (microtasks + timers whose
+    /// `due <= now`), leaving future timers pending. Terminates in the presence
+    /// of a `Timer.periodic`; used by the real-time frame loop.
+    fn pump_due(&mut self) -> Result<(), DartError> {
+        self.pump_with(true)
+    }
+
+    /// Advance the virtual clock by one real frame (`delta_ms`), then fire
+    /// whatever timers became due. The Godot node calls this once per engine
+    /// frame with the frame delta so guest `Timer`/`Future` continuations run on
+    /// real elapsed time.
+    pub fn pump_frame(&mut self, delta_ms: u64) -> Result<(), DartError> {
+        self.events.advance(delta_ms);
+        self.pump_due()
+    }
+
+    /// Shared drain loop. `due_only` selects the real-time policy (fire only
+    /// already-due timers) over the batch policy (jump the clock to the next
+    /// timer). See [`EventLoop::next_task`] vs [`EventLoop::next_due_task`].
+    fn pump_with(&mut self, due_only: bool) -> Result<(), DartError> {
         let mut ran: u64 = 0;
         loop {
             ran += 1;
@@ -270,7 +306,12 @@ impl DartRuntime {
             // Priority: microtasks/timers (event loop) first, then cooperative
             // isolate spawns, then delivered port messages. Newly-scheduled
             // microtasks always run before the next port message.
-            if let Some(task) = self.events.next_task() {
+            let next = if due_only {
+                self.events.next_due_task()
+            } else {
+                self.events.next_task()
+            };
+            if let Some(task) = next {
                 let input = json!([task.cb, Value::Null]).to_string();
                 let res = api::execute_vm_func_with_input(
                     self.machine_id.clone(),
@@ -316,6 +357,21 @@ impl DartRuntime {
             api::execute_vm_func_with_input(self.machine_id.clone(), name.to_string(), input, 0);
         let _ = self.drive(res);
         let _ = self.pump();
+    }
+
+    /// Deliver an event to a guest handler like [`invoke_handler`], but drain
+    /// only work that is **already due** afterward (the real-time policy) rather
+    /// than fast-forwarding the virtual clock. A frame-pumped embedder (the
+    /// Godot node) routes every engine event — `_process`, `_input`, bridged
+    /// signals — through here so that a guest `Timer.periodic` does not turn a
+    /// single event delivery into a non-terminating event-loop drain. Timers
+    /// advance instead via [`pump_frame`], once per frame, on real elapsed time.
+    pub fn deliver_event(&mut self, name: &str, arg: Value) {
+        let input = arg.to_string();
+        let res =
+            api::execute_vm_func_with_input(self.machine_id.clone(), name.to_string(), input, 0);
+        let _ = self.drive(res);
+        let _ = self.pump_due();
     }
 
     // ---- framework binding: host -> guest events & the frame pipeline -----
