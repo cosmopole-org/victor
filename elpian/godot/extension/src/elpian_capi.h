@@ -18,7 +18,11 @@
 extern "C" {
 #endif
 
-/* Opaque VM runtime handle. */
+/* Opaque handle over the whole VM TREE one node hosts: the root VM plus every
+ * child VM the tree spawns via askHost("vm.spawn", ...). Lifecycle events
+ * (__godotEvent) broadcast to all live VMs; namespaced callback dispatch
+ * (__godotDispatch) routes to the owning VM; pump ticks the whole tree and
+ * runs the hierarchy's aggregate-budget sweep. */
 typedef struct ElpianGodotRuntime ElpianGodotRuntime;
 
 /* Service one guest host call: (user, api_name, args_json) -> reply JSON.
@@ -52,9 +56,15 @@ int elpian_godot_invoke(ElpianGodotRuntime *rt, const char *fn_name, const char 
  * timers/microtasks that became due — call once per engine frame. 0 = ok. */
 int elpian_godot_pump(ElpianGodotRuntime *rt, uint64_t delta_ms);
 
-/* New guest print/log lines since the last call, as a JSON string array
- * (caller frees with elpian_godot_string_free). NULL when nothing new. */
+/* New guest print/log lines since the last call — from every VM in the tree,
+ * child lines prefixed "[vm<id>:<label>]" — as a JSON string array (caller
+ * frees with elpian_godot_string_free). NULL when nothing new. */
 char *elpian_godot_take_log(ElpianGodotRuntime *rt);
+
+/* JSON snapshot of the whole VM tree (ids, labels, states, per-VM and
+ * aggregate usage) for host-side dashboards. Caller frees with
+ * elpian_godot_string_free. */
+char *elpian_godot_stats_json(ElpianGodotRuntime *rt);
 
 /* Last error for this thread ("" when none). Borrowed — do not free. */
 const char *elpian_godot_last_error(void);
@@ -62,7 +72,7 @@ const char *elpian_godot_last_error(void);
 /* Free a string returned by this library. */
 void elpian_godot_string_free(char *s);
 
-/* Destroy a runtime. */
+/* Destroy the VM tree (terminating the root terminates every descendant). */
 void elpian_godot_free(ElpianGodotRuntime *rt);
 
 #ifdef __cplusplus

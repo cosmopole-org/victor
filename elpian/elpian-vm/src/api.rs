@@ -367,6 +367,21 @@ pub fn pause_vm(machine_id: &str) -> bool {
     }
 }
 
+/// Clear a VM's pause flag (requested or confirmed) without driving it —
+/// for an instance that was idle between turns when the pause landed. A VM
+/// parked mid-turn (state `Paused`) should instead be driven forward with
+/// [`resume_execution`].
+pub fn clear_pause(machine_id: &str) -> bool {
+    let vms = VMS.lock().unwrap();
+    match vms.get(machine_id) {
+        Some(vm) => {
+            vm.clear_pause();
+            true
+        }
+        None => false,
+    }
+}
+
 /// Resume a paused VM, continuing exactly where it suspended.
 pub fn resume_execution(machine_id: String) -> VmExecResult {
     let mut vms = VMS.lock().unwrap();
@@ -411,4 +426,202 @@ pub fn charge_storage(machine_id: &str, delta: i64) -> Result<(), String> {
         Some(vm) => vm.charge_storage(delta),
         None => Err("vm_not_found".to_string()),
     }
+}
+
+/// Read a VM's current resource-limit policy, if it exists.
+pub fn limits(machine_id: &str) -> Option<ResourceLimits> {
+    VMS.lock().unwrap().get(machine_id).map(|vm| vm.limits())
+}
+
+// ----------------------------------------------------------------------------
+// The VM tree: hierarchical instance management.
+//
+// A VM may instantiate other VMs; the registry tracks the resulting tree and
+// enforces the three hierarchical rules (see `sdk::hierarchy`):
+//   * lifecycle binding   — terminating a VM terminates its whole subtree;
+//   * aggregate budgets   — a VM's usage is measured own + descendant subtree,
+//                           and an aggregate overrun kills the whole subtree;
+//   * permission AND      — a VM's effective capabilities are the intersection
+//                           of the local grants along its ancestor path, and a
+//                           change anywhere is pushed to the affected subtree.
+//
+// Lock discipline: the hierarchy mutex is never held across a call that takes
+// the VMS mutex — ids are collected first, then applied per VM.
+// ----------------------------------------------------------------------------
+
+use crate::sdk::hierarchy::{accumulate_usage, aggregate_exceeds, VmHierarchy};
+
+static HIERARCHY: Lazy<Mutex<VmHierarchy>> = Lazy::new(|| Mutex::new(VmHierarchy::new()));
+
+/// Lock a registry mutex even if a previous guest panic poisoned it — the
+/// registries hold plain data that stays coherent across an executor unwind,
+/// and cleanup paths (embedder `Drop`s tearing whole VM trees down) must not
+/// abort inside a destructor because of an earlier, already-reported panic.
+fn lock_tolerant<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Register `child` as a child of `parent` in the VM tree and push the
+/// resulting effective capability set into the child's executor. Fails on
+/// cycles or if the child already has a parent.
+pub fn adopt_vm(parent_id: &str, child_id: &str) -> bool {
+    let effective = {
+        let mut h = lock_tolerant(&HIERARCHY);
+        if !h.adopt(parent_id, child_id) {
+            return false;
+        }
+        h.effective_caps(child_id)
+    };
+    set_capabilities(child_id, effective);
+    true
+}
+
+/// The parent of a VM in the tree, if it has one.
+pub fn vm_parent(machine_id: &str) -> Option<String> {
+    lock_tolerant(&HIERARCHY).parent_of(machine_id).map(|s| s.to_string())
+}
+
+/// The direct children of a VM.
+pub fn vm_children(machine_id: &str) -> Vec<String> {
+    lock_tolerant(&HIERARCHY).children_of(machine_id).to_vec()
+}
+
+/// The VM plus all its descendants, pre-order.
+pub fn vm_subtree(machine_id: &str) -> Vec<String> {
+    lock_tolerant(&HIERARCHY).subtree(machine_id)
+}
+
+/// Whether `ancestor` is `machine_id` itself or one of its ancestors.
+pub fn vm_is_ancestor_or_self(ancestor: &str, machine_id: &str) -> bool {
+    lock_tolerant(&HIERARCHY).is_ancestor_or_self(ancestor, machine_id)
+}
+
+/// Toggle one *locally granted* capability of a VM, then recompute and push
+/// the **effective** capability set (local ∧ ancestors) for the VM and its
+/// whole descendant subtree — so an on-the-fly change takes effect everywhere
+/// below immediately. Note that granting locally what an ancestor denies is
+/// recorded but stays ineffective until the ancestor grants it too.
+pub fn set_local_capability(machine_id: &str, cap: Capability, allowed: bool) -> bool {
+    let updates: Vec<(String, CapabilitySet)> = {
+        let mut h = lock_tolerant(&HIERARCHY);
+        h.set_local_capability(machine_id, cap, allowed);
+        h.subtree(machine_id).into_iter().map(|id| {
+            let eff = h.effective_caps(&id);
+            (id, eff)
+        }).collect()
+    };
+    let mut any = false;
+    for (id, eff) in updates {
+        any |= set_capabilities(&id, eff);
+    }
+    any
+}
+
+/// A VM's locally granted capability set (allow-all when never restricted).
+pub fn local_capabilities(machine_id: &str) -> CapabilitySet {
+    lock_tolerant(&HIERARCHY).local_caps(machine_id)
+}
+
+/// A VM's effective capability set (local grants ∧ every ancestor's grants).
+pub fn effective_capabilities(machine_id: &str) -> CapabilitySet {
+    lock_tolerant(&HIERARCHY).effective_caps(machine_id)
+}
+
+/// Aggregate resource usage of a VM **and its whole descendant subtree** —
+/// the figure a parent is accountable for. Additive budgets add; depth-like
+/// gauges take the subtree max. `None` if the VM is unknown.
+pub fn subtree_usage(machine_id: &str) -> Option<ResourceUsage> {
+    let ids = vm_subtree(machine_id);
+    let vms = VMS.lock().unwrap();
+    let mut total = ResourceUsage::default();
+    let mut found = false;
+    for id in ids {
+        if let Some(vm) = vms.get(&id) {
+            accumulate_usage(&mut total, &vm.usage());
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
+
+/// Request termination of a VM **and every descendant**: each executor unwinds
+/// at its next step boundary (including mid-turn — a hung child parked inside
+/// a loop observes the flag at its next interpreter step). Returns the ids the
+/// terminate was applied to, pre-order. The tree edges are kept until
+/// [`destroy_vm_tree`] so the embedder can still inspect the branch.
+pub fn terminate_vm_tree(machine_id: &str) -> Vec<String> {
+    let ids = vm_subtree(machine_id);
+    let vms = VMS.lock().unwrap();
+    for id in &ids {
+        if let Some(vm) = vms.get(id) {
+            vm.request_terminate();
+        }
+    }
+    ids
+}
+
+/// Request a pause of a VM and every descendant (each suspends at its next
+/// step boundary, continuation preserved). Returns the affected ids.
+pub fn pause_vm_tree(machine_id: &str) -> Vec<String> {
+    let ids = vm_subtree(machine_id);
+    let vms = VMS.lock().unwrap();
+    for id in &ids {
+        if let Some(vm) = vms.get(id) {
+            vm.request_pause();
+        }
+    }
+    ids
+}
+
+/// Destroy a VM and its whole subtree: terminate flags set, registry entries
+/// dropped, hierarchy edges removed. Returns the destroyed ids, pre-order.
+pub fn destroy_vm_tree(machine_id: &str) -> Vec<String> {
+    let ids = {
+        let mut h = lock_tolerant(&HIERARCHY);
+        h.remove_subtree(machine_id)
+    };
+    let mut vms = VMS.lock().unwrap();
+    for id in &ids {
+        if let Some(vm) = vms.get(id) {
+            vm.request_terminate();
+        }
+        vms.remove(id);
+    }
+    ids
+}
+
+/// Sweep the whole VM forest for **aggregate budget overruns**: for every VM
+/// (top-down), compare its own limit policy against the aggregate usage of its
+/// subtree; on an overrun, terminate and destroy that entire subtree. This is
+/// the enforcement half of rule 2 — a child that hangs or bloats and is not
+/// handled by its parent eventually costs the parent's whole branch.
+///
+/// Returns `(subtree_root, axis, destroyed_ids)` per violation. Call it
+/// periodically (e.g. once per host frame).
+pub fn enforce_tree_budgets() -> Vec<(String, String, Vec<String>)> {
+    // Collect the candidate set without holding the hierarchy lock across the
+    // per-VM registry reads.
+    let candidates: Vec<String> = {
+        let h = lock_tolerant(&HIERARCHY);
+        let mut all = Vec::new();
+        for root in h.roots() {
+            all.extend(h.subtree(&root));
+        }
+        all
+    };
+    let mut violations = Vec::new();
+    let mut dead: Vec<String> = Vec::new();
+    for id in candidates {
+        if dead.iter().any(|d| d == &id) {
+            continue; // already inside a destroyed subtree
+        }
+        let Some(limits) = limits(&id) else { continue };
+        let Some(aggregate) = subtree_usage(&id) else { continue };
+        if let Some(axis) = aggregate_exceeds(&limits, &aggregate) {
+            let destroyed = destroy_vm_tree(&id);
+            dead.extend(destroyed.iter().cloned());
+            violations.push((id, axis.to_string(), destroyed));
+        }
+    }
+    violations
 }

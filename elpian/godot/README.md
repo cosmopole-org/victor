@@ -1,4 +1,4 @@
-# Elpian ↔ Godot — a Dart program (no JIT) driving the full Godot engine
+# Elpian ↔ Godot — a tree of Dart VMs (no JIT) driving the full Godot engine
 
 This directory wires the **Elpian VM** (with the `dart` feature: the
 Dart→Elpian front-end + the Dart runtime layer from `elpian/dart/`) into a
@@ -8,6 +8,13 @@ can create/control/manage every layer of Godot — scene tree, all node classes,
 rendering, physics, navigation, audio, input, GUI, resources, tweens, signals,
 servers (RID APIs), reflection — with the same no-JIT/App-Store-legal execution
 model as the rest of this repo.
+
+One `ElpianVM` node now hosts a **multi-VM system**: a Rust `VmManager` owns a
+*tree* of VM instances sharing the same Godot scene. The root VM manages the
+whole scene and the inter-VM space; any VM can instantiate further VMs
+(`VMs.spawn(...)`) and holds complete, hierarchical control over them —
+lifecycle, resource limits, permissions, messaging — while each spawned VM is
+**sandboxed to an assigned node subtree**. See "The multi-VM tree" below.
 
 ```text
  Dart program (guest)                       C++ GDExtension (native)
@@ -21,6 +28,7 @@ model as the rest of this repo.
  GD.constant('KEY_ESCAPE')              ── generated @GlobalScope table
  GD.eval('clamp(x,0,1)',…)              ── Expression             (any utility fn)
  GD.classes()/classInfo()/audit()       ── ClassDB introspection
+ VMs.spawn(src, node, opts) ─askHost─▶  (vm.* stays in Rust: the VmManager)
         ◀───────────── JSON reply / queued signal dispatch ─────────────
 ```
 
@@ -51,7 +59,7 @@ hand.
 | `capi/` | `elpian-godot-capi` — Rust crate exposing the VM as a **C ABI** (`elpian_godot_new/run/invoke/pump/…`) with a host-callback seam for `godot.*` calls. Workspace member; `cargo test` runs the protocol e2e suite. |
 | `prelude/godot.dart` | The guest library (`GD`, `GObj`, value types, `GTimer`, marshaling). Embedded into the Rust crate via `include_str!` and composed ahead of the user program. |
 | `extension/` | The C++ GDExtension: `GodotController` (reflective op interpreter + Variant↔JSON marshaling + handle table), `ElpianCallable` (Dart-closure-backed `Callable`), `ElpianVM` (the scene node), build files (CMake + SCons). |
-| `project/` | A ready Godot 4.3+ project: `main.tscn` hosts an `ElpianVM` node running `scripts/main.dart` — a full 3D demo (sky/fog/glow environment, PBR materials, shadowed lights, physics, GUI overlay, input) that downloads a glTF model at runtime (`HTTPRequest` → `GLTFDocument`, all by name). Portrait, stretch-to-fit. |
+| `project/` | A ready Godot 4.3+ project: `main.tscn` hosts an `ElpianVM` node running `scripts/main.dart` — the **multi-VM showcase**: the root VM builds the environment/camera/dashboard, then spawns a tree of sandboxed child VMs into the same scene (a spinning-ring VM that spawns its own grandchild, a physics VM that also probes the sandbox and reports the denials, and a rogue VM whose deliberate hang is trapped by its budget), with live per-VM metering and pause/resume/terminate controls. Portrait, stretch-to-fit. |
 
 ## The op protocol (one seam, everything reachable)
 
@@ -65,7 +73,14 @@ Ops: `new`, `singleton`, `tree`, `self`, `load`, `method`, `get`/`set`,
 `geti`/`seti` (indexed property paths), `connect`/`disconnect`, `free`
 (handle/queue/now), `const`, `expr` (Godot `Expression` — reaches every
 `@GlobalScope` utility function), `static` (ClassDB.class_call_static on
-4.4+ engines, resolved at runtime), `classes`, `classinfo`, `audit`.
+4.4+ engines, resolved at runtime), `classes`, `classinfo`, `audit`, plus
+the multi-VM support ops `chk` (sandbox containment probe) and `grant`
+(share a handle with another VM's sandbox). Ops forwarded from sandboxed
+VMs carry a manager-stamped `__sbx` key the controller enforces.
+
+A third host-call family, `vm.*` (spawn / pause / resume / terminate / state /
+usage / usageTree / limits / setLimits / setPermission / permissions / list /
+send / grant / info), never reaches C++: the Rust `VmManager` services it.
 
 Marshaling covers **every Variant shape** in both directions: `vec2/2i/3/3i/
 4/4i`, `color`, `rect2/2i`, `plane`, `quat`, `aabb`, `basis`, `xform2d`,
@@ -78,6 +93,72 @@ positive, host-assigned negative; RefCounted objects are kept alive by the
 handle table, plain Objects are liveness-checked through ObjectID on every
 resolve). Op failures resume the guest as `{"__dart_error__": …}`, which the
 front-end lowers back into a Dart `throw`.
+
+## The multi-VM tree (VmManager)
+
+The layers divide cleanly: the **VM↔Godot binding stays the existing bridge**
+(one `GodotController`, one op protocol), while everything multi-VM lives in
+Rust (`capi/src/manager.rs`) behind new `vm.*` host APIs the guest reaches
+through the `VMs`/`VmController` prelude facade:
+
+```text
+root VM (scene manager: whole scene + inter-VM space, unrestricted)
+├─ child VM     ← sandboxed to a node its parent assigned
+│  └─ grandchild VM  ← sandboxed to a node inside ITS parent's node, …
+└─ child VM
+```
+
+* **Spawning** — `VMs.spawn(source, node, {label, limits, permissions,
+  maxHostCalls, maxBytesMoved, scene})` compiles a new Dart program into a
+  fresh VM, verifies `node` lies inside the caller's own sandbox (the `chk`
+  probe against the real tree), adopts it into the hierarchy and boots it in
+  the same frame. Gated by the `vm_manage` capability.
+* **Lifecycle binding** — `pause()` / `resume()` / `terminate()` act on the
+  target **and its whole descendant subtree**; terminating a parent kills all
+  children, their children, and so on. A paused branch receives no events,
+  timers or messages; a mid-turn pause parks the continuation intact.
+* **Aggregate resource accounting** — a VM's usage is measured as its own plus
+  its whole subtree's (`usageTree()`), and its `limits` budget is enforced
+  against that aggregate (`elpian_vm::api::enforce_tree_budgets`, swept every
+  frame): an overrunning branch — parent, siblings, offender — is terminated
+  *together*. A hung child first traps on its own per-turn instruction cap and
+  the parent is notified (`VMs.onChildTrapped`) so it can handle it; a parent
+  that never does eventually pays with its whole branch.
+* **Hierarchical permissions** — a VM's *effective* capability set is the AND
+  of the local grants along its ancestor path (`elpian-vm`'s
+  `sdk/hierarchy.rs`). A parent lacking a permission can never confer it; a
+  parent holding one may grant it per child; `setPermission(name, allowed)`
+  recomputes and pushes the effective sets for the entire affected subtree
+  immediately — enforcement happens inside each VM's executor (a denied
+  family short-circuits to null before reaching the host).
+* **Messaging** — `send(msg)` / `VMs.sendParent(msg)` deliver to the target's
+  `VMs.onMessage(cb)`; notifications (`trapped` / `terminated`) arrive at
+  `VMs.onNotify` / `onChildTrapped` / `onChildTerminated`.
+* **Callback namespacing** — each VM's signal-callback ids are namespaced by
+  the manager (`vm << 32 | local`), so one shared `GodotController` dispatches
+  every bridged signal back to the VM that owns the closure.
+
+### The Godot node sandbox
+
+Every spawned VM is assigned a node in the shared scene and all of its engine
+access is confined to that node's subtree. The manager stamps each forwarded
+op with the caller's sandbox root (`"__sbx"` — stripped from guest input
+first, so it cannot be forged), and the C++ controller enforces at resolve
+time:
+
+* object refs (as targets **or arguments**) only resolve to Nodes inside the
+  sandbox root's subtree — a parent can freely manipulate its children's node
+  trees (they sit inside its own sandbox by construction), a child can never
+  address outward, even holding a handle it obtained via `get_parent()`;
+* non-Node objects resolve only if created by the same sandbox, created by an
+  unrestricted context (the shared inter-VM space), or explicitly shared via
+  `VmController.grant(obj)`;
+* `GD.host()`/`GD.mount()` bind the VM's own sandbox root, not the ElpianVM
+  node; the SceneTree (`MainLoop`), singletons, `expr`, and `static` calls
+  require the `scene` permission (the whole-scene role, root by default,
+  grantable/revocable down the tree on the fly);
+* script injection is refused (`set_script`, `script` property writes,
+  instantiating/loading Script-derived types).
 
 ## Signals, callables, reentrancy
 
@@ -166,14 +247,23 @@ import/export.
 
 ## What is verified today
 
-* `cargo test -p elpian-godot-capi` — **11 e2e tests** running real guest
-  programs (prelude + test Dart, compiled by dart2elpian, executed on the real
-  VM) against a mock engine behind the host hook, pinning the wire protocol:
+* `cargo test -p elpian-godot-capi` — **26 e2e tests** running real guest
+  programs (prelude + test Dart, compiled by dart2elpian, executed on real
+  VMs) against a mock engine behind the host hook, pinning the wire protocol:
   create/set/get/call round-trips, every value shape, batching (N ops = 1
   crossing), signal → closure dispatch, closure → Callable marshaling,
   lifecycle events, singletons/constants/loads, `GTimer` on the VM event loop,
   the C ABI surface itself (boot/run/log/invoke/pump/teardown + compile-error
-  reporting), and that the shipped demo program compiles.
+  reporting), **the whole multi-VM contract** (`tests/multi_vm.rs`: child
+  spawn/boot with sandbox stamping, forged-`__sbx` stripping, callback-id
+  namespacing + routed dispatch, hierarchical permission revocation/re-grant
+  down the subtree, terminate-parent-kills-subtree, pause/resume event gating,
+  a hung child trapped on its per-turn budget + parent notification, the
+  aggregate-budget branch kill, spawn rejection for out-of-sandbox nodes,
+  parent↔child messaging, on-the-fly `scene`-permission toggling, cross-tree
+  usage/state introspection), and that the shipped multi-VM demo **runs** —
+  boots the 5-VM tree, keeps the physics child's periodic mounting bodies,
+  and traps the rogue's hang — under the real frame-loop drive.
 * The GDExtension **compiles and links against real godot-cpp 4.3**
   (`libelpian_godot.linux.x86_64.so`, entry symbol exported), Rust archive
   included.
@@ -185,9 +275,18 @@ to open once you have one.
 
 ## Trust & governance note
 
-Guest Dart code reaches the whole engine **by design** (that is the point of
-the bridge). `DartCapabilitySet`/`ResourceMeter` bound *how much* it can call,
-not *what* — `OS.execute`, file access etc. are engine surfaces like any
-other. Treat a `.dart` program you load like a `.gd` script: code you run is
-code you trust. (The signed-bundle machinery in `dart/src/bundle.rs` applies
-unchanged if you deliver Dart programs dynamically.)
+The **root** guest program reaches the whole engine **by design** (that is
+the point of the bridge). `DartCapabilitySet`/`ResourceMeter` bound *how
+much* it can call, not *what* — `OS.execute`, file access etc. are engine
+surfaces like any other. Treat the root `.dart` program you load like a
+`.gd` script: code you run is code you trust. (The signed-bundle machinery
+in `dart/src/bundle.rs` applies unchanged if you deliver Dart programs
+dynamically.)
+
+**Child VMs are different**: a spawned VM runs inside real engineering
+isolation — node-subtree containment, handle ownership, MainLoop/singleton/
+expression/script-injection guards, capability intersection with its ancestor
+path, and hierarchical resource budgets. That makes children the right place
+for third-party or dynamically delivered modules: the parent decides the
+node, the budget and the permission set, can change them on the fly, and can
+pause or kill the branch at any time.

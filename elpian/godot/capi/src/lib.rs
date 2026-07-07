@@ -1,30 +1,34 @@
 //! # elpian-godot-capi — the C ABI the Godot GDExtension embeds
 //!
 //! The C++ side of the bridge (`elpian/godot/extension/`) cannot link Rust
-//! directly, so this crate flattens the [`dart::runtime::DartRuntime`] embed
-//! into a small, panic-safe C surface (`elpian_godot_*`), mirrored by the
+//! directly, so this crate flattens the multi-VM [`manager::VmManager`] into a
+//! small, panic-safe C surface (`elpian_godot_*`), mirrored by the
 //! `extension/src/elpian_capi.h` header:
 //!
 //! ```text
-//!  Godot (C++)                          this crate                Elpian VM
-//!  ─────────────                        ───────────               ─────────
-//!  ElpianVM node ── elpian_godot_new ─▶ DartRuntime::from_dart ─▶ compile+load
-//!               ── elpian_godot_set_host ─▶ set_host_hook  (godot.* calls out)
-//!               ── elpian_godot_run ────▶ run_realtime()   (main() + due drain)
-//!               ── elpian_godot_invoke ─▶ deliver_event()  (events/signals in)
-//!               ── elpian_godot_pump ───▶ pump_frame(dt)   (timers, per frame)
+//!  Godot (C++)                          this crate                 Elpian VMs
+//!  ─────────────                        ───────────                ──────────
+//!  ElpianVM node ── elpian_godot_new ─▶ VmManager::new_root ─────▶ root VM
+//!               ── elpian_godot_set_host ─▶ engine bridge  (godot.* calls out)
+//!               ── elpian_godot_run ────▶ run_root()       (main() + settle)
+//!               ── elpian_godot_invoke ─▶ invoke()   (events/signals routed
+//!                                                     to the owning VM)
+//!               ── elpian_godot_pump ───▶ pump(dt)   (all VMs, budgets, settle)
 //! ```
 //!
-//! The **host callback** is the load-bearing piece: every `askHost("godot.…")`
-//! the guest makes arrives at the registered [`ElpianGodotHostFn`] as
-//! `(api_name, args_json)`; the C++ `GodotController` interprets the op
-//! reflectively against ClassDB and returns a JSON reply that resumes the VM.
+//! One node now hosts a **tree of VMs**: the root program can spawn child VMs
+//! (`askHost("vm.spawn", …)`) that share the same Godot scene, each sandboxed
+//! to an assigned node subtree, with hierarchical lifecycle / resource /
+//! permission control (see [`manager`]). The **host callback** stays the
+//! single engine seam: every forwarded `askHost("godot.…")` arrives at the
+//! registered [`ElpianGodotHostFn`] as `(api_name, args_json)` — already
+//! sanitized and stamped with the calling VM's sandbox — and the C++
+//! `GodotController` interprets the op reflectively against ClassDB.
 //!
-//! Threading contract: a runtime and its callback belong to ONE thread (Godot's
-//! main thread). The `Send` the hook type demands is satisfied by construction
-//! — the embedder never migrates the runtime across threads — and is asserted
-//! here rather than proven, exactly like every GDExtension that touches the
-//! scene tree.
+//! Threading contract: a manager and its callback belong to ONE thread
+//! (Godot's main thread). The `Send` asserted in a few places is satisfied by
+//! construction — the embedder never migrates the manager across threads —
+//! exactly like every GDExtension that touches the scene tree.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
@@ -32,12 +36,15 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dart::governance::{DartCapabilitySet, ResourceMeter};
-use dart::runtime::DartRuntime;
 use serde_json::{json, Value};
 
+pub mod manager;
+
+pub use manager::{BridgeFn, VmManager, ROOT_VM};
+
 /// The `godot.dart` guest prelude, compiled ahead of the user program so the
-/// `GD`/`GObj` reflective surface and the marshaling vocabulary are in scope.
+/// `GD`/`GObj` reflective surface, the `VMs` orchestration facade and the
+/// marshaling vocabulary are in scope.
 pub const GODOT_PRELUDE: &str = include_str!("../../prelude/godot.dart");
 
 /// Service a guest host call: `(user, api_name, args_json)` → reply JSON.
@@ -50,16 +57,14 @@ pub type ElpianGodotHostFn = Option<
 /// Release a buffer previously returned by the host callback (same allocator).
 pub type ElpianGodotHostFreeFn = Option<extern "C" fn(user: *mut c_void, s: *mut c_char)>;
 
-/// Opaque runtime handle across the C boundary.
+/// Opaque runtime handle across the C boundary — the whole VM tree.
 pub struct ElpianGodotRuntime {
-    rt: DartRuntime,
-    /// How many guest `print`/log lines have already been drained by the host.
-    log_cursor: usize,
+    mgr: VmManager,
 }
 
-/// The registered C callback bundle, captured by the Rust host hook. Carrying
-/// the raw `user` pointer across the `Send` bound is sound under the crate's
-/// single-thread embedding contract (see module docs).
+/// The registered C callback bundle, captured by the Rust engine bridge.
+/// Carrying the raw `user` pointer across the `Send` bound is sound under the
+/// crate's single-thread embedding contract (see module docs).
 struct HostBridge {
     call: extern "C" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char,
     free: ElpianGodotHostFreeFn,
@@ -114,10 +119,11 @@ fn c_str<'a>(p: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(p) }.to_str().ok()
 }
 
-/// Create a runtime from Dart source. `prepend_prelude != 0` composes the
-/// `godot.dart` prelude ahead of the program (what the ElpianVM node does).
-/// `max_host_calls` / `max_bytes_moved` bound the resource meter (0 = unbounded).
-/// Returns NULL on a compile/limit error — read `elpian_godot_last_error()`.
+/// Create a VM tree whose root runs `dart_source`. `prepend_prelude != 0`
+/// composes the `godot.dart` prelude ahead of the program (what the ElpianVM
+/// node does). `max_host_calls` / `max_bytes_moved` bound the root's resource
+/// meter (0 = unbounded). Returns NULL on a compile/limit error — read
+/// `elpian_godot_last_error()`.
 #[no_mangle]
 pub extern "C" fn elpian_godot_new(
     dart_source: *const c_char,
@@ -133,20 +139,17 @@ pub extern "C" fn elpian_godot_new(
                 return std::ptr::null_mut();
             }
         };
-        let program = if prepend_prelude != 0 {
-            compose_godot_program(source)
-        } else {
-            source.to_string()
-        };
         let machine = format!("godot-vm-{}", NEXT_MACHINE.fetch_add(1, Ordering::Relaxed));
-        let meter = ResourceMeter::new(
-            (max_host_calls > 0).then_some(max_host_calls),
-            (max_bytes_moved > 0).then_some(max_bytes_moved),
-        );
-        match DartRuntime::from_dart(machine, &program, DartCapabilitySet::full(), meter) {
-            Ok(rt) => Box::into_raw(Box::new(ElpianGodotRuntime { rt, log_cursor: 0 })),
+        match VmManager::new_root(
+            machine,
+            source,
+            prepend_prelude != 0,
+            max_host_calls,
+            max_bytes_moved,
+        ) {
+            Ok(mgr) => Box::into_raw(Box::new(ElpianGodotRuntime { mgr })),
             Err(e) => {
-                set_error(&format!("compile failed: {e:?}"));
+                set_error(&format!("compile failed: {e}"));
                 std::ptr::null_mut()
             }
         }
@@ -157,8 +160,8 @@ pub extern "C" fn elpian_godot_new(
     })
 }
 
-/// Register the host callback servicing the guest's `godot.*` calls.
-/// Passing a NULL `host_fn` uninstalls (guest sees `null` replies).
+/// Register the host callback servicing the tree's forwarded `godot.*` calls.
+/// Passing a NULL `host_fn` uninstalls (guests see `null` replies).
 #[no_mangle]
 pub extern "C" fn elpian_godot_set_host(
     rt: *mut ElpianGodotRuntime,
@@ -170,27 +173,25 @@ pub extern "C" fn elpian_godot_set_host(
     match host_fn {
         Some(call) => {
             let bridge = HostBridge { call, free: free_fn, user };
-            rt.rt.set_host_hook(Box::new(move |name, args| bridge.dispatch(name, args)));
+            rt.mgr.set_bridge(Some(Box::new(move |name, args| bridge.dispatch(name, args))));
         }
-        None => rt.rt.set_host_hook(Box::new(|_, _| None)),
+        None => rt.mgr.set_bridge(None),
     }
 }
 
-/// Run the guest's `main()` and drain its event loop. 0 = ok.
+/// Run the root guest's `main()`, drain its due event-loop work, and settle
+/// the VM tree (boot any children it spawned). 0 = ok.
 ///
-/// Uses the real-time drain ([`DartRuntime::run_realtime`]): a `main()` that
-/// installs a `Timer.periodic` (or a long one-shot `Timer`) returns promptly
-/// instead of spinning the event loop forever — the timer fires later, once per
-/// frame, via [`elpian_godot_pump`]. This is what keeps a guest whose `main()`
-/// schedules periodic work from wedging the host's startup (e.g. Godot's
-/// `_ready`, blocking the first frame on the boot splash).
+/// Uses the real-time drain: a `main()` that installs a `Timer.periodic` (or a
+/// long one-shot `Timer`) returns promptly instead of spinning the event loop
+/// forever — the timer fires later, once per frame, via [`elpian_godot_pump`].
 #[no_mangle]
 pub extern "C" fn elpian_godot_run(rt: *mut ElpianGodotRuntime) -> c_int {
     let Some(rt) = (unsafe { rt.as_mut() }) else { return 1 };
-    match catch_unwind(AssertUnwindSafe(|| rt.rt.run_realtime())) {
-        Ok(Ok(_)) => 0,
+    match catch_unwind(AssertUnwindSafe(|| rt.mgr.run_root())) {
+        Ok(Ok(())) => 0,
         Ok(Err(e)) => {
-            set_error(&format!("run failed: {e:?}"));
+            set_error(&format!("run failed: {e}"));
             1
         }
         Err(_) => {
@@ -202,8 +203,10 @@ pub extern "C" fn elpian_godot_run(rt: *mut ElpianGodotRuntime) -> c_int {
 
 /// Invoke a named guest function with one JSON argument (missing functions are
 /// a no-op). This is how the C++ node delivers lifecycle events
-/// (`__godotEvent(["_process", delta])`) and bridged signal emissions
-/// (`__godotDispatch([cbId, [args…]])`). 0 = ok.
+/// (`__godotEvent(["_process", delta])` — broadcast to every live VM) and
+/// bridged signal emissions (`__godotDispatch([cbId, [args…]])` — routed to
+/// the VM owning the namespaced callback id). Other names are delivered to the
+/// root VM. 0 = ok.
 #[no_mangle]
 pub extern "C" fn elpian_godot_invoke(
     rt: *mut ElpianGodotRuntime,
@@ -220,9 +223,7 @@ pub extern "C" fn elpian_godot_invoke(
         _ => Value::Null,
     };
     let name = name.to_string();
-    // Real-time delivery: drain only already-due work, so a guest that installed
-    // a `Timer.periodic` does not spin the event loop on every event delivered.
-    match catch_unwind(AssertUnwindSafe(|| rt.rt.deliver_event(&name, arg))) {
+    match catch_unwind(AssertUnwindSafe(|| rt.mgr.invoke(&name, arg))) {
         Ok(()) => 0,
         Err(_) => {
             set_error("panic during elpian_godot_invoke");
@@ -231,16 +232,16 @@ pub extern "C" fn elpian_godot_invoke(
     }
 }
 
-/// Advance the guest clock by `delta_ms` real milliseconds (the engine frame
-/// delta) and fire whatever timers/microtasks became due. Call once per engine
-/// frame. 0 = ok.
+/// Advance every live VM's guest clock by `delta_ms` real milliseconds (the
+/// engine frame delta), fire whatever timers/microtasks became due, then run
+/// the tree's aggregate-budget sweep. Call once per engine frame. 0 = ok.
 #[no_mangle]
 pub extern "C" fn elpian_godot_pump(rt: *mut ElpianGodotRuntime, delta_ms: u64) -> c_int {
     let Some(rt) = (unsafe { rt.as_mut() }) else { return 1 };
-    match catch_unwind(AssertUnwindSafe(|| rt.rt.pump_frame(delta_ms))) {
+    match catch_unwind(AssertUnwindSafe(|| rt.mgr.pump(delta_ms))) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
-            set_error(&format!("pump failed: {e:?}"));
+            set_error(&format!("pump failed: {e}"));
             1
         }
         Err(_) => {
@@ -250,20 +251,30 @@ pub extern "C" fn elpian_godot_pump(rt: *mut ElpianGodotRuntime, delta_ms: u64) 
     }
 }
 
-/// New guest `print`/log lines since the last call, as a JSON string array.
+/// New guest `print`/log lines since the last call — from every VM in the
+/// tree, child lines prefixed `[vm<id>:<label>]` — as a JSON string array.
 /// Caller frees with [`elpian_godot_string_free`]. NULL when nothing new.
 #[no_mangle]
 pub extern "C" fn elpian_godot_take_log(rt: *mut ElpianGodotRuntime) -> *mut c_char {
     let Some(rt) = (unsafe { rt.as_mut() }) else { return std::ptr::null_mut() };
-    let log = rt.rt.log();
-    if rt.log_cursor >= log.len() {
+    let fresh = rt.mgr.take_log();
+    if fresh.is_empty() {
         return std::ptr::null_mut();
     }
-    let fresh: Vec<&str> = log[rt.log_cursor..].iter().map(|s| s.as_str()).collect();
-    rt.log_cursor = log.len();
     CString::new(json!(fresh).to_string())
         .map(|c| c.into_raw())
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// A JSON snapshot of the whole VM tree (ids, labels, states, per-VM and
+/// aggregate usage) for host-side dashboards. Caller frees with
+/// [`elpian_godot_string_free`].
+#[no_mangle]
+pub extern "C" fn elpian_godot_stats_json(rt: *mut ElpianGodotRuntime) -> *mut c_char {
+    let Some(rt) = (unsafe { rt.as_ref() }) else { return std::ptr::null_mut() };
+    let stats = catch_unwind(AssertUnwindSafe(|| rt.mgr.stats().to_string()))
+        .unwrap_or_else(|_| "null".to_string());
+    CString::new(stats).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
 }
 
 /// The last error message for this thread ("" when none). Borrowed — do not
@@ -281,7 +292,8 @@ pub extern "C" fn elpian_godot_string_free(s: *mut c_char) {
     }
 }
 
-/// Destroy a runtime.
+/// Destroy the VM tree (every VM in it — terminating the root terminates all
+/// descendants by construction).
 #[no_mangle]
 pub extern "C" fn elpian_godot_free(rt: *mut ElpianGodotRuntime) {
     if !rt.is_null() {

@@ -37,6 +37,7 @@ name = "elpian-godot-capi"
 version = "0.1.0"
 dependencies = [
  "dart",
+ "elpian-vm",
  "serde_json",
 ]
 

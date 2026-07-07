@@ -11,4 +11,5 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 dart = { path = "../../dart", features = ["dart"] }
+elpian-vm = { path = "../../elpian-vm" }
 serde_json = "1.0"

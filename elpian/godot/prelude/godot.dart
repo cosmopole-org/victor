@@ -877,6 +877,228 @@ class Packed {
   static Packed colors(List flatRGBA) => Packed("pcol", flatRGBA);
 }
 
+// ---------------------------------------------------------------------------
+// VMs — orchestrating the multi-VM tree
+// ---------------------------------------------------------------------------
+//
+// A program running on Elpian can instantiate further Elpian VMs into the SAME
+// Godot scene and hold complete control of them: lifecycle (pause / resume /
+// terminate), resource limits, capability permissions and messaging. The VM
+// graph is a tree; every rule is hierarchical:
+//
+//   * terminating a VM terminates its whole descendant subtree;
+//   * a VM's resource usage is accounted as its own PLUS its subtree's, and an
+//     aggregate overrun of its own budget kills the whole branch;
+//   * a VM's effective permissions are the AND of the grants along its
+//     ancestor path — a parent can only confer what it holds, and on-the-fly
+//     changes propagate to the whole subtree instantly.
+//
+// Every spawned VM is assigned a NODE in the shared scene (it must lie inside
+// the parent's own sandbox) and all of its engine access is confined to that
+// node's subtree. The parent can freely manipulate the child's nodes (they are
+// inside its own sandbox); the child can never reach out. The root VM manages
+// the whole scene and the inter-VM space; the `scene` permission confers that
+// unrestricted role explicitly.
+//
+// Gated by the `vm_manage` capability: a VM whose parent revoked it gets null
+// replies from every `vm.*` call (`VMs.spawn` then returns null).
+//
+// Failures reply as `{ "__dart_error__": … }` maps — check `VMs.isError(r)`.
+
+// Handlers: "message" -> cb(senderId, msg);
+// "notify" / "notify:<kind>" -> cb(kind, vmId, detail).
+var __vmHandlers = {};
+
+/// The manager delivers child notifications here:
+/// `["trapped", vmId, reason]` (a child hit its own resource governor) or
+/// `["terminated", vmId, reason]` (a child branch was removed).
+void __vmNotify(args) {
+  var h = __vmHandlers["notify:" + args[0]];
+  if (h != null) {
+    h(args[0], args[1], args[2]);
+    return;
+  }
+  var all = __vmHandlers["notify"];
+  if (all != null) {
+    all(args[0], args[1], args[2]);
+  }
+}
+
+/// The manager delivers inter-VM messages here: `[senderVmId, message]`.
+void __vmMessage(args) {
+  var h = __vmHandlers["message"];
+  if (h != null) {
+    h(args[0], args[1]);
+  }
+}
+
+/// Shared spawn implementation (global helper: a static-to-static call does
+/// not resolve in the front-end's emitter — see the GD singleton note).
+dynamic __vmSpawnRaw(String source, GObj node, Map options) {
+  var opts = {};
+  if (options != null) {
+    for (var k in options.keys) {
+      opts[k] = options[k];
+    }
+  }
+  opts["node"] = node.id;
+  var r = askHost("vm.spawn", [source, opts]);
+  if (r is num) {
+    return r; // the child's vm id
+  }
+  if (r is Map) {
+    return r; // an {__dart_error__: …} failure
+  }
+  // A capability-denied call short-circuits to the VM's typed null, which is
+  // NOT the guest-level null; normalize so `== null` works for callers.
+  return null;
+}
+
+/// Control handle over one VM in the caller's subtree. Obtained from
+/// `VMs.spawn(...)` or `VMs.of(id)`. Every verb is authorized against the VM
+/// tree: only the VM itself, or one of its ancestors, may steer it.
+class VmController {
+  final int id;
+  VmController(this.id);
+
+  // ---- lifecycle -----------------------------------------------------------
+
+  /// Suspend the VM and its whole subtree: no events, no timers, no messages.
+  /// A VM mid-turn parks at its next interpreter step, continuation intact.
+  dynamic pause() => askHost("vm.pause", [id]);
+
+  /// Resume a paused subtree exactly where it stopped.
+  dynamic resume() => askHost("vm.resume", [id]);
+
+  /// Terminate the VM and its whole descendant subtree (rule 1 of the tree).
+  dynamic terminate() => askHost("vm.terminate", [id]);
+
+  /// `{id, label, state, trap, paused, alive}`.
+  dynamic state() => askHost("vm.state", [id]);
+
+  // ---- resources -----------------------------------------------------------
+
+  /// This VM's own live usage tally.
+  dynamic usage() => askHost("vm.usage", [id]);
+
+  /// Aggregate usage of the VM plus its whole descendant subtree — the figure
+  /// its own budget is enforced against.
+  dynamic usageTree() => askHost("vm.usageTree", [id]);
+
+  /// Current limit policy (`{instructions, instructionsPerTurn, memoryBytes,
+  /// storageBytes, callDepth}`, null = unbounded).
+  dynamic limits() => askHost("vm.limits", [id]);
+
+  /// Replace the limit policy on the fly (same keys as [limits]).
+  dynamic setLimits(Map limits) => askHost("vm.setLimits", [id, limits]);
+
+  // ---- permissions ---------------------------------------------------------
+
+  /// Toggle one permission: a capability name ('network', 'storage', 'clock',
+  /// 'randomness', 'gpu', 'logging', 'module_import', 'vm_manage', 'other') or
+  /// 'scene' (whole-scene access). Effective permissions are recomputed for
+  /// the VM's entire subtree immediately.
+  dynamic setPermission(String name, bool allowed) =>
+      askHost("vm.setPermission", [id, name, allowed]);
+
+  /// `{scene, local: {…}, effective: {…}}`.
+  dynamic permissions() => askHost("vm.permissions", [id]);
+
+  /// Share one of the caller's bridge handles (a resource, an object) with
+  /// this VM's sandbox, so it may use it despite the ownership isolation.
+  dynamic grant(GObj obj) => askHost("vm.grant", [id, obj.id]);
+
+  // ---- messaging / introspection --------------------------------------------
+
+  /// Deliver a message to this VM's `VMs.onMessage` handler.
+  dynamic send(msg) => askHost("vm.send", [id, msg]);
+
+  /// Direct children of this VM: `[{id, label, paused, alive}, …]`.
+  dynamic children() => askHost("vm.list", [id]);
+}
+
+/// The multi-VM orchestration facade.
+class VMs {
+  /// Instantiate and boot a new child VM running [source] (a Dart program,
+  /// with the full godot.dart prelude in scope), sandboxed to [node] — a node
+  /// inside the caller's own sandbox that becomes the child's whole world.
+  ///
+  /// [options]:
+  ///   'label'         — display name (logs, dashboards);
+  ///   'limits'        — `{instructions, instructionsPerTurn, memoryBytes,
+  ///                      storageBytes, callDepth}` resource budget, enforced
+  ///                      against the child's aggregate subtree usage;
+  ///   'permissions'   — `{capabilityName: bool, …}` local grants (ANDed with
+  ///                      the caller's own effective set);
+  ///   'maxHostCalls' / 'maxBytesMoved' — the child's host-seam meter;
+  ///   'scene'         — grant whole-scene access (needs the caller to hold it).
+  ///
+  /// The child compiles now; its `main()` runs (and its `_ready` fires) within
+  /// the current engine frame. Returns null when denied (`vm_manage` revoked)
+  /// or failed — use [trySpawn] for the raw error reply.
+  static VmController spawn(String source, GObj node, [Map options]) {
+    var r = __vmSpawnRaw(source, node, options);
+    if (r is num) {
+      return VmController(r);
+    }
+    return null;
+  }
+
+  /// Like [spawn] but returns the raw reply: the child's vm id (num) on
+  /// success, an `{__dart_error__: …}` map on failure, or null when the
+  /// caller's `vm_manage` capability is off.
+  static dynamic trySpawn(String source, GObj node, [Map options]) =>
+      __vmSpawnRaw(source, node, options);
+
+  /// Whether a `vm.*` reply is an error map.
+  static bool isError(r) {
+    if (r is Map) {
+      return r["__dart_error__"] != null;
+    }
+    return false;
+  }
+
+  /// A control handle for an already-known vm id.
+  static VmController of(int id) => VmController(id);
+
+  /// This VM's own identity: `{id, parent, label, scene, node}`.
+  static dynamic info() => askHost("vm.info", []);
+
+  /// The caller's direct children: `[{id, label, paused, alive}, …]`.
+  static dynamic children() => askHost("vm.list", []);
+
+  /// Send a message up to the parent VM (delivered to its `onMessage`).
+  static dynamic sendParent(msg) {
+    var i = askHost("vm.info", []);
+    if (i != null && i["parent"] != null) {
+      return askHost("vm.send", [i["parent"], msg]);
+    }
+    return null;
+  }
+
+  /// Receive inter-VM messages: `cb(senderVmId, message)`.
+  static void onMessage(Function cb) {
+    __vmHandlers["message"] = cb;
+  }
+
+  /// Receive every child notification: `cb(kind, vmId, detail)` with kind
+  /// 'trapped' or 'terminated'.
+  static void onNotify(Function cb) {
+    __vmHandlers["notify"] = cb;
+  }
+
+  /// Only 'trapped' notifications (a child hit its own resource governor —
+  /// e.g. a hung child cut off by its per-turn instruction cap).
+  static void onChildTrapped(Function cb) {
+    __vmHandlers["notify:trapped"] = cb;
+  }
+
+  /// Only 'terminated' notifications (a child branch was removed).
+  static void onChildTerminated(Function cb) {
+    __vmHandlers["notify:terminated"] = cb;
+  }
+}
+
 /// Timers riding the VM's own event loop (`dart:async` host hooks) — pumped
 /// once per engine frame by the ElpianVM node. Callbacks take NO parameters
 /// (the VM's `__dartDispatch` invokes them argument-free). Named GTimer so it

@@ -35,9 +35,15 @@ targets the Dart VM cannot serve dynamically.
   *reflective interpreter* over ClassDB — the same paradigm as the CanvasKit
   bridge — so a Dart program on Elpian drives **every** engine class, method,
   property, signal, server, and constant by name, with batching, a handle
-  table, and queued signal dispatch for performance. `godot/capi/` is the
+  table, and queued signal dispatch for performance. One node hosts a
+  **multi-VM system**: a Rust `VmManager` runs a *tree* of Elpian VMs in the
+  same scene — any VM can spawn children it fully controls (lifecycle,
+  limits, permissions, messaging), with hierarchical rules (terminating a
+  parent kills its subtree; budgets are enforced against aggregate subtree
+  usage; effective permissions are the AND of the ancestor path) and each
+  spawned VM sandboxed to an assigned node subtree. `godot/capi/` is the
   Rust C-ABI crate the extension links; `godot/prelude/godot.dart` is the
-  guest library. See `godot/README.md`.
+  guest library (`GD`, `VMs`, `VmController`). See `godot/README.md`.
 
 The crates build and test on native **and** `wasm32-unknown-unknown`:
 

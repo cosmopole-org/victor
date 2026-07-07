@@ -101,6 +101,12 @@ impl VM {
     pub fn request_terminate(&self) {
         self.exec().request_terminate();
     }
+    /// Host: clear a pause flag (requested or confirmed) without driving.
+    /// For an instance that was idle when paused — nothing to resume, but the
+    /// stale flag would otherwise suspend its next turn immediately.
+    pub fn clear_pause(&self) {
+        self.exec().resume_control();
+    }
     /// Current run state (running / paused / terminated / …).
     pub fn run_state(&self) -> crate::sdk::lifecycle::RunState {
         self.exec().run_state()
