@@ -59,7 +59,7 @@ hand.
 | `capi/` | `elpian-godot-capi` — Rust crate exposing the VM as a **C ABI** (`elpian_godot_new/run/invoke/pump/…`) with a host-callback seam for `godot.*` calls. Workspace member; `cargo test` runs the protocol e2e suite. |
 | `prelude/godot.dart` | The guest library (`GD`, `GObj`, value types, `GTimer`, marshaling). Embedded into the Rust crate via `include_str!` and composed ahead of the user program. |
 | `extension/` | The C++ GDExtension: `GodotController` (reflective op interpreter + Variant↔JSON marshaling + handle table), `ElpianCallable` (Dart-closure-backed `Callable`), `ElpianVM` (the scene node), build files (CMake + SCons). |
-| `project/` | A ready Godot 4.3+ project: `main.tscn` hosts an `ElpianVM` node running `scripts/main.dart` — the **multi-VM showcase**: the root VM builds the environment/camera/dashboard, then spawns a tree of sandboxed child VMs into the same scene (a spinning-ring VM that spawns its own grandchild, a physics VM that also probes the sandbox and reports the denials, and a rogue VM whose deliberate hang is trapped by its budget), with live per-VM metering and pause/resume/terminate controls. Portrait, stretch-to-fit. |
+| `project/` | A ready Godot 4.3+ project with two scenes. **`tps.tscn` (the main scene) is VICTOR: CITY STRIKE — a complete third-person shooter written entirely in Dart on the VM** (`scripts/tps_main.dart`): a procedurally assembled city built from CC0 GLB kits (`project/assets/tps/`), an animated player character with an over-the-shoulder SpringArm camera, two hitscan weapons with pooled tracers/impacts/damage numbers, three enemy archetypes with a chase/attack/line-of-sight AI, waves, pickups, a full HUD + menus, touch controls, and fully synthesized embedded audio — see [`GAME_DESIGN.md`](GAME_DESIGN.md). `main.tscn` remains the **multi-VM showcase**: the root VM builds the environment/camera/dashboard, then spawns a tree of sandboxed child VMs into the same scene (a spinning-ring VM that spawns its own grandchild, a physics VM that also probes the sandbox and reports the denials, and a rogue VM whose deliberate hang is trapped by its budget), with live per-VM metering and pause/resume/terminate controls. |
 
 ## The op protocol (one seam, everything reachable)
 
@@ -207,8 +207,10 @@ git clone -b godot-4.3-stable https://github.com/godotengine/godot-cpp
 cmake -B build -DCMAKE_BUILD_TYPE=Release      # or: scons
 cmake --build build -j
 
-# 3. Run the demo project (Godot 4.3+):
+# 3. Run the TPS game (the main scene; Godot 4.3+):
 godot --path ../project
+# …or the multi-VM showcase scene:
+godot --path ../project main.tscn
 ```
 
 The library lands in `project/bin/` where `elpian_godot.gdextension` expects
@@ -264,6 +266,13 @@ import/export.
   usage/state introspection), and that the shipped multi-VM demo **runs** —
   boots the 5-VM tree, keeps the physics child's periodic mounting bodies,
   and traps the rogue's hang — under the real frame-loop drive.
+* `tests/run_tps.rs` — **the shipped TPS game plays a full mission headless**
+  on the real VM against a mock engine: boot + city build (≥60 mounted
+  branches), menu frames, mission start, wave 1 deployment, hostiles closing
+  in on Dart-side predicted movement until the player falls (game over), a
+  clean restart, and the debug hooks (fire / kill-nearest / status) — all
+  under a watchdog. This pins the game's whole prediction/fallback layer:
+  it must run with **no** assets, physics answers, or raycast hits.
 * The GDExtension **compiles and links against real godot-cpp 4.3**
   (`libelpian_godot.linux.x86_64.so`, entry symbol exported), Rust archive
   included.

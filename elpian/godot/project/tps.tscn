@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://elpiantps00001"]
+
+[node name="CityStrike" type="Node3D"]
+
+[node name="ElpianVM" type="ElpianVM" parent="."]
+script_path = "res://scripts/tps_main.dart"
+autostart = true
+prepend_prelude = true
