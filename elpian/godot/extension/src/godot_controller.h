@@ -25,8 +25,35 @@
  *   {"static": "Class.method", "args"}       ClassDB.class_call_static (4.4+)
  *   {"classes": true} / {"classinfo": cls}   full ClassDB introspection
  *   {"audit": true}                          machine-checked coverage report
+ *   {"chk": handle}                          containment probe: is handle a
+ *                                            Node inside the op's sandbox?
+ *   {"grant": handle, "sbx": target}         share a handle with a sandbox
  *
  * plus `godot.batch` (an array of ops -> array of results, ONE seam crossing).
+ *
+ * ## The multi-VM node sandbox ("__sbx")
+ *
+ * The Rust VmManager stamps every op forwarded from a sandboxed VM with
+ * `"__sbx": <handle of the VM's assigned root node>` (the key is stripped
+ * from guest input first — it cannot be forged). Under a non-zero sandbox:
+ *
+ *   * object references only resolve to Nodes INSIDE the sandbox root's
+ *     subtree (root included) — a parent VM can therefore reach into its
+ *     children's node trees (they are inside its own sandbox by
+ *     construction) while a child can never address outward, even with a
+ *     handle it obtained (e.g. from get_parent());
+ *   * non-Node objects (resources, refcounted helpers) resolve only if the
+ *     handle was created by the same sandbox, was created by an
+ *     unrestricted context (host/root — the shared "inter-VM space"), or
+ *     was explicitly shared via the "grant" op;
+ *   * MainLoop-derived objects (the SceneTree) never resolve;
+ *   * {"self"} binds the sandbox root, not the hosting ElpianVM node —
+ *     GD.host()/GD.mount() then operate on the VM's own world;
+ *   * whole-scene ops are refused: tree / singleton / expr / static;
+ *   * script injection is refused: set_script calls, script property
+ *     writes, and instantiating/loading Script-derived types.
+ *
+ * Ops without "__sbx" (the root VM, GDScript callers) are unrestricted.
  *
  * Value marshaling covers every Variant shape both directions (vectors,
  * transforms, colors, rects, packed arrays, dictionaries, node paths, string
@@ -107,10 +134,20 @@ private:
 	struct Handle {
 		uint64_t object_id = 0; /* ObjectID for liveness checks           */
 		godot::Ref<godot::RefCounted> ref; /* keeps RefCounted objects alive */
+		/* Sandboxes allowed to use this (non-Node) object: the creating
+		 * sandbox plus any added via the "grant" op. Empty = created by an
+		 * unrestricted context = shared inter-VM space. Nodes ignore this —
+		 * they are governed by subtree containment instead. */
+		std::vector<int64_t> owners;
 	};
 
 	godot::Node *host_node = nullptr;
 	std::shared_ptr<CallbackSink> sink;
+
+	/* Sandbox of the op currently executing (0 = unrestricted). Set from the
+	 * op's "__sbx" key on entry to exec_op and cleared on exit; single-thread
+	 * confined like everything else here. */
+	int64_t ctx_sbx = 0;
 
 	std::unordered_map<int64_t, Handle> handles;
 	std::unordered_map<uint64_t, int64_t> reverse; /* ObjectID -> handle id */
@@ -128,6 +165,13 @@ private:
 
 	godot::Object *resolve(int64_t handle_id, godot::String *r_err);
 	godot::Object *resolve_op_ref(const godot::Dictionary &op, godot::String *r_err);
+	/* resolve + sandbox enforcement (containment / ownership / MainLoop). */
+	godot::Object *resolve_checked(int64_t handle_id, godot::String *r_err);
+	/* The current sandbox root node, or nullptr (with r_err) if it is gone. */
+	godot::Node *sandbox_root(godot::String *r_err);
+	bool sandbox_allows(int64_t handle_id, godot::Object *obj, godot::String *r_err);
+	/* The op interpreter proper; exec_op wraps it with sandbox-context setup. */
+	godot::Variant exec_op_inner(const godot::Dictionary &op);
 	void drop_handle(int64_t handle_id);
 	godot::Callable make_callable(int64_t cb_id);
 	godot::Variant lookup_constant(const godot::String &name);

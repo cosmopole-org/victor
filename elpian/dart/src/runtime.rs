@@ -171,6 +171,26 @@ impl DartRuntime {
         Self::from_dart(machine_id, &composed, caps, meter)
     }
 
+    /// The VM-registry key of this runtime's instance — the id every
+    /// `elpian_vm::api` control function (limits, capabilities, lifecycle,
+    /// hierarchy) is keyed by.
+    pub fn machine_id(&self) -> &str {
+        &self.machine_id
+    }
+
+    /// Resume an instance the host paused mid-turn (its continuation is
+    /// preserved by the executor), servicing any host calls it makes on the
+    /// way, then drain already-due event-loop work. A no-op for an instance
+    /// that is not parked in the paused state.
+    pub fn resume_paused(&mut self) {
+        if !matches!(api::run_state(&self.machine_id), Some(api::RunState::Paused)) {
+            return;
+        }
+        let res = api::resume_execution(self.machine_id.clone());
+        let _ = self.drive(res);
+        let _ = self.pump_due();
+    }
+
     /// Whether the guest has requested a repaint since the last
     /// [`clear_needs_frame`](Self::clear_needs_frame) (i.e. a `setState` ran).
     /// A host frame scheduler polls this to coalesce repaints.

@@ -31,6 +31,10 @@ pub enum Capability {
     Clock,
     /// Non-deterministic randomness (`random.*` and the `random` builtin).
     Randomness,
+    /// Managing other VM instances (`vm.*` except `vm.import`): spawning child
+    /// VMs, steering their lifecycle, limits and permissions. The gate of the
+    /// multi-VM tree: a VM without it cannot create or control children.
+    VmManage,
     /// Any host API not mapped to a more specific capability.
     Other,
 }
@@ -51,6 +55,7 @@ impl Capability {
                 "fs" => Capability::Storage,
                 "time" => Capability::Clock,
                 "random" => Capability::Randomness,
+                "vm" => Capability::VmManage,
                 _ => Capability::Other,
             }
         } else {
@@ -68,6 +73,7 @@ impl Capability {
             Capability::Storage => "storage",
             Capability::Clock => "clock",
             Capability::Randomness => "randomness",
+            Capability::VmManage => "vm_manage",
             Capability::Other => "other",
         }
     }
@@ -82,13 +88,14 @@ impl Capability {
             "storage" => Capability::Storage,
             "clock" => Capability::Clock,
             "randomness" => Capability::Randomness,
+            "vm_manage" => Capability::VmManage,
             "other" => Capability::Other,
             _ => return None,
         })
     }
 
     /// Every capability, for enumeration / bulk toggling.
-    pub fn all() -> [Capability; 8] {
+    pub fn all() -> [Capability; 9] {
         [
             Capability::Logging,
             Capability::Gpu,
@@ -97,6 +104,7 @@ impl Capability {
             Capability::Storage,
             Capability::Clock,
             Capability::Randomness,
+            Capability::VmManage,
             Capability::Other,
         ]
     }
@@ -171,6 +179,8 @@ mod tests {
         assert_eq!(Capability::for_api("time.now"), Capability::Clock);
         assert_eq!(Capability::for_api("random.bytes"), Capability::Randomness);
         assert_eq!(Capability::for_api("vm.import"), Capability::ModuleImport);
+        assert_eq!(Capability::for_api("vm.spawn"), Capability::VmManage);
+        assert_eq!(Capability::for_api("vm.terminate"), Capability::VmManage);
         assert_eq!(Capability::for_api("weird"), Capability::Other);
     }
 

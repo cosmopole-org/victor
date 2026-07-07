@@ -8,9 +8,11 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/expression.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/main_loop.hpp>
 #include <godot_cpp/classes/marshalls.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/classes/script.hpp>
 #include <godot_cpp/core/memory.hpp>
 #include <godot_cpp/core/object.hpp>
 #include <godot_cpp/variant/typed_array.hpp>
@@ -61,9 +63,79 @@ int64_t GodotController::register_object(Object *obj) {
 	if (rc != nullptr) {
 		h.ref = Ref<RefCounted>(rc); /* hold a reference while bridged */
 	}
+	if (ctx_sbx != 0) {
+		h.owners.push_back(ctx_sbx); /* private to the creating sandbox */
+	}
 	handles[id] = h;
 	reverse[oid] = id;
 	return id;
+}
+
+/* ---- the node sandbox ------------------------------------------------------ */
+
+Node *GodotController::sandbox_root(String *r_err) {
+	if (ctx_sbx == 0) {
+		return nullptr;
+	}
+	String err;
+	Object *o = resolve(ctx_sbx, &err);
+	Node *root = Object::cast_to<Node>(o);
+	if (root == nullptr) {
+		*r_err = "sandbox: this VM's root node is gone";
+	}
+	return root;
+}
+
+bool GodotController::sandbox_allows(int64_t handle_id, Object *obj, String *r_err) {
+	if (ctx_sbx == 0 || obj == nullptr) {
+		return true; /* unrestricted context */
+	}
+	/* The SceneTree (MainLoop) reaches the whole scene — never sandboxed. */
+	if (Object::cast_to<MainLoop>(obj) != nullptr) {
+		*r_err = "sandbox: MainLoop is not reachable from a sandboxed VM";
+		return false;
+	}
+	Node *node = Object::cast_to<Node>(obj);
+	if (node != nullptr) {
+		/* Nodes: containment under the sandbox root. */
+		Node *root = sandbox_root(r_err);
+		if (root == nullptr) {
+			return false;
+		}
+		if (node == root || root->is_ancestor_of(node)) {
+			return true;
+		}
+		*r_err = "sandbox: node is outside this VM's subtree";
+		return false;
+	}
+	/* Non-nodes: ownership. Empty = created unrestricted = shared space. */
+	auto it = handles.find(handle_id);
+	if (it == handles.end()) {
+		*r_err = String("unknown object handle ") + String::num_int64(handle_id);
+		return false;
+	}
+	const std::vector<int64_t> &owners = it->second.owners;
+	if (owners.empty()) {
+		return true;
+	}
+	for (int64_t o : owners) {
+		if (o == ctx_sbx) {
+			return true;
+		}
+	}
+	*r_err = "sandbox: object belongs to another VM (ask its owner to grant it)";
+	return false;
+}
+
+Object *GodotController::resolve_checked(int64_t handle_id, String *r_err) {
+	Object *obj = resolve(handle_id, r_err);
+	if (obj == nullptr) {
+		return nullptr;
+	}
+	if (!sandbox_allows(handle_id, obj, r_err)) {
+		return nullptr;
+	}
+	return obj;
 }
 
 Object *GodotController::resolve(int64_t handle_id, String *r_err) {
@@ -86,7 +158,7 @@ Object *GodotController::resolve_op_ref(const Dictionary &op, String *r_err) {
 		*r_err = "op is missing 'ref'";
 		return nullptr;
 	}
-	return resolve((int64_t)op["ref"], r_err);
+	return resolve_checked((int64_t)op["ref"], r_err);
 }
 
 void GodotController::drop_handle(int64_t handle_id) {
@@ -144,7 +216,9 @@ Variant GodotController::to_variant(const Variant &wire) {
 
 	if (d.has("ref") || d.has("obj")) { /* accept either spelling for handles */
 		String err;
-		Object *obj = resolve((int64_t)d.get(d.has("ref") ? "ref" : "obj", 0), &err);
+		/* Sandboxed: an outside node handed as an ARGUMENT is an escape too
+		 * (e.g. reparent(outside)) — resolve under the same containment. */
+		Object *obj = resolve_checked((int64_t)d.get(d.has("ref") ? "ref" : "obj", 0), &err);
 		return obj != nullptr ? Variant(obj) : Variant();
 	}
 	if (d.has("vec2")) {
@@ -252,7 +326,7 @@ Variant GodotController::to_variant(const Variant &wire) {
 		Object *obj = nullptr;
 		if (a.size() > 0 && a[0].get_type() == Variant::DICTIONARY) {
 			const Dictionary src = a[0];
-			obj = resolve((int64_t)src.get(src.has("ref") ? "ref" : "obj", 0), &err);
+			obj = resolve_checked((int64_t)src.get(src.has("ref") ? "ref" : "obj", 0), &err);
 		}
 		return obj != nullptr ? Variant(Signal(obj, StringName((String)a[1]))) : Variant();
 	}
@@ -851,8 +925,12 @@ Variant GodotController::op_free(const Dictionary &op) {
 	String err;
 	Object *obj = resolve(handle_id, &err);
 	if (mode == "handle" || obj == nullptr) {
-		drop_handle(handle_id); /* releases any held Ref */
+		drop_handle(handle_id); /* releases any held Ref — always harmless */
 		return Variant();
+	}
+	/* Destructive modes must stay inside the caller's sandbox. */
+	if (!sandbox_allows(handle_id, obj, &err)) {
+		return dart_error(err);
 	}
 	if (mode == "queue") {
 		Node *node = Object::cast_to<Node>(obj);
@@ -880,7 +958,43 @@ Variant GodotController::op_free(const Dictionary &op) {
  * (present or future) registers is reachable with no per-class code. */
 
 Variant GodotController::exec_op(const Dictionary &op) {
+	/* Establish the sandbox context for this op (stamped by the Rust
+	 * VmManager; absent for the root VM and for GDScript callers), run the
+	 * interpreter, then always restore the unrestricted context so engine-
+	 * driven marshaling (signal flushes, input events) stays public. */
+	ctx_sbx = op.has("__sbx") ? (int64_t)op["__sbx"] : 0;
+	const Variant result = exec_op_inner(op);
+	ctx_sbx = 0;
+	return result;
+}
+
+Variant GodotController::exec_op_inner(const Dictionary &op) {
 	ClassDBSingleton *cdb = ClassDBSingleton::get_singleton();
+
+	if (op.has("chk")) {
+		/* Containment probe (issued by the VM manager before adopting a child
+		 * whose sandbox is the probed node): is this a live Node the CURRENT
+		 * context may reach? */
+		String err;
+		Object *obj = resolve_checked((int64_t)op["chk"], &err);
+		return obj != nullptr && Object::cast_to<Node>(obj) != nullptr;
+	}
+
+	if (op.has("grant")) {
+		/* Share a handle the current context owns with another sandbox. */
+		const int64_t handle_id = (int64_t)op["grant"];
+		String err;
+		Object *obj = resolve_checked(handle_id, &err);
+		if (obj == nullptr) {
+			return dart_error(err);
+		}
+		auto it = handles.find(handle_id);
+		if (it == handles.end()) {
+			return dart_error("grant: unknown handle");
+		}
+		it->second.owners.push_back((int64_t)op.get("sbx", 0));
+		return true;
+	}
 
 	if (op.has("new")) {
 		const String cls = op["new"];
@@ -895,6 +1009,12 @@ Variant GodotController::exec_op(const Dictionary &op) {
 		if (obj == nullptr) {
 			return dart_error(String("instantiate returned null for ") + cls);
 		}
+		if (ctx_sbx != 0 && Object::cast_to<Script>(obj) != nullptr) {
+			/* A sandboxed VM minting a Script could attach engine-privileged
+			 * code to its nodes — refused. (RefCounted: dropping `inst`
+			 * frees it.) */
+			return dart_error("sandbox: Script types cannot be instantiated");
+		}
 		const int64_t def = op.has("def") ? (int64_t)op["def"] : 0;
 		if (def != 0) {
 			Handle h;
@@ -902,6 +1022,9 @@ Variant GodotController::exec_op(const Dictionary &op) {
 			RefCounted *rc = Object::cast_to<RefCounted>(obj);
 			if (rc != nullptr) {
 				h.ref = Ref<RefCounted>(rc);
+			}
+			if (ctx_sbx != 0) {
+				h.owners.push_back(ctx_sbx);
 			}
 			handles[def] = h;
 			reverse[obj->get_instance_id()] = def;
@@ -911,6 +1034,9 @@ Variant GodotController::exec_op(const Dictionary &op) {
 	}
 
 	if (op.has("singleton")) {
+		if (ctx_sbx != 0) {
+			return dart_error("sandbox: singletons require the 'scene' permission");
+		}
 		const String name = op["singleton"];
 		Object *obj = Engine::get_singleton()->get_singleton(StringName(name));
 		if (obj == nullptr) {
@@ -931,11 +1057,28 @@ Variant GodotController::exec_op(const Dictionary &op) {
 	 * key the op is a pure bind ({"self": true, "def": id} — GD.host()); with
 	 * one ({"self": true, "method": "add_child", …} — GD.mount) the addressing
 	 * only selects the target and the op must fall through to the action
-	 * dispatch below, not short-circuit into a bind that drops the action. */
+	 * dispatch below, not short-circuit into a bind that drops the action.
+	 * For a sandboxed VM, "self" IS its sandbox root — its whole world —
+	 * while "tree" (the SceneTree) needs the whole-scene role. */
 	Object *self_target = nullptr;
 	if (op.has("tree") || op.has("self")) {
-		Object *obj = op.has("self") ? (Object *)host_node
-									 : (host_node != nullptr ? (Object *)host_node->get_tree() : nullptr);
+		if (ctx_sbx != 0 && op.has("tree")) {
+			return dart_error("sandbox: the SceneTree requires the 'scene' permission");
+		}
+		Object *obj = nullptr;
+		if (op.has("self")) {
+			if (ctx_sbx != 0) {
+				String err;
+				obj = sandbox_root(&err);
+				if (obj == nullptr) {
+					return dart_error(err);
+				}
+			} else {
+				obj = (Object *)host_node;
+			}
+		} else {
+			obj = host_node != nullptr ? (Object *)host_node->get_tree() : nullptr;
+		}
 		if (obj == nullptr) {
 			return dart_error("no hosting node / scene tree available");
 		}
@@ -963,11 +1106,17 @@ Variant GodotController::exec_op(const Dictionary &op) {
 			return dart_error(String("failed to load resource ") + path);
 		}
 		Object *obj = res.ptr();
+		if (ctx_sbx != 0 && Object::cast_to<Script>(obj) != nullptr) {
+			return dart_error("sandbox: Script resources cannot be loaded");
+		}
 		const int64_t def = op.has("def") ? (int64_t)op["def"] : 0;
 		if (def != 0) {
 			Handle h;
 			h.object_id = obj->get_instance_id();
 			h.ref = res;
+			if (ctx_sbx != 0) {
+				h.owners.push_back(ctx_sbx);
+			}
 			handles[def] = h;
 			reverse[obj->get_instance_id()] = def;
 			return def;
@@ -979,9 +1128,17 @@ Variant GodotController::exec_op(const Dictionary &op) {
 		return lookup_constant((String)op["const"]);
 	}
 	if (op.has("expr")) {
+		if (ctx_sbx != 0) {
+			/* Expressions reach every @GlobalScope function (including
+			 * instance_from_id and resource loaders) — whole-scene only. */
+			return dart_error("sandbox: expressions require the 'scene' permission");
+		}
 		return eval_expression(op);
 	}
 	if (op.has("static")) {
+		if (ctx_sbx != 0) {
+			return dart_error("sandbox: static calls require the 'scene' permission");
+		}
 		/* ClassDB.class_call_static landed in Godot 4.4; reach it reflectively
 		 * so this binary (built against 4.3 headers) uses it when the running
 		 * engine has it and errors cleanly when it does not. */
@@ -1035,9 +1192,13 @@ Variant GodotController::exec_op(const Dictionary &op) {
 		return op_disconnect(op, obj);
 	}
 	if (op.has("method")) {
-		const StringName method = StringName((String)op["method"]);
+		const String method_name = op["method"];
+		if (ctx_sbx != 0 && method_name == "set_script") {
+			return dart_error("sandbox: set_script is not permitted");
+		}
+		const StringName method = StringName(method_name);
 		if (!obj->has_method(method)) {
-			return dart_error(String("no method ") + (String)op["method"] + " on " +
+			return dart_error(String("no method ") + method_name + " on " +
 					obj->get_class());
 		}
 		Array args;
@@ -1053,14 +1214,22 @@ Variant GodotController::exec_op(const Dictionary &op) {
 		return to_wire(obj->get(StringName((String)op["get"])));
 	}
 	if (op.has("set")) {
-		obj->set(StringName((String)op["set"]), to_variant(op["value"]));
+		const String prop = op["set"];
+		if (ctx_sbx != 0 && prop == "script") {
+			return dart_error("sandbox: the script property is not writable");
+		}
+		obj->set(StringName(prop), to_variant(op["value"]));
 		return Variant();
 	}
 	if (op.has("geti")) {
 		return to_wire(obj->get_indexed(NodePath((String)op["geti"])));
 	}
 	if (op.has("seti")) {
-		obj->set_indexed(NodePath((String)op["seti"]), to_variant(op["value"]));
+		const String path = op["seti"];
+		if (ctx_sbx != 0 && (path == "script" || path.begins_with("script:"))) {
+			return dart_error("sandbox: the script property is not writable");
+		}
+		obj->set_indexed(NodePath(path), to_variant(op["value"]));
 		return Variant();
 	}
 
