@@ -139,7 +139,7 @@ jobs:
       - name: Export web build
         run: |
           mkdir -p elpian/godot/build/web
-          godot --headless --path elpian/godot/project --export-release "Web" \
+          godot --headless --verbose --path elpian/godot/project --export-release "Web" \
             "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html"
           ls -la elpian/godot/build/web
 
