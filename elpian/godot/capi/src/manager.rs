@@ -9,8 +9,8 @@
 //! messaging. The layers divide cleanly:
 //!
 //! ```text
-//!  guest Dart (per VM)      this module (Rust)              C++ bridge
-//!  ─────────────────        ───────────────────             ──────────
+//!  guest program (per VM)   this module (Rust)              C++ bridge
+//!  ──────────────────       ───────────────────             ──────────
 //!  VMs.spawn(...)   ──▶  vm.*  : serviced HERE (spawn/pause/resume/terminate/
 //!                                limits/usage/permissions/send/…, tree rules
 //!                                enforced via elpian_vm::api's hierarchy)
@@ -60,8 +60,24 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use dart::governance::{DartCapabilitySet, ResourceMeter};
-use dart::runtime::DartRuntime;
+// The VM-management system itself is language-agnostic: guests are opaque
+// programs behind neutral names. The one language-specific thing about it is
+// which front-end compiles guest source, and that is confined to
+// [`compile_guest`] — swap the front-end there and nothing else changes.
+use dart::governance::{DartCapabilitySet as GuestCapabilitySet, ResourceMeter};
+use dart::runtime::DartRuntime as GuestRuntime;
+
+/// Compile a guest program (source text, with the godot prelude already
+/// composed) into a fresh runtime. The single seam to the language front-end;
+/// everything above it deals in guests, machines and VMs only.
+fn compile_guest(
+    machine_id: String,
+    program: &str,
+    meter: ResourceMeter,
+) -> Result<GuestRuntime, String> {
+    GuestRuntime::from_dart(machine_id, program, GuestCapabilitySet::full(), meter)
+        .map_err(|e| format!("{e:?}"))
+}
 use elpian_vm::api as vm_api;
 use elpian_vm::sdk::capabilities::Capability;
 use elpian_vm::sdk::limits::{ResourceLimits, ResourceUsage};
@@ -88,7 +104,7 @@ fn decode_cb(global: i64) -> (u64, i64) {
     (((global >> 32) & 0xFFFF_FFFF) as u64, global & 0xFFFF_FFFF)
 }
 
-/// Per-VM control record (the data plane — the `DartRuntime` — lives on the
+/// Per-VM control record (the data plane — the `GuestRuntime` — lives on the
 /// manager, not here, so hooks can read metadata mid-turn).
 struct VmMeta {
     machine_id: String,
@@ -131,7 +147,7 @@ struct Shared {
     /// Creation order — deterministic iteration for broadcasts/logs.
     order: RefCell<Vec<u64>>,
     /// Children spawned mid-turn, awaiting adoption + boot by `settle`.
-    pending_boot: RefCell<Vec<(u64, DartRuntime)>>,
+    pending_boot: RefCell<Vec<(u64, GuestRuntime)>>,
     commands: RefCell<VecDeque<Command>>,
     /// Manager-level diagnostics surfaced through the host log.
     host_log: RefCell<Vec<String>>,
@@ -213,7 +229,10 @@ impl Shared {
     }
 }
 
-fn dart_error(msg: &str) -> Value {
+fn vm_error(msg: &str) -> Value {
+    // The wire tag is the bridge-wide error convention (the prelude, the
+    // guest-runtime layer and the C++ controller all produce/consume it) —
+    // kept verbatim for protocol compatibility.
     json!({ "__dart_error__": msg })
 }
 
@@ -337,14 +356,14 @@ impl HookEnv {
         let target = args
             .get(idx)
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| dart_error("vm.*: missing target vm id"))?;
+            .ok_or_else(|| vm_error("vm.*: missing target vm id"))?;
         if !self.shared.meta.borrow().contains_key(&target) {
-            return Err(dart_error(&format!("vm.*: unknown vm {target}")));
+            return Err(vm_error(&format!("vm.*: unknown vm {target}")));
         }
         let allowed = self.shared.is_ancestor_or_self(self.vm, target)
             || (allow_parent && self.shared.parent_of(self.vm) == Some(target));
         if !allowed {
-            return Err(dart_error(&format!(
+            return Err(vm_error(&format!(
                 "vm.*: vm {} may not manage vm {} (outside its subtree)",
                 self.vm, target
             )));
@@ -431,7 +450,7 @@ impl HookEnv {
             }),
             "vm.setLimits" => self.with_target(args, false, |env, target| {
                 let Some(limits) = args.get(1).and_then(parse_limits) else {
-                    return dart_error("vm.setLimits: expected a limits map");
+                    return vm_error("vm.setLimits: expected a limits map");
                 };
                 let machine = env.shared.machine_of(target).unwrap_or_default();
                 json!(vm_api::set_limits(&machine, limits))
@@ -489,7 +508,7 @@ impl HookEnv {
                 let msg = args.get(1).cloned().unwrap_or(Value::Null);
                 let paused = env.shared.meta.borrow().get(&target).map(|m| m.paused || m.dead);
                 if paused != Some(false) {
-                    return dart_error(&format!("vm.send: vm {target} cannot receive"));
+                    return vm_error(&format!("vm.send: vm {target} cannot receive"));
                 }
                 env.shared
                     .commands
@@ -499,7 +518,7 @@ impl HookEnv {
             }),
             "vm.grant" => self.with_target(args, false, |env, target| {
                 let Some(handle) = args.get(1).and_then(|v| v.as_i64()) else {
-                    return dart_error("vm.grant: expected [vmId, handle]");
+                    return vm_error("vm.grant: expected [vmId, handle]");
                 };
                 let target_sbx = env.shared.sandbox_of(target);
                 if target_sbx == 0 {
@@ -524,7 +543,7 @@ impl HookEnv {
                     "node": m.node_handle,
                 })
             }
-            other => dart_error(&format!("unknown vm api: {other}")),
+            other => vm_error(&format!("unknown vm api: {other}")),
         }
     }
 
@@ -559,7 +578,7 @@ impl HookEnv {
             Err(e) => return e,
         };
         let Some(name) = args.get(1).and_then(|v| v.as_str()) else {
-            return dart_error("vm.setPermission: expected [vmId, name, allowed]");
+            return vm_error("vm.setPermission: expected [vmId, name, allowed]");
         };
         let allowed = args.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
         if name == "scene" {
@@ -567,7 +586,7 @@ impl HookEnv {
             // the effective flag is re-derived per op, so this takes effect
             // for the target's whole subtree immediately.
             if allowed && !self.shared.effective_scene(self.vm) {
-                return dart_error("vm.setPermission: caller lacks scene access to grant it");
+                return vm_error("vm.setPermission: caller lacks scene access to grant it");
             }
             if let Some(m) = self.shared.meta.borrow_mut().get_mut(&target) {
                 m.local_scene = allowed;
@@ -575,7 +594,7 @@ impl HookEnv {
             return Value::Bool(true);
         }
         let Some(cap) = Capability::from_str(name) else {
-            return dart_error(&format!("vm.setPermission: unknown permission '{name}'"));
+            return vm_error(&format!("vm.setPermission: unknown permission '{name}'"));
         };
         let machine = self.shared.machine_of(target).unwrap_or_default();
         // Effective sets (target ∧ ancestors) are recomputed and pushed for
@@ -585,7 +604,7 @@ impl HookEnv {
 
     fn spawn(&self, args: &[Value]) -> Value {
         let Some(source) = args.first().and_then(|v| v.as_str()) else {
-            return dart_error("vm.spawn: expected [source, options]");
+            return vm_error("vm.spawn: expected [source, options]");
         };
         let opts = args.get(1).cloned().unwrap_or(Value::Null);
         let get = |k: &str| opts.get(k).cloned().unwrap_or(Value::Null);
@@ -593,7 +612,7 @@ impl HookEnv {
         let want_scene = get("scene").as_bool().unwrap_or(false);
         let caller_scene = self.shared.effective_scene(self.vm);
         if want_scene && !caller_scene {
-            return dart_error("vm.spawn: caller lacks scene access to confer it");
+            return vm_error("vm.spawn: caller lacks scene access to confer it");
         }
 
         // The assigned node: every VM lives inside a node sandbox. Accept a
@@ -603,7 +622,7 @@ impl HookEnv {
             v => v.get("ref").and_then(|r| r.as_i64()).unwrap_or(0),
         };
         if node == 0 {
-            return dart_error("vm.spawn: a sandbox node must be assigned (options.node)");
+            return vm_error("vm.spawn: a sandbox node must be assigned (options.node)");
         }
         // Containment: the assigned node must lie inside the parent's own
         // sandbox — verified by the engine bridge, which knows the real tree.
@@ -616,7 +635,7 @@ impl HookEnv {
             Some(Value::Bool(true)) => {}
             Some(other) if other.as_bool() == Some(true) => {}
             _ => {
-                return dart_error(
+                return vm_error(
                     "vm.spawn: assigned node is not inside the parent's sandbox",
                 )
             }
@@ -632,14 +651,9 @@ impl HookEnv {
         self.shared.next_vm.set(vm_id + 1);
         let machine = format!("{}-c{}", self.shared.base, vm_id);
         let program = compose_godot_program(source);
-        let mut rt = match DartRuntime::from_dart(
-            machine.clone(),
-            &program,
-            DartCapabilitySet::full(),
-            meter,
-        ) {
+        let mut rt = match compile_guest(machine.clone(), &program, meter) {
             Ok(rt) => rt,
-            Err(e) => return dart_error(&format!("vm.spawn: child failed to compile: {e:?}")),
+            Err(e) => return vm_error(&format!("vm.spawn: child failed to compile: {e}")),
         };
         let child_env = HookEnv { shared: self.shared.clone(), vm: vm_id };
         rt.set_host_hook(Box::new(move |name, args| child_env.handle(name, args)));
@@ -649,7 +663,7 @@ impl HookEnv {
         let parent_machine = self.shared.machine_of(self.vm).unwrap_or_default();
         if !vm_api::adopt_vm(&parent_machine, &machine) {
             vm_api::destroy_vm(machine.clone());
-            return dart_error("vm.spawn: hierarchy adoption failed");
+            return vm_error("vm.spawn: hierarchy adoption failed");
         }
         if let Some(perms) = get("permissions").as_object() {
             for (k, v) in perms {
@@ -696,7 +710,7 @@ impl HookEnv {
 /// loop that applies deferred cross-VM work.
 pub struct VmManager {
     shared: Rc<Shared>,
-    rts: HashMap<u64, DartRuntime>,
+    rts: HashMap<u64, GuestRuntime>,
 }
 
 impl VmManager {
@@ -720,9 +734,8 @@ impl VmManager {
             (max_host_calls > 0).then_some(max_host_calls),
             (max_bytes_moved > 0).then_some(max_bytes_moved),
         );
-        let mut rt =
-            DartRuntime::from_dart(base_machine.clone(), &program, DartCapabilitySet::full(), meter)
-                .map_err(|e| format!("compile failed: {e:?}"))?;
+        let mut rt = compile_guest(base_machine.clone(), &program, meter)
+            .map_err(|e| format!("compile failed: {e}"))?;
 
         let shared = Rc::new(Shared {
             bridge: RefCell::new(None),
@@ -854,7 +867,7 @@ impl VmManager {
             let mut progressed = false;
 
             // 1. Boot children spawned during the last turn(s).
-            let boots: Vec<(u64, DartRuntime)> =
+            let boots: Vec<(u64, GuestRuntime)> =
                 self.shared.pending_boot.borrow_mut().drain(..).collect();
             for (vm, rt) in boots {
                 progressed = true;
@@ -1073,7 +1086,7 @@ impl VmManager {
     }
 
     /// Direct access to a VM's runtime (tests / embedders).
-    pub fn runtime_mut(&mut self, vm: u64) -> Option<&mut DartRuntime> {
+    pub fn runtime_mut(&mut self, vm: u64) -> Option<&mut GuestRuntime> {
         self.rts.get_mut(&vm)
     }
 

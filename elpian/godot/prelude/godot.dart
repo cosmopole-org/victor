@@ -1019,7 +1019,7 @@ class VmController {
 
 /// The multi-VM orchestration facade.
 class VMs {
-  /// Instantiate and boot a new child VM running [source] (a Dart program,
+  /// Instantiate and boot a new child VM running [source] (a guest program,
   /// with the full godot.dart prelude in scope), sandboxed to [node] — a node
   /// inside the caller's own sandbox that becomes the child's whole world.
   ///

@@ -42,8 +42,8 @@ void ElpianVM::_bind_methods() {
 
 	godot::ClassDB::bind_method(D_METHOD("set_script_path", "path"), &ElpianVM::set_script_path);
 	godot::ClassDB::bind_method(D_METHOD("get_script_path"), &ElpianVM::get_script_path);
-	godot::ClassDB::bind_method(D_METHOD("set_dart_source", "source"), &ElpianVM::set_dart_source);
-	godot::ClassDB::bind_method(D_METHOD("get_dart_source"), &ElpianVM::get_dart_source);
+	godot::ClassDB::bind_method(D_METHOD("set_guest_source", "source"), &ElpianVM::set_guest_source);
+	godot::ClassDB::bind_method(D_METHOD("get_guest_source"), &ElpianVM::get_guest_source);
 	godot::ClassDB::bind_method(D_METHOD("set_autostart", "value"), &ElpianVM::set_autostart);
 	godot::ClassDB::bind_method(D_METHOD("get_autostart"), &ElpianVM::get_autostart);
 	godot::ClassDB::bind_method(D_METHOD("set_prepend_prelude", "value"),
@@ -59,9 +59,9 @@ void ElpianVM::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "script_path",
 						 PROPERTY_HINT_FILE, "*.dart"),
 			"set_script_path", "get_script_path");
-	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dart_source",
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "guest_source",
 						 PROPERTY_HINT_MULTILINE_TEXT),
-			"set_dart_source", "get_dart_source");
+			"set_guest_source", "get_guest_source");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "prepend_prelude"), "set_prepend_prelude",
 			"get_prepend_prelude");
@@ -114,7 +114,7 @@ void ElpianVM::start() {
 	if (rt != nullptr) {
 		return;
 	}
-	String source = dart_source;
+	String source = guest_source;
 	if (!script_path.is_empty()) {
 		source = FileAccess::get_file_as_string(script_path);
 		if (source.is_empty()) {
@@ -123,7 +123,7 @@ void ElpianVM::start() {
 		}
 	}
 	if (source.is_empty()) {
-		fail("no Dart program: set script_path or dart_source");
+		fail("no guest program: set script_path or guest_source");
 		return;
 	}
 

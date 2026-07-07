@@ -33,11 +33,11 @@ typedef char *(*ElpianGodotHostFn)(void *user, const char *api_name, const char 
 /* Release a buffer returned by ElpianGodotHostFn (same allocator). */
 typedef void (*ElpianGodotHostFreeFn)(void *user, char *s);
 
-/* Create a runtime from Dart source. prepend_prelude != 0 composes the
- * godot.dart prelude ahead of the program. max_host_calls / max_bytes_moved
- * bound the resource meter (0 = unbounded). NULL on error — see
- * elpian_godot_last_error(). */
-ElpianGodotRuntime *elpian_godot_new(const char *dart_source, int prepend_prelude,
+/* Create a VM tree whose root runs guest_source. prepend_prelude != 0
+ * composes the godot.dart prelude ahead of the program. max_host_calls /
+ * max_bytes_moved bound the root's resource meter (0 = unbounded). NULL on
+ * error — see elpian_godot_last_error(). */
+ElpianGodotRuntime *elpian_godot_new(const char *guest_source, int prepend_prelude,
                                      uint64_t max_host_calls, uint64_t max_bytes_moved);
 
 /* Register the host callback servicing the guest's godot.* calls. */
