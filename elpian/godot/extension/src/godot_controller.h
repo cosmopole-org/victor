@@ -10,6 +10,9 @@
  *   {"singleton": name, "def": id}           bind any engine singleton
  *   {"tree": true, "def": id}                the SceneTree
  *   {"self": true, "def": id}                the hosting ElpianVM node
+ *     ("self"/"tree" may also replace "ref" in the action ops below to
+ *      address the hosting node / SceneTree directly, e.g. GD.mount's
+ *      {"self": true, "method": "add_child", "args": […]})
  *   {"load": path, "def": id}                load any resource
  *   {"ref", "method", "args"}                call any method (Object::callv)
  *   {"ref", "get"} / {"ref","set","value"}   any property

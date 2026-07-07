@@ -927,21 +927,33 @@ Variant GodotController::exec_op(const Dictionary &op) {
 		return register_object(obj);
 	}
 
+	/* "self"/"tree" address the hosting node / SceneTree. Without an action
+	 * key the op is a pure bind ({"self": true, "def": id} — GD.host()); with
+	 * one ({"self": true, "method": "add_child", …} — GD.mount) the addressing
+	 * only selects the target and the op must fall through to the action
+	 * dispatch below, not short-circuit into a bind that drops the action. */
+	Object *self_target = nullptr;
 	if (op.has("tree") || op.has("self")) {
 		Object *obj = op.has("self") ? (Object *)host_node
 									 : (host_node != nullptr ? (Object *)host_node->get_tree() : nullptr);
 		if (obj == nullptr) {
 			return dart_error("no hosting node / scene tree available");
 		}
-		const int64_t def = op.has("def") ? (int64_t)op["def"] : 0;
-		if (def != 0) {
-			Handle h;
-			h.object_id = obj->get_instance_id();
-			handles[def] = h;
-			reverse[obj->get_instance_id()] = def;
-			return def;
+		const bool has_action = op.has("connect") || op.has("disconnect") ||
+				op.has("method") || op.has("get") || op.has("set") ||
+				op.has("geti") || op.has("seti");
+		if (!has_action) {
+			const int64_t def = op.has("def") ? (int64_t)op["def"] : 0;
+			if (def != 0) {
+				Handle h;
+				h.object_id = obj->get_instance_id();
+				handles[def] = h;
+				reverse[obj->get_instance_id()] = def;
+				return def;
+			}
+			return register_object(obj);
 		}
-		return register_object(obj);
+		self_target = obj;
 	}
 
 	if (op.has("load")) {
@@ -1005,11 +1017,15 @@ Variant GodotController::exec_op(const Dictionary &op) {
 		return op_free(op);
 	}
 
-	/* Everything below addresses an existing object. */
-	String err;
-	Object *obj = resolve_op_ref(op, &err);
+	/* Everything below addresses an existing object: the self/tree target
+	 * resolved above, or a bridged handle named by "ref". */
+	Object *obj = self_target;
 	if (obj == nullptr) {
-		return dart_error(err);
+		String err;
+		obj = resolve_op_ref(op, &err);
+		if (obj == nullptr) {
+			return dart_error(err);
+		}
 	}
 
 	if (op.has("connect")) {
