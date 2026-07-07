@@ -1,0 +1,144 @@
+# Build the Elpian↔Godot demo for the web (Godot 4.3 + GDExtension compiled to
+# wasm via Emscripten, with the Elpian VM cross-compiled to
+# wasm32-unknown-emscripten) and deploy it to GitHub Pages.
+#
+# Pipeline: Rust staticlib (emscripten) -> godot-cpp (platform=web) -> the
+# extension .wasm side module -> headless Godot web export (dlink templates,
+# extensions_support=true) -> COI service-worker patch (GitHub Pages sends no
+# COOP/COEP headers, which threaded Godot web builds require) -> Pages.
+#
+# Requires GitHub Pages to be enabled for the repo with "GitHub Actions" as
+# the source (Settings -> Pages -> Build and deployment -> GitHub Actions).
+
+name: Web demo (GitHub Pages)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "elpian/**"
+      - ".github/workflows/web-demo-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  GODOT_RELEASE: "4.3-stable"
+  GODOT_TEMPLATE_DIR: "4.3.stable"
+  # Godot 4.3 official web templates are built with this Emscripten; the
+  # GDExtension side module must match.
+  EMSDK_VERSION: "3.1.64"
+  GODOT_CPP_BRANCH: "godot-4.3-stable"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: emsdk-cache
+
+      - name: Set up Rust (wasm32-unknown-emscripten)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-emscripten
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: elpian
+
+      - name: Install SCons
+        run: pip3 install scons
+
+      - name: Clone godot-cpp
+        run: |
+          git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
+            https://github.com/godotengine/godot-cpp \
+            elpian/godot/extension/godot-cpp
+
+      - name: Cache godot-cpp web build
+        uses: actions/cache@v4
+        with:
+          path: |
+            elpian/godot/extension/godot-cpp/bin
+            elpian/godot/extension/godot-cpp/gen
+            elpian/godot/extension/godot-cpp/src
+            elpian/godot/extension/.sconsign.dblite
+          key: godot-cpp-web-${{ env.GODOT_CPP_BRANCH }}-${{ env.EMSDK_VERSION }}-v1
+
+      - name: Build Elpian VM C-ABI library (emscripten)
+        working-directory: elpian
+        run: cargo build -p elpian-godot-capi --release --target wasm32-unknown-emscripten
+
+      - name: Build GDExtension (.wasm side module)
+        working-directory: elpian/godot/extension
+        run: |
+          scons platform=web target=template_release \
+            elpian_capi=../../target/wasm32-unknown-emscripten/release/libelpian_godot.a
+          ls -la ../project/bin/
+
+      # The headless editor loads the .gdextension during import/export, so the
+      # host (linux) library must exist too. SConstruct cargo-builds the native
+      # archive automatically when it is missing.
+      - name: Build GDExtension for the host platform
+        working-directory: elpian/godot/extension
+        run: scons platform=linux target=template_release
+
+      - name: Install Godot editor + export templates
+        run: |
+          curl -sSL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          curl -sSL -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}"
+          unzip -q templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/"
+
+      - name: Import project
+        run: godot --headless --path elpian/godot/project --import || true
+
+      - name: Export web build
+        run: |
+          mkdir -p elpian/godot/build/web
+          godot --headless --path elpian/godot/project --export-release "Web" \
+            "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html"
+          ls -la elpian/godot/build/web
+
+      - name: Patch in COI service worker (GitHub Pages lacks COOP/COEP headers)
+        working-directory: elpian/godot/build/web
+        run: |
+          curl -sSL -o coi-serviceworker.min.js \
+            "https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js"
+          sed -i 's#<head>#<head><script src="coi-serviceworker.min.js"></script>#' index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: elpian/godot/build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
