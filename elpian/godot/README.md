@@ -140,13 +140,16 @@ Two workflows at the repo root build the demo for the other platforms
 (`export_presets.cfg` carries the Web and Android presets):
 
 * `.github/workflows/web-demo-pages.yml` — cross-compiles the VM to
-  `wasm32-unknown-emscripten` (Emscripten pinned to 3.1.64 to match Godot
-  4.3's official web templates), builds the extension as a `.wasm` side
-  module (`scons platform=web`), exports the project headless with the dlink
-  templates (`variant/extensions_support=true`), patches in
-  `coi-serviceworker` (GitHub Pages sends no COOP/COEP headers, which
-  threaded Godot web builds need), and deploys to **GitHub Pages**. Enable
-  Pages with source "GitHub Actions" in the repo settings.
+  `wasm32-unknown-emscripten` (Rust pinned to 1.81.0 and Emscripten to
+  3.1.64: the emsdk must match Godot 4.3's official web templates, and newer
+  rustc emits wasm target features that emsdk's wasm-opt rejects), builds the
+  extension as a **non-threaded** `.wasm` side module (`scons platform=web
+  threads=no` — Rust's prebuilt emscripten std has no atomics, and nothreads
+  also removes the SharedArrayBuffer/COOP/COEP requirement GitHub Pages
+  cannot meet), exports headless with the nothreads dlink templates
+  (`variant/extensions_support=true`, `variant/thread_support=false`), and
+  deploys to **GitHub Pages**. Enable Pages with source "GitHub Actions" in
+  the repo settings.
 * `.github/workflows/android-apk.yml` — cross-compiles the VM to
   `aarch64-linux-android` (NDK clang as linker), builds the extension for
   arm64 (`scons platform=android`), installs the gradle build template
