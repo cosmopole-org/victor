@@ -10,9 +10,9 @@
 //!  ─────────────                        ───────────               ─────────
 //!  ElpianVM node ── elpian_godot_new ─▶ DartRuntime::from_dart ─▶ compile+load
 //!               ── elpian_godot_set_host ─▶ set_host_hook  (godot.* calls out)
-//!               ── elpian_godot_run ────▶ run()            (main() + pump)
-//!               ── elpian_godot_invoke ─▶ invoke_handler() (events/signals in)
-//!               ── elpian_godot_pump ───▶ pump_events()    (timers, per frame)
+//!               ── elpian_godot_run ────▶ run_realtime()   (main() + due drain)
+//!               ── elpian_godot_invoke ─▶ deliver_event()  (events/signals in)
+//!               ── elpian_godot_pump ───▶ pump_frame(dt)   (timers, per frame)
 //! ```
 //!
 //! The **host callback** is the load-bearing piece: every `askHost("godot.…")`
@@ -177,10 +177,17 @@ pub extern "C" fn elpian_godot_set_host(
 }
 
 /// Run the guest's `main()` and drain its event loop. 0 = ok.
+///
+/// Uses the real-time drain ([`DartRuntime::run_realtime`]): a `main()` that
+/// installs a `Timer.periodic` (or a long one-shot `Timer`) returns promptly
+/// instead of spinning the event loop forever — the timer fires later, once per
+/// frame, via [`elpian_godot_pump`]. This is what keeps a guest whose `main()`
+/// schedules periodic work from wedging the host's startup (e.g. Godot's
+/// `_ready`, blocking the first frame on the boot splash).
 #[no_mangle]
 pub extern "C" fn elpian_godot_run(rt: *mut ElpianGodotRuntime) -> c_int {
     let Some(rt) = (unsafe { rt.as_mut() }) else { return 1 };
-    match catch_unwind(AssertUnwindSafe(|| rt.rt.run())) {
+    match catch_unwind(AssertUnwindSafe(|| rt.rt.run_realtime())) {
         Ok(Ok(_)) => 0,
         Ok(Err(e)) => {
             set_error(&format!("run failed: {e:?}"));
@@ -213,7 +220,9 @@ pub extern "C" fn elpian_godot_invoke(
         _ => Value::Null,
     };
     let name = name.to_string();
-    match catch_unwind(AssertUnwindSafe(|| rt.rt.invoke_handler(&name, arg))) {
+    // Real-time delivery: drain only already-due work, so a guest that installed
+    // a `Timer.periodic` does not spin the event loop on every event delivered.
+    match catch_unwind(AssertUnwindSafe(|| rt.rt.deliver_event(&name, arg))) {
         Ok(()) => 0,
         Err(_) => {
             set_error("panic during elpian_godot_invoke");
@@ -222,11 +231,13 @@ pub extern "C" fn elpian_godot_invoke(
     }
 }
 
-/// Drain due timers/microtasks (call once per engine frame). 0 = ok.
+/// Advance the guest clock by `delta_ms` real milliseconds (the engine frame
+/// delta) and fire whatever timers/microtasks became due. Call once per engine
+/// frame. 0 = ok.
 #[no_mangle]
-pub extern "C" fn elpian_godot_pump(rt: *mut ElpianGodotRuntime) -> c_int {
+pub extern "C" fn elpian_godot_pump(rt: *mut ElpianGodotRuntime, delta_ms: u64) -> c_int {
     let Some(rt) = (unsafe { rt.as_mut() }) else { return 1 };
-    match catch_unwind(AssertUnwindSafe(|| rt.rt.pump_events())) {
+    match catch_unwind(AssertUnwindSafe(|| rt.rt.pump_frame(delta_ms))) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
             set_error(&format!("pump failed: {e:?}"));

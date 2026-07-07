@@ -427,7 +427,7 @@ void main() {
         let name = CString::new("__godotEvent").unwrap();
         let arg = CString::new(r#"["_process", 0.016]"#).unwrap();
         assert_eq!(elpian_godot_invoke(rt, name.as_ptr(), arg.as_ptr()), 0);
-        assert_eq!(elpian_godot_pump(rt), 0);
+        assert_eq!(elpian_godot_pump(rt, 16), 0);
 
         elpian_godot_free(rt);
     }

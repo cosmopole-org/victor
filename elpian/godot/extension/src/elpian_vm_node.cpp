@@ -173,7 +173,9 @@ void ElpianVM::_process(double delta) {
 	}
 	flush_callbacks(); /* bridged signals queued since last frame */
 	dispatch_event("_process", delta);
-	elpian_godot_pump(rt); /* guest Timers / Future continuations */
+	/* Advance the guest clock by the real frame delta so guest Timers / Future
+	 * continuations fire on elapsed time (delta is seconds; the VM clock is ms). */
+	elpian_godot_pump(rt, (uint64_t)(delta * 1000.0));
 	flush_callbacks();
 	drain_log();
 }
