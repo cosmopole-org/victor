@@ -154,7 +154,7 @@ jobs:
           GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
         run: |
           mkdir -p elpian/godot/build/android
-          godot --headless --path elpian/godot/project --export-release "Android" \
+          godot --headless --verbose --path elpian/godot/project --export-release "Android" \
             "$GITHUB_WORKSPACE/elpian/godot/build/android/elpian-godot-demo.apk"
           ls -la elpian/godot/build/android
 

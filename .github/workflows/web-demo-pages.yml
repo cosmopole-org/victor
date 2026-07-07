@@ -2,10 +2,12 @@
 # wasm via Emscripten, with the Elpian VM cross-compiled to
 # wasm32-unknown-emscripten) and deploy it to GitHub Pages.
 #
-# Pipeline: Rust staticlib (emscripten) -> godot-cpp (platform=web) -> the
-# extension .wasm side module -> headless Godot web export (dlink templates,
-# extensions_support=true) -> COI service-worker patch (GitHub Pages sends no
-# COOP/COEP headers, which threaded Godot web builds require) -> Pages.
+# Pipeline: Rust staticlib (emscripten) -> godot-cpp (platform=web,
+# threads=no) -> the extension .wasm side module -> headless Godot web export
+# (nothreads dlink templates, extensions_support=true) -> Pages. The
+# non-threaded variant avoids the SharedArrayBuffer/COOP/COEP requirement
+# GitHub Pages cannot meet, and matches Rust's prebuilt (atomics-free)
+# emscripten std.
 #
 # Requires GitHub Pages to be enabled for the repo with "GitHub Actions" as
 # the source (Settings -> Pages -> Build and deployment -> GitHub Actions).
@@ -51,9 +53,17 @@ jobs:
           version: ${{ env.EMSDK_VERSION }}
           actions-cache-folder: emsdk-cache
 
-      - name: Set up Rust (wasm32-unknown-emscripten)
-        uses: dtolnay/rust-toolchain@stable
+      # Pinned, not stable: current stable rustc emits wasm objects with LLVM
+      # target features (bulk-memory-opt, call-indirect-overlong) that emsdk
+      # 3.1.64's bundled wasm-opt does not understand ("Unknown option
+      # '--enable-bulk-memory-opt'"), and the emsdk itself is pinned by Godot
+      # 4.3's official web templates. Rust 1.81.0 is the contemporary
+      # toolchain: its wasm feature set matches this emsdk (verified locally
+      # with the exact emsdk 3.1.64 + 1.81.0 pairing).
+      - name: Set up Rust 1.81.0 (wasm32-unknown-emscripten)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.81.0"
           targets: wasm32-unknown-emscripten
 
       - name: Cache cargo
@@ -80,14 +90,27 @@ jobs:
             elpian/godot/extension/.sconsign.dblite
           key: godot-cpp-web-${{ env.GODOT_CPP_BRANCH }}-${{ env.EMSDK_VERSION }}-v1
 
+      # SIDE_MODULE=2: cargo also links the dependency crates' declared cdylib
+      # targets (unused byproducts — only the staticlib matters), and on 1.81
+      # emcc would otherwise link them as standalone executables and fail on a
+      # missing main(). Linking them as side modules makes those byproducts
+      # inert; the staticlib archive is unaffected.
       - name: Build Elpian VM C-ABI library (emscripten)
         working-directory: elpian
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS: "-C link-arg=-sSIDE_MODULE=2"
         run: cargo build -p elpian-godot-capi --release --target wasm32-unknown-emscripten
 
-      - name: Build GDExtension (.wasm side module)
+      # threads=no: Rust's prebuilt emscripten std lacks the atomics/bulk-memory
+      # features, so it cannot link into a --shared-memory (threaded) module.
+      # Godot 4.3 ships nothreads web templates for exactly this situation, and
+      # they also drop the SharedArrayBuffer/COOP/COEP requirement — which
+      # GitHub Pages cannot satisfy with headers anyway. The export preset sets
+      # variant/thread_support=false to match.
+      - name: Build GDExtension (.wasm side module, nothreads)
         working-directory: elpian/godot/extension
         run: |
-          scons platform=web target=template_release \
+          scons platform=web threads=no target=template_release \
             elpian_capi=../../target/wasm32-unknown-emscripten/release/libelpian_godot.a
           ls -la ../project/bin/
 
@@ -116,16 +139,12 @@ jobs:
       - name: Export web build
         run: |
           mkdir -p elpian/godot/build/web
-          godot --headless --path elpian/godot/project --export-release "Web" \
+          godot --headless --verbose --path elpian/godot/project --export-release "Web" \
             "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html"
           ls -la elpian/godot/build/web
 
-      - name: Patch in COI service worker (GitHub Pages lacks COOP/COEP headers)
-        working-directory: elpian/godot/build/web
-        run: |
-          curl -sSL -o coi-serviceworker.min.js \
-            "https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js"
-          sed -i 's#<head>#<head><script src="coi-serviceworker.min.js"></script>#' index.html
+      # No COOP/COEP shim needed: the nothreads build never touches
+      # SharedArrayBuffer, so plain GitHub Pages hosting is sufficient.
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
