@@ -24,6 +24,7 @@ struct MockGodot {
     connections: Vec<(i64, String, i64)>, // (object, signal, cbId)
     loads: Vec<String>,
     ops_seen: Vec<Value>,
+    self_actions: Vec<Value>, // ops addressing the host node / tree with an action
 }
 
 #[derive(Default, Clone)]
@@ -46,9 +47,19 @@ impl MockGodot {
             return json!(id);
         }
         if op.get("tree").is_some() || op.get("self").is_some() {
-            let id = op.get("def").and_then(|v| v.as_i64()).unwrap_or(0);
-            self.objects.insert(id, MockObj { class: "SceneTree".into(), props: HashMap::new() });
-            return json!(id);
+            // Mirror the C++ dispatcher: "self"/"tree" with an action key only
+            // selects the target — the action below must still execute. A bare
+            // bind op registers the handle and returns it.
+            let has_action = ["connect", "disconnect", "method", "get", "set", "geti", "seti"]
+                .iter()
+                .any(|k| op.get(*k).is_some());
+            if !has_action {
+                let id = op.get("def").and_then(|v| v.as_i64()).unwrap_or(0);
+                self.objects
+                    .insert(id, MockObj { class: "SceneTree".into(), props: HashMap::new() });
+                return json!(id);
+            }
+            self.self_actions.push(op.clone());
         }
         if let Some(path) = op.get("load").and_then(|v| v.as_str()) {
             let id = op.get("def").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -350,6 +361,34 @@ void main() {
     );
     rt.run().unwrap(); // run() drains the event loop, so the timer fires
     assert_eq!(rt.emitted(), &[json!("timer fired")]);
+}
+
+#[test]
+fn mount_targets_the_host_node_with_add_child() {
+    // Regression: {"self": true, "method": "add_child", …} (GD.mount) must be
+    // an add_child CALL on the hosting node, not a bare self-bind that drops
+    // the action — the dropped mount left every demo scene node orphaned and
+    // the exported game showing nothing but the clear color.
+    let (mut rt, mock) = boot(
+        r#"
+void main() {
+  var spinner = GD.create("Polygon2D");
+  GD.mount(spinner);
+}
+"#,
+    );
+    rt.run().unwrap();
+    let m = mock.lock().unwrap();
+    let mount = m
+        .self_actions
+        .iter()
+        .find(|op| op.get("method").and_then(|v| v.as_str()) == Some("add_child"))
+        .expect("GD.mount must issue add_child addressed to the hosting node");
+    assert_eq!(
+        mount["args"][0]["ref"].as_i64(),
+        Some(1),
+        "add_child must receive the mounted node's handle"
+    );
 }
 
 #[test]

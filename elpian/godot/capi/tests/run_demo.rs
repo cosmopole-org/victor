@@ -22,11 +22,22 @@ use serde_json::{json, Value};
 struct Mock {
     next_handle: i64,
     ops: usize,
+    mounts: usize,
 }
 
 impl Mock {
     fn exec(&mut self, op: &Value) -> Value {
         self.ops += 1;
+        // An action op executes even when addressed via "self"/"tree" — mirror
+        // the C++ dispatcher, where GD.mount is add_child on the hosting node.
+        if op.get("method").is_some() {
+            if op.get("self").is_some()
+                && op.get("method").and_then(|v| v.as_str()) == Some("add_child")
+            {
+                self.mounts += 1;
+            }
+            return Value::Null;
+        }
         let def = op.get("def").and_then(|v| v.as_i64());
         if op.get("new").is_some()
             || op.get("singleton").is_some()
@@ -93,16 +104,23 @@ fn run_shipped_demo_end_to_end() {
             rt.run_realtime().map_err(|e| format!("run_realtime() ERROR: {e:?}"))?;
             rt.deliver_event("__godotEvent", json!(["_ready", Value::Null]));
 
-            let ops_after_main = mock.lock().unwrap().ops;
+            let (ops_after_main, mounts_after_main) = {
+                let m = mock.lock().unwrap();
+                (m.ops, m.mounts)
+            };
 
             // Drive ~3 seconds of 16ms frames; the 2000ms periodic must fire.
             for i in 0..200 {
                 rt.deliver_event("__godotEvent", json!(["_process", 0.016]));
                 rt.pump_frame(16).map_err(|e| format!("pump_frame() ERROR at frame {i}: {e:?}"))?;
             }
-            let total_ops = mock.lock().unwrap().ops;
+            let (total_ops, total_mounts) = {
+                let m = mock.lock().unwrap();
+                (m.ops, m.mounts)
+            };
             Ok::<String, String>(format!(
-                "OK ops_after_main={ops_after_main} total_ops={total_ops}"
+                "OK ops_after_main={ops_after_main} total_ops={total_ops} \
+                 mounts_after_main={mounts_after_main} total_mounts={total_mounts}"
             ))
         }));
         let _ = tx.send(res.unwrap_or_else(|_| Err("PANIC".into())).unwrap_or_else(|e| e));
@@ -125,6 +143,18 @@ fn run_shipped_demo_end_to_end() {
                 total > after_main,
                 "periodic Timer never fired over 3s of frames \
                  (after_main={after_main}, total={total})"
+            );
+            // main() mounts the GUI CanvasLayer, the floor, and the spinner;
+            // each 2s periodic tick mounts another spawned box.
+            let mounts_after_main = nums["mounts_after_main"];
+            let total_mounts = nums["total_mounts"];
+            assert!(
+                mounts_after_main >= 3,
+                "demo main() must mount its scene roots (saw {mounts_after_main})"
+            );
+            assert!(
+                total_mounts > mounts_after_main,
+                "periodic spawnBox never mounted a box over 3s of frames"
             );
         }
         Err(_) => panic!(
