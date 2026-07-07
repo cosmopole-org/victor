@@ -51,7 +51,7 @@ hand.
 | `capi/` | `elpian-godot-capi` — Rust crate exposing the VM as a **C ABI** (`elpian_godot_new/run/invoke/pump/…`) with a host-callback seam for `godot.*` calls. Workspace member; `cargo test` runs the protocol e2e suite. |
 | `prelude/godot.dart` | The guest library (`GD`, `GObj`, value types, `GTimer`, marshaling). Embedded into the Rust crate via `include_str!` and composed ahead of the user program. |
 | `extension/` | The C++ GDExtension: `GodotController` (reflective op interpreter + Variant↔JSON marshaling + handle table), `ElpianCallable` (Dart-closure-backed `Callable`), `ElpianVM` (the scene node), build files (CMake + SCons). |
-| `project/` | A ready Godot 4.3+ project: `main.tscn` hosts an `ElpianVM` node running `scripts/main.dart` (GUI + physics + signals + input + servers demo). |
+| `project/` | A ready Godot 4.3+ project: `main.tscn` hosts an `ElpianVM` node running `scripts/main.dart` — a full 3D demo (sky/fog/glow environment, PBR materials, shadowed lights, physics, GUI overlay, input) that downloads a glTF model at runtime (`HTTPRequest` → `GLTFDocument`, all by name). Portrait, stretch-to-fit. |
 
 ## The op protocol (one seam, everything reachable)
 
