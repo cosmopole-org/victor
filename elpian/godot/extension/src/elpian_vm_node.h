@@ -55,8 +55,8 @@ public:
 	/* properties ---------------------------------------------------------- */
 	void set_script_path(const godot::String &p) { script_path = p; }
 	godot::String get_script_path() const { return script_path; }
-	void set_dart_source(const godot::String &s) { dart_source = s; }
-	godot::String get_dart_source() const { return dart_source; }
+	void set_guest_source(const godot::String &s) { guest_source = s; }
+	godot::String get_guest_source() const { return guest_source; }
 	void set_autostart(bool v) { autostart = v; }
 	bool get_autostart() const { return autostart; }
 	void set_prepend_prelude(bool v) { prepend_prelude = v; }
@@ -73,7 +73,7 @@ protected:
 private:
 	/* res:// path of the .dart program (preferred), or inline source below. */
 	godot::String script_path;
-	godot::String dart_source;
+	godot::String guest_source;
 	bool autostart = true;
 	bool prepend_prelude = true;
 	/* Resource-governor bounds handed to the VM's meter (0 = unbounded). */

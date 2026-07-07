@@ -187,7 +187,7 @@ Dart closures passed as arguments to any Godot API taking a `Callable`
 ## The ElpianVM node
 
 Drop an `ElpianVM` node in any scene, set `script_path` to a `.dart` file
-(or paste into `dart_source`), and it: composes the prelude, compiles
+(or paste into `guest_source`), and it: composes the prelude, compiles
 Dart→AST→bytecode, runs `main()`, then per frame flushes bridged signals →
 dispatches `_process` → pumps VM timers/futures. `_ready`,
 `_physics_process`, `_input`, `_unhandled_input`, `_notification` and

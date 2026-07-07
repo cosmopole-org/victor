@@ -119,23 +119,23 @@ fn c_str<'a>(p: *const c_char) -> Option<&'a str> {
     unsafe { CStr::from_ptr(p) }.to_str().ok()
 }
 
-/// Create a VM tree whose root runs `dart_source`. `prepend_prelude != 0`
+/// Create a VM tree whose root runs `guest_source`. `prepend_prelude != 0`
 /// composes the `godot.dart` prelude ahead of the program (what the ElpianVM
 /// node does). `max_host_calls` / `max_bytes_moved` bound the root's resource
 /// meter (0 = unbounded). Returns NULL on a compile/limit error — read
 /// `elpian_godot_last_error()`.
 #[no_mangle]
 pub extern "C" fn elpian_godot_new(
-    dart_source: *const c_char,
+    guest_source: *const c_char,
     prepend_prelude: c_int,
     max_host_calls: u64,
     max_bytes_moved: u64,
 ) -> *mut ElpianGodotRuntime {
     let result = catch_unwind(|| {
-        let source = match c_str(dart_source) {
+        let source = match c_str(guest_source) {
             Some(s) => s,
             None => {
-                set_error("dart_source is null or not UTF-8");
+                set_error("guest_source is null or not UTF-8");
                 return std::ptr::null_mut();
             }
         };
