@@ -43,7 +43,12 @@ targets the Dart VM cannot serve dynamically.
   usage; effective permissions are the AND of the ancestor path) and each
   spawned VM sandboxed to an assigned node subtree. `godot/capi/` is the
   Rust C-ABI crate the extension links; `godot/prelude/godot.dart` is the
-  guest library (`GD`, `VMs`, `VmController`). See `godot/README.md`.
+  guest library (`GD`, `VMs`, `VmController`). The project's main scene is
+  **VICTOR: CITY STRIKE — a complete third-person shooter written entirely
+  in Dart on the VM** (city generation, animated characters, hitscan combat,
+  wave AI, HUD/menus, touch controls, synthesized audio), verified headless
+  end-to-end by `godot/capi/tests/run_tps.rs`; see `godot/GAME_DESIGN.md`.
+  See `godot/README.md`.
 
 The crates build and test on native **and** `wasm32-unknown-unknown`:
 
