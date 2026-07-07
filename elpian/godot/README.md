@@ -134,6 +134,33 @@ The library lands in `project/bin/` where `elpian_godot.gdextension` expects
 it. `-DGODOT_CPP_PATH=…` / `elpian_capi=…` override the default checkout and
 archive locations.
 
+### CI: web (GitHub Pages) and Android APK
+
+Two workflows at the repo root build the demo for the other platforms
+(`export_presets.cfg` carries the Web and Android presets):
+
+* `.github/workflows/web-demo-pages.yml` — cross-compiles the VM to
+  `wasm32-unknown-emscripten` (Emscripten pinned to 3.1.64 to match Godot
+  4.3's official web templates), builds the extension as a `.wasm` side
+  module (`scons platform=web`), exports the project headless with the dlink
+  templates (`variant/extensions_support=true`), patches in
+  `coi-serviceworker` (GitHub Pages sends no COOP/COEP headers, which
+  threaded Godot web builds need), and deploys to **GitHub Pages**. Enable
+  Pages with source "GitHub Actions" in the repo settings.
+* `.github/workflows/android-apk.yml` — cross-compiles the VM to
+  `aarch64-linux-android` (NDK clang as linker), builds the extension for
+  arm64 (`scons platform=android`), installs the gradle build template
+  (required for GDExtension APKs), exports headless with a CI-generated
+  keystore, uploads the APK as an artifact, and **commits
+  `elpian-godot-demo.apk` to the repository root** on the triggering branch
+  (`[skip ci]` guards the loop). Swap the keystore env vars for repository
+  secrets to sign for a store.
+
+Both trigger on pushes to `main`/`master` touching `elpian/**` and support
+manual `workflow_dispatch` from any branch. Each also builds the linux
+extension so the headless editor can load the `.gdextension` during
+import/export.
+
 ## What is verified today
 
 * `cargo test -p elpian-godot-capi` — **11 e2e tests** running real guest

@@ -12,3 +12,9 @@ project/bin/*.dll
 
 # Godot editor cache
 project/.godot/
+
+# Gradle build template installed by the Android CI export
+project/android/
+
+# CI export outputs
+build/

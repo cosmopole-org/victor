@@ -1,0 +1,179 @@
+# Build the Elpian↔Godot demo as an Android APK (arm64) and commit the final
+# APK to the repository root as elpian-godot-demo.apk.
+#
+# Pipeline: Rust staticlib (aarch64-linux-android, linked with the NDK clang)
+# -> godot-cpp (platform=android) -> the extension .so -> headless Godot
+# gradle export (GDExtension on Android requires the gradle build) -> commit
+# the APK back to the branch that triggered the run ([skip ci] guards the
+# loop). The APK is signed with a CI-generated debug-grade keystore — replace
+# the keystore env vars with repository secrets for store-grade signing.
+
+name: Android APK
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "elpian/**"
+      - ".github/workflows/android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_RELEASE: "4.3-stable"
+  GODOT_TEMPLATE_DIR: "4.3.stable"
+  GODOT_CPP_BRANCH: "godot-4.3-stable"
+  # godot-cpp 4.3's android toolchain default; installed via sdkmanager below.
+  NDK_VERSION: "23.2.8568313"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
+
+      - name: Set up Rust (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: elpian
+
+      - name: Install SCons
+        run: pip3 install scons
+
+      - name: Clone godot-cpp
+        run: |
+          git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
+            https://github.com/godotengine/godot-cpp \
+            elpian/godot/extension/godot-cpp
+
+      - name: Cache godot-cpp android build
+        uses: actions/cache@v4
+        with:
+          path: |
+            elpian/godot/extension/godot-cpp/bin
+            elpian/godot/extension/godot-cpp/gen
+            elpian/godot/extension/godot-cpp/src
+            elpian/godot/extension/.sconsign.dblite
+          key: godot-cpp-android-${{ env.GODOT_CPP_BRANCH }}-${{ env.NDK_VERSION }}-v1
+
+      - name: Build Elpian VM C-ABI library (aarch64-linux-android)
+        working-directory: elpian
+        run: |
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          cargo build -p elpian-godot-capi --release --target aarch64-linux-android
+
+      - name: Build GDExtension (.so, arm64)
+        working-directory: elpian/godot/extension
+        run: |
+          scons platform=android target=template_release arch=arm64 \
+            elpian_capi=../../target/aarch64-linux-android/release/libelpian_godot.a
+          ls -la ../project/bin/
+
+      # The headless editor loads the .gdextension during import/export, so the
+      # host (linux) library must exist too. SConstruct cargo-builds the native
+      # archive automatically when it is missing.
+      - name: Build GDExtension for the host platform
+        working-directory: elpian/godot/extension
+        run: scons platform=linux target=template_release
+
+      - name: Install Godot editor + export templates
+        run: |
+          curl -sSL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          curl -sSL -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}"
+          unzip -q templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/"
+
+      - name: Install the Android gradle build template into the project
+        run: |
+          mkdir -p elpian/godot/project/android/build
+          unzip -o -q "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/android_source.zip" \
+            -d elpian/godot/project/android/build
+          touch elpian/godot/project/android/build/.gdignore
+          echo "${GODOT_TEMPLATE_DIR}" > elpian/godot/project/android/.build_version
+
+      - name: Generate CI keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/ci.keystore" \
+            -alias androidci -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Elpian CI,O=cosmopole,C=US"
+
+      - name: Point Godot at the Android SDK / JDK
+        run: |
+          mkdir -p "$HOME/.config/godot"
+          for f in editor_settings-4.tres editor_settings-4.3.tres; do
+            cat > "$HOME/.config/godot/$f" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          EOF
+          done
+
+      - name: Import project
+        run: godot --headless --path elpian/godot/project --import || true
+
+      - name: Export APK
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/ci.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androidci
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: ${{ runner.temp }}/ci.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: androidci
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
+        run: |
+          mkdir -p elpian/godot/build/android
+          godot --headless --path elpian/godot/project --export-release "Android" \
+            "$GITHUB_WORKSPACE/elpian/godot/build/android/elpian-godot-demo.apk"
+          ls -la elpian/godot/build/android
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elpian-godot-demo-apk
+          path: elpian/godot/build/android/elpian-godot-demo.apk
+
+      - name: Commit APK to repository root
+        run: |
+          cp elpian/godot/build/android/elpian-godot-demo.apk ./elpian-godot-demo.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add elpian-godot-demo.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged; nothing to commit."
+            exit 0
+          fi
+          git commit -m "ci: update Android demo APK [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
