@@ -63,27 +63,67 @@ use std::rc::Rc;
 // The VM-management system itself is language-agnostic: guests are opaque
 // programs behind neutral names. The one language-specific thing about it is
 // which front-end compiles guest source, and that is confined to
-// [`compile_guest`] — swap the front-end there and nothing else changes.
+// [`GuestLang`] + [`compile_guest`] — swap the front-end there and nothing
+// else changes.
 use dart::governance::{DartCapabilitySet as GuestCapabilitySet, ResourceMeter};
 use dart::runtime::DartRuntime as GuestRuntime;
 
+/// Which front-end compiles a guest program. Both lower to the same Elpian
+/// AST → bytecode and speak the identical bridge protocol; the language only
+/// decides the parser and which prelude (`godot.dart` / `godot.js`) is
+/// composed ahead of the user source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestLang {
+    Dart,
+    Js,
+}
+
+impl GuestLang {
+    /// Parse a guest-supplied language name ("js"/"javascript" or
+    /// "dart"; anything else defaults to `fallback`).
+    fn from_name(name: &str, fallback: GuestLang) -> GuestLang {
+        match name.to_ascii_lowercase().as_str() {
+            "js" | "javascript" => GuestLang::Js,
+            "dart" => GuestLang::Dart,
+            _ => fallback,
+        }
+    }
+}
+
 /// Compile a guest program (source text, with the godot prelude already
-/// composed) into a fresh runtime. The single seam to the language front-end;
+/// composed) into a fresh runtime. The single seam to the language front-ends;
 /// everything above it deals in guests, machines and VMs only.
 fn compile_guest(
     machine_id: String,
     program: &str,
+    lang: GuestLang,
     meter: ResourceMeter,
 ) -> Result<GuestRuntime, String> {
-    GuestRuntime::from_dart(machine_id, program, GuestCapabilitySet::full(), meter)
-        .map_err(|e| format!("{e:?}"))
+    match lang {
+        GuestLang::Dart => {
+            GuestRuntime::from_dart(machine_id, program, GuestCapabilitySet::full(), meter)
+                .map_err(|e| format!("{e:?}"))
+        }
+        GuestLang::Js => {
+            GuestRuntime::from_js(machine_id, program, GuestCapabilitySet::full(), meter)
+                .map_err(|e| format!("{e:?}"))
+        }
+    }
 }
 use elpian_vm::api as vm_api;
 use elpian_vm::sdk::capabilities::Capability;
 use elpian_vm::sdk::limits::{ResourceLimits, ResourceUsage};
 use serde_json::{json, Map, Value};
 
-use crate::compose_godot_program;
+use crate::{compose_godot_program, compose_godot_program_js};
+
+/// Compose the language's prelude ahead of a user program.
+fn compose_for(lang: GuestLang, user_source: &str) -> String {
+    match lang {
+        GuestLang::Dart => compose_godot_program(user_source),
+        GuestLang::Js => compose_godot_program_js(user_source),
+    }
+}
 
 /// The engine-bridge seam: `(api_name, args) -> reply`. The C ABI wraps the
 /// GDExtension's callback into this; tests plug a mock engine in directly.
@@ -109,6 +149,9 @@ fn decode_cb(global: i64) -> (u64, i64) {
 struct VmMeta {
     machine_id: String,
     label: String,
+    /// The front-end this VM's program was compiled with. Children inherit it
+    /// unless their spawn options say otherwise (`{"lang": "js"|"dart"}`).
+    lang: GuestLang,
     parent: Option<u64>,
     children: Vec<u64>,
     /// The Godot node handle this VM is sandboxed to (0 for the root VM: the
@@ -647,11 +690,24 @@ impl HookEnv {
             get("maxBytesMoved").as_u64().filter(|n| *n > 0),
         );
 
+        // The child's front-end: the parent's language unless overridden.
+        let parent_lang = self
+            .shared
+            .meta
+            .borrow()
+            .get(&self.vm)
+            .map(|m| m.lang)
+            .unwrap_or(GuestLang::Dart);
+        let lang = match get("lang").as_str() {
+            Some(name) => GuestLang::from_name(name, parent_lang),
+            None => parent_lang,
+        };
+
         let vm_id = self.shared.next_vm.get();
         self.shared.next_vm.set(vm_id + 1);
         let machine = format!("{}-c{}", self.shared.base, vm_id);
-        let program = compose_godot_program(source);
-        let mut rt = match compile_guest(machine.clone(), &program, meter) {
+        let program = compose_for(lang, source);
+        let mut rt = match compile_guest(machine.clone(), &program, lang, meter) {
             Ok(rt) => rt,
             Err(e) => return vm_error(&format!("vm.spawn: child failed to compile: {e}")),
         };
@@ -683,6 +739,7 @@ impl HookEnv {
                 VmMeta {
                     machine_id: machine.clone(),
                     label: label.clone(),
+                    lang,
                     parent: Some(self.vm),
                     children: Vec::new(),
                     node_handle: node,
@@ -725,8 +782,30 @@ impl VmManager {
         max_host_calls: u64,
         max_bytes_moved: u64,
     ) -> Result<Self, String> {
+        Self::new_root_lang(
+            base_machine,
+            user_source,
+            GuestLang::Dart,
+            prepend,
+            max_host_calls,
+            max_bytes_moved,
+        )
+    }
+
+    /// [`new_root`](Self::new_root) with an explicit guest language: the root
+    /// VM runs `user_source` compiled by that language's front-end, with the
+    /// matching prelude (`godot.dart` / `godot.js`) composed ahead unless
+    /// `prepend` is false. Children spawned by the tree inherit the language.
+    pub fn new_root_lang(
+        base_machine: String,
+        user_source: &str,
+        lang: GuestLang,
+        prepend: bool,
+        max_host_calls: u64,
+        max_bytes_moved: u64,
+    ) -> Result<Self, String> {
         let program = if prepend {
-            compose_godot_program(user_source)
+            compose_for(lang, user_source)
         } else {
             user_source.to_string()
         };
@@ -734,7 +813,7 @@ impl VmManager {
             (max_host_calls > 0).then_some(max_host_calls),
             (max_bytes_moved > 0).then_some(max_bytes_moved),
         );
-        let mut rt = compile_guest(base_machine.clone(), &program, meter)
+        let mut rt = compile_guest(base_machine.clone(), &program, lang, meter)
             .map_err(|e| format!("compile failed: {e}"))?;
 
         let shared = Rc::new(Shared {
@@ -753,6 +832,7 @@ impl VmManager {
             VmMeta {
                 machine_id: base_machine.clone(),
                 label: "root".to_string(),
+                lang,
                 parent: None,
                 children: Vec::new(),
                 node_handle: 0,

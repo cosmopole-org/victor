@@ -44,6 +44,8 @@ void ElpianVM::_bind_methods() {
 	godot::ClassDB::bind_method(D_METHOD("get_script_path"), &ElpianVM::get_script_path);
 	godot::ClassDB::bind_method(D_METHOD("set_guest_source", "source"), &ElpianVM::set_guest_source);
 	godot::ClassDB::bind_method(D_METHOD("get_guest_source"), &ElpianVM::get_guest_source);
+	godot::ClassDB::bind_method(D_METHOD("set_language", "language"), &ElpianVM::set_language);
+	godot::ClassDB::bind_method(D_METHOD("get_language"), &ElpianVM::get_language);
 	godot::ClassDB::bind_method(D_METHOD("set_autostart", "value"), &ElpianVM::set_autostart);
 	godot::ClassDB::bind_method(D_METHOD("get_autostart"), &ElpianVM::get_autostart);
 	godot::ClassDB::bind_method(D_METHOD("set_prepend_prelude", "value"),
@@ -57,11 +59,14 @@ void ElpianVM::_bind_methods() {
 	godot::ClassDB::bind_method(D_METHOD("get_max_bytes_moved"), &ElpianVM::get_max_bytes_moved);
 
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "script_path",
-						 PROPERTY_HINT_FILE, "*.dart"),
+						 PROPERTY_HINT_FILE, "*.dart,*.js"),
 			"set_script_path", "get_script_path");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "guest_source",
 						 PROPERTY_HINT_MULTILINE_TEXT),
 			"set_guest_source", "get_guest_source");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "language",
+						 PROPERTY_HINT_ENUM, "auto,dart,js"),
+			"set_language", "get_language");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "autostart"), "set_autostart", "get_autostart");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "prepend_prelude"), "set_prepend_prelude",
 			"get_prepend_prelude");
@@ -118,7 +123,7 @@ void ElpianVM::start() {
 	if (!script_path.is_empty()) {
 		source = FileAccess::get_file_as_string(script_path);
 		if (source.is_empty()) {
-			fail(String("could not read Dart program at ") + script_path);
+			fail(String("could not read guest program at ") + script_path);
 			return;
 		}
 	}
@@ -127,9 +132,17 @@ void ElpianVM::start() {
 		return;
 	}
 
+	/* Resolve the guest language: an explicit setting wins; "auto" goes by the
+	 * script extension (.js -> JavaScript, anything else Dart). */
+	String lang = language.to_lower();
+	if (lang != "js" && lang != "dart") {
+		lang = script_path.to_lower().ends_with(".js") ? String("js") : String("dart");
+	}
+
 	controller = std::make_unique<GodotController>(this);
 	const CharString utf8 = source.utf8();
-	rt = elpian_godot_new(utf8.get_data(), prepend_prelude ? 1 : 0,
+	const CharString lang_utf8 = lang.utf8();
+	rt = elpian_godot_new_lang(utf8.get_data(), lang_utf8.get_data(), prepend_prelude ? 1 : 0,
 			(uint64_t)max_host_calls, (uint64_t)max_bytes_moved);
 	if (rt == nullptr) {
 		fail(String("Elpian VM boot failed: ") + String::utf8(elpian_godot_last_error()));

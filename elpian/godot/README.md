@@ -56,10 +56,12 @@ hand.
 
 | Path | What it is |
 |---|---|
-| `capi/` | `elpian-godot-capi` — Rust crate exposing the VM as a **C ABI** (`elpian_godot_new/run/invoke/pump/…`) with a host-callback seam for `godot.*` calls. Workspace member; `cargo test` runs the protocol e2e suite. |
-| `prelude/godot.dart` | The guest library (`GD`, `GObj`, value types, `GTimer`, marshaling). Embedded into the Rust crate via `include_str!` and composed ahead of the user program. |
+| `capi/` | `elpian-godot-capi` — Rust crate exposing the VM as a **C ABI** (`elpian_godot_new/new_lang/run/invoke/pump/…`) with a host-callback seam for `godot.*` calls. Workspace member; `cargo test` runs the protocol e2e suite. |
+| `prelude/godot.dart` | The Dart guest library (`GD`, `GObj`, value types, `GTimer`, marshaling). Embedded into the Rust crate via `include_str!` and composed ahead of the user program. |
+| `prelude/godot.js` | The **JavaScript** guest library — the JS twin of `godot.dart`: same wire protocol, same `GD`/`GObj`/`VMs`/`GTimer` surface, compiled by `js2elpian`. Composed ahead of a JS guest program. |
+| `prelude/ui.js` | **VUI — the Victor UI kit**: a full widget toolkit in pure JavaScript built on Godot `Control` nodes over the bridge (see "JavaScript guests & the Victor UI kit" below). Composed ahead of a JS guest that has an `import 'ui.js';` line. |
 | `extension/` | The C++ GDExtension: `GodotController` (reflective op interpreter + Variant↔JSON marshaling + handle table), `ElpianCallable` (Dart-closure-backed `Callable`), `ElpianVM` (the scene node), build files (CMake + SCons). |
-| `project/` | A ready Godot 4.3+ project with two scenes. **`tps.tscn` (the main scene) is VICTOR: CITY STRIKE — a complete third-person shooter written entirely in Dart on the VM** (`scripts/tps_main.dart`): a procedurally assembled city built from CC0 GLB kits (`project/assets/tps/`), an animated player character with an over-the-shoulder SpringArm camera, two hitscan weapons with pooled tracers/impacts/damage numbers, three enemy archetypes with a chase/attack/line-of-sight AI, waves, pickups, a full HUD + menus, touch controls, and fully synthesized embedded audio — see [`GAME_DESIGN.md`](GAME_DESIGN.md). `main.tscn` remains the **multi-VM showcase**: the root VM builds the environment/camera/dashboard, then spawns a tree of sandboxed child VMs into the same scene (a spinning-ring VM that spawns its own grandchild, a physics VM that also probes the sandbox and reports the denials, and a rogue VM whose deliberate hang is trapped by its budget), with live per-VM metering and pause/resume/terminate controls. |
+| `project/` | A ready Godot 4.3+ project with three scenes. **`ui_demo.tscn` is the Victor UI showcase — a complete phone-style app written 100% in JavaScript** (`scripts/ui_demo.js`): a full-screen 2D page (CanvasLayer) embedded in a 3D scene (the root is a Node3D world that keeps existing, unshown, underneath), locked to portrait, content-scaled from a 720×1280 design space, with a dashboard, a widget gallery and a System page where the VM introspects itself and spawns a sandboxed JavaScript child VM. **`tps.tscn` (the main scene) is VICTOR: CITY STRIKE — a complete third-person shooter written entirely in Dart on the VM** (`scripts/tps_main.dart`): a procedurally assembled city built from CC0 GLB kits (`project/assets/tps/`), an animated player character with an over-the-shoulder SpringArm camera, two hitscan weapons with pooled tracers/impacts/damage numbers, three enemy archetypes with a chase/attack/line-of-sight AI, waves, pickups, a full HUD + menus, touch controls, and fully synthesized embedded audio — see [`GAME_DESIGN.md`](GAME_DESIGN.md). `main.tscn` remains the **multi-VM showcase**: the root VM builds the environment/camera/dashboard, then spawns a tree of sandboxed child VMs into the same scene (a spinning-ring VM that spawns its own grandchild, a physics VM that also probes the sandbox and reports the denials, and a rogue VM whose deliberate hang is trapped by its budget), with live per-VM metering and pause/resume/terminate controls. |
 
 ## The op protocol (one seam, everything reachable)
 
@@ -93,6 +95,46 @@ positive, host-assigned negative; RefCounted objects are kept alive by the
 handle table, plain Objects are liveness-checked through ObjectID on every
 resolve). Op failures resume the guest as `{"__dart_error__": …}`, which the
 front-end lowers back into a Dart `throw`.
+
+## JavaScript guests & the Victor UI kit (ui.js)
+
+The bridge is **language-front-end agnostic**: a guest program can be Dart
+(compiled by `dart2elpian`) or **JavaScript** (compiled by `js2elpian`) — both
+lower to the same Elpian AST/bytecode and speak the identical op protocol.
+`prelude/godot.js` is the JS twin of `godot.dart`: the same `GD`/`GObj`
+reflective surface, the same value-type vocabulary, `GTimer` on the VM event
+loop and the `VMs` multi-VM facade. Set the `ElpianVM` node's `language`
+property (`auto`/`dart`/`js` — `auto` goes by the script extension), or call
+`elpian_godot_new_lang(source, "js", …)` from an embedder. Spawned children
+inherit their parent's language (`VMs.spawn(src, node, {lang: 'js'})`
+overrides), so Dart and JS VMs can share one scene, one sandbox model, one
+budget hierarchy.
+
+On top of the JS prelude sits **VUI, the Victor UI kit** (`prelude/ui.js`) — a
+complete widget toolkit written in pure JavaScript, pulled in by an
+`import 'ui.js';` line. Every widget is a *retained* Godot `Control` created
+reflectively over the bridge (no wrappers, no image assets — even the slider
+grabber is a code-generated radial-gradient texture), styled from a themable
+token set (`VUI.themeDark()` / `themeLight()`), and animated with real engine
+Tweens:
+
+* **layout** — `column`, `row`, `grid`, `scroll`, `margin`, `center`,
+  `panel`, `spacer`, `divider`, `expand`;
+* **content** — `text`/`heading`/`title`/`caption`, `icon`, `badge`, `chip`,
+  `avatar`, `card`, `stat`, `listTile`;
+* **controls** — `button` (filled/tonal/outline/ghost/danger), `iconButton`,
+  `field`, `toggle` (hand-built animated switch), `checkbox`, `slider`,
+  `progress`;
+* **structure** — `appBar`, `tabs`, `bottomNav`, `dialog`, `sheet`, `toast`;
+* **root** — `VUI.app({design: [720, 1280], portrait: true})` creates a
+  CanvasLayer + full-rect page **inside any scene, 2D or 3D** (a CanvasLayer
+  composites over the viewport, so the UI covers the screen while a Node3D
+  world keeps existing underneath), content-scales the design space to the
+  real screen, and locks portrait — `DisplayServer.screen_set_orientation` on
+  handheld devices, a portrait-sized window on desktop.
+
+`ui_demo.tscn` + `scripts/ui_demo.js` is the shipped showcase (see Layout),
+and `capi/tests/run_ui_demo.rs` plays it end to end on a real VM.
 
 ## The multi-VM tree (VmManager)
 
@@ -211,6 +253,8 @@ cmake --build build -j
 godot --path ../project
 # …or the multi-VM showcase scene:
 godot --path ../project main.tscn
+# …or the Victor UI kit showcase (JavaScript guest, portrait):
+godot --path ../project ui_demo.tscn
 ```
 
 The library lands in `project/bin/` where `elpian_godot.gdextension` expects
@@ -266,6 +310,19 @@ import/export.
   usage/state introspection), and that the shipped multi-VM demo **runs** —
   boots the 5-VM tree, keeps the physics child's periodic mounting bodies,
   and traps the rogue's hang — under the real frame-loop drive.
+* `tests/js_guest.rs` — **the JavaScript guest surface**: `godot.js` compiled
+  by js2elpian on real VMs against a mock engine — protocol round-trips and
+  value-shape marshaling, batching, signal → JS-closure dispatch, `GTimer` on
+  the pumped event loop, a JS parent spawning a JS child (language inheritance
+  through `vm.spawn`) with parent↔child messaging, and the `import 'ui.js'`
+  composition seam building real Control-node op streams.
+* `tests/run_ui_demo.rs` — **the shipped Victor UI demo runs end to end**: the
+  full phone-style app boots against a mock engine (portrait + content-scale
+  ops verified), every wired button is pressed through the real
+  `__godotDispatch` path (nav walk, tap counter, toggles/checkboxes, dialogs,
+  sheets, toasts), the slider/field value signals reach their closures, the
+  JavaScript child VM spawns → messages the UI → is terminated, and ~4s of
+  frames drive the dashboard's periodic refresh — all under a watchdog.
 * `tests/run_tps.rs` — **the shipped TPS game plays a full mission headless**
   on the real VM against a mock engine: boot + city build (≥60 mounted
   branches), menu frames, mission start, wave 1 deployment, hostiles closing

@@ -1,0 +1,13 @@
+[gd_scene format=3 uid="uid://elpianuidemo01"]
+
+[node name="World3D" type="Node3D"]
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 8)
+current = true
+
+[node name="ElpianVM" type="ElpianVM" parent="."]
+script_path = "res://scripts/ui_demo.js"
+language = "js"
+autostart = true
+prepend_prelude = true
