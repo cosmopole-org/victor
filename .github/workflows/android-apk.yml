@@ -1,6 +1,12 @@
 # Build the Elpian↔Godot demo as an Android APK (arm64) and commit the final
 # APK to the repository root as elpian-godot-demo.apk.
 #
+# The exported scene is currently the VICTOR UI KIT demo (ui_demo.tscn — the
+# full-JavaScript widget kit, portrait): the "Point the export at the Victor
+# UI demo" step rewrites the project's main scene, viewport size and
+# orientation for this build only. Drop that step to go back to exporting the
+# TPS game.
+#
 # Pipeline: Rust staticlib (aarch64-linux-android, linked with the NDK clang)
 # -> godot-cpp (platform=android) -> the extension .so -> headless Godot
 # gradle export (GDExtension on Android requires the gradle build) -> commit
@@ -140,6 +146,21 @@ jobs:
           export/android/android_sdk_path = "$ANDROID_HOME"
           EOF
           done
+
+      # CI-only override: export the Victor UI kit demo instead of the TPS
+      # game — the JavaScript UI showcase is a portrait app, so the manifest
+      # orientation and the boot viewport flip to portrait too. The runtime
+      # (VUI.app) re-asserts orientation + content scale on boot; this makes
+      # the APK launch portrait from the very first frame.
+      - name: Point the export at the Victor UI demo
+        run: |
+          sed -i \
+            -e 's|^run/main_scene=.*|run/main_scene="res://ui_demo.tscn"|' \
+            -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
+            -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
+            -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \
+            elpian/godot/project/project.godot
+          grep -E "run/main_scene|viewport_|orientation" elpian/godot/project/project.godot
 
       - name: Import project
         run: godot --headless --path elpian/godot/project --import || true
