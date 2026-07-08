@@ -40,12 +40,22 @@ use serde_json::{json, Value};
 
 pub mod manager;
 
-pub use manager::{BridgeFn, VmManager, ROOT_VM};
+pub use manager::{BridgeFn, GuestLang, VmManager, ROOT_VM};
 
 /// The `godot.dart` guest prelude, compiled ahead of the user program so the
 /// `GD`/`GObj` reflective surface, the `VMs` orchestration facade and the
 /// marshaling vocabulary are in scope.
 pub const GODOT_PRELUDE: &str = include_str!("../../prelude/godot.dart");
+
+/// The `godot.js` guest prelude — the JavaScript twin of `godot.dart`. Same
+/// wire protocol, same `GD`/`GObj`/`VMs` surface, expressed in the Elpian-JS
+/// subset the `js2elpian` front-end compiles.
+pub const GODOT_PRELUDE_JS: &str = include_str!("../../prelude/godot.js");
+
+/// The Victor UI kit (`ui.js`) — a full widget toolkit in JavaScript built on
+/// Godot `Control` nodes over the bridge. Composed ahead of a JS guest when
+/// its source imports it (`import 'ui.js';`).
+pub const GODOT_UI_KIT_JS: &str = include_str!("../../prelude/ui.js");
 
 /// Service a guest host call: `(user, api_name, args_json)` → reply JSON.
 /// Return NULL (or leave unregistered) to decline — the guest then sees `null`.
@@ -112,6 +122,32 @@ pub fn compose_godot_program(user_source: &str) -> String {
     format!("{}\n\n{}", strip(GODOT_PRELUDE), strip(user_source))
 }
 
+/// Compose the final **JavaScript** guest program: the `godot.js` prelude —
+/// plus the Victor UI kit when the user source imports it (`import 'ui.js';`)
+/// — then the user source, with `import …;` directives stripped from all
+/// parts (the front-end has no module system; the prelude *is* the import).
+pub fn compose_godot_program_js(user_source: &str) -> String {
+    let strip = |src: &str| -> String {
+        src.lines()
+            .map(|l| if l.trim_start().starts_with("import ") { "" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let wants_ui_kit = user_source
+        .lines()
+        .any(|l| l.trim_start().starts_with("import ") && l.contains("ui.js"));
+    if wants_ui_kit {
+        format!(
+            "{}\n\n{}\n\n{}",
+            strip(GODOT_PRELUDE_JS),
+            strip(GODOT_UI_KIT_JS),
+            strip(user_source)
+        )
+    } else {
+        format!("{}\n\n{}", strip(GODOT_PRELUDE_JS), strip(user_source))
+    }
+}
+
 fn c_str<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
@@ -131,6 +167,39 @@ pub extern "C" fn elpian_godot_new(
     max_host_calls: u64,
     max_bytes_moved: u64,
 ) -> *mut ElpianGodotRuntime {
+    new_runtime(guest_source, GuestLang::Dart, prepend_prelude, max_host_calls, max_bytes_moved)
+}
+
+/// [`elpian_godot_new`] with an explicit guest language: `language` is
+/// `"js"`/`"javascript"` for a JavaScript root program (the `godot.js`
+/// prelude — plus the `ui.js` UI kit when the program imports it — is
+/// composed ahead), anything else (including NULL) means Dart. Children the
+/// tree spawns inherit the root's language unless their spawn options say
+/// otherwise.
+#[no_mangle]
+pub extern "C" fn elpian_godot_new_lang(
+    guest_source: *const c_char,
+    language: *const c_char,
+    prepend_prelude: c_int,
+    max_host_calls: u64,
+    max_bytes_moved: u64,
+) -> *mut ElpianGodotRuntime {
+    let lang = match c_str(language) {
+        Some(name) if name.eq_ignore_ascii_case("js") || name.eq_ignore_ascii_case("javascript") => {
+            GuestLang::Js
+        }
+        _ => GuestLang::Dart,
+    };
+    new_runtime(guest_source, lang, prepend_prelude, max_host_calls, max_bytes_moved)
+}
+
+fn new_runtime(
+    guest_source: *const c_char,
+    lang: GuestLang,
+    prepend_prelude: c_int,
+    max_host_calls: u64,
+    max_bytes_moved: u64,
+) -> *mut ElpianGodotRuntime {
     let result = catch_unwind(|| {
         let source = match c_str(guest_source) {
             Some(s) => s,
@@ -140,9 +209,10 @@ pub extern "C" fn elpian_godot_new(
             }
         };
         let machine = format!("godot-vm-{}", NEXT_MACHINE.fetch_add(1, Ordering::Relaxed));
-        match VmManager::new_root(
+        match VmManager::new_root_lang(
             machine,
             source,
+            lang,
             prepend_prelude != 0,
             max_host_calls,
             max_bytes_moved,

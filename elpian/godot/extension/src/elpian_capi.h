@@ -40,6 +40,15 @@ typedef void (*ElpianGodotHostFreeFn)(void *user, char *s);
 ElpianGodotRuntime *elpian_godot_new(const char *guest_source, int prepend_prelude,
                                      uint64_t max_host_calls, uint64_t max_bytes_moved);
 
+/* elpian_godot_new with an explicit guest language: "js" / "javascript" for a
+ * JavaScript root program (the godot.js prelude — plus the ui.js UI kit when
+ * the program imports it — is composed ahead); anything else (including NULL)
+ * means Dart. Children the tree spawns inherit the root's language unless
+ * their spawn options say otherwise ({"lang": "js"|"dart"}). */
+ElpianGodotRuntime *elpian_godot_new_lang(const char *guest_source, const char *language,
+                                          int prepend_prelude, uint64_t max_host_calls,
+                                          uint64_t max_bytes_moved);
+
 /* Register the host callback servicing the guest's godot.* calls. */
 void elpian_godot_set_host(ElpianGodotRuntime *rt, ElpianGodotHostFn host_fn,
                            ElpianGodotHostFreeFn free_fn, void *user);
