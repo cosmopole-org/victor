@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@victor/react",
+    "baseUrl": ".",
+    "checkJs": false,
+    "allowJs": true
+  },
+  "include": ["app", "components", "lib", "types"],
+  "exclude": ["node_modules", "build"]
+}
