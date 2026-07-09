@@ -147,15 +147,17 @@ jobs:
           EOF
           done
 
-      # CI-only override: export the Victor UI kit demo instead of the TPS
-      # game — the JavaScript UI showcase is a portrait app, so the manifest
-      # orientation and the boot viewport flip to portrait too. The runtime
-      # (VUI.app) re-asserts orientation + content scale on boot; this makes
-      # the APK launch portrait from the very first frame.
-      - name: Point the export at the Victor UI demo
+      # CI-only override: export the Victor × React demo instead of the TPS
+      # game — a Next.js-style React app (react.js runtime driving VUI) that is
+      # a portrait app, so the manifest orientation and the boot viewport flip
+      # to portrait too. The runtime (VictorClient.mountApp → VUI.app) re-asserts
+      # orientation + content scale on boot; this makes the APK launch portrait
+      # from the very first frame. Swap res://react_demo.tscn back to
+      # res://ui_demo.tscn to ship the widget-kit showcase instead.
+      - name: Point the export at the Victor React demo
         run: |
           sed -i \
-            -e 's|^run/main_scene=.*|run/main_scene="res://ui_demo.tscn"|' \
+            -e 's|^run/main_scene=.*|run/main_scene="res://react_demo.tscn"|' \
             -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
             -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
             -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \
