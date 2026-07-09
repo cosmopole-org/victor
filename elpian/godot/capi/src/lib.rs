@@ -57,6 +57,15 @@ pub const GODOT_PRELUDE_JS: &str = include_str!("../../prelude/godot.js");
 /// its source imports it (`import 'ui.js';`).
 pub const GODOT_UI_KIT_JS: &str = include_str!("../../prelude/ui.js");
 
+/// VReact (`react.js`) — a React-compatible runtime (element factory, the full
+/// hook surface, and a keyed reconciler that mutates retained Godot nodes)
+/// whose host config targets the VUI kit. Composed ahead of a JS guest when its
+/// source imports it (`import 'react.js';`); because it builds on VUI, importing
+/// it implies the UI kit even if `ui.js` is not imported explicitly. This is
+/// what a compiled Next.js-on-Victor program (see `templates/victor-nextjs/`)
+/// runs on.
+pub const GODOT_REACT_JS: &str = include_str!("../../prelude/react.js");
+
 /// Service a guest host call: `(user, api_name, args_json)` → reply JSON.
 /// Return NULL (or leave unregistered) to decline — the guest then sees `null`.
 /// The returned buffer is released via the paired [`ElpianGodotHostFreeFn`].
@@ -123,9 +132,12 @@ pub fn compose_godot_program(user_source: &str) -> String {
 }
 
 /// Compose the final **JavaScript** guest program: the `godot.js` prelude —
-/// plus the Victor UI kit when the user source imports it (`import 'ui.js';`)
-/// — then the user source, with `import …;` directives stripped from all
-/// parts (the front-end has no module system; the prelude *is* the import).
+/// plus the Victor UI kit (`ui.js`) and the VReact runtime (`react.js`) when
+/// the user source imports them — then the user source, with `import …;`
+/// directives stripped from all parts (the front-end has no module system; the
+/// prelude *is* the import). VReact depends on VUI, so an `import 'react.js';`
+/// pulls in the UI kit as well, in the required order godot.js → ui.js →
+/// react.js → program.
 pub fn compose_godot_program_js(user_source: &str) -> String {
     let strip = |src: &str| -> String {
         src.lines()
@@ -133,19 +145,24 @@ pub fn compose_godot_program_js(user_source: &str) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let wants_ui_kit = user_source
-        .lines()
-        .any(|l| l.trim_start().starts_with("import ") && l.contains("ui.js"));
+    let imports = |needle: &str| -> bool {
+        user_source
+            .lines()
+            .any(|l| l.trim_start().starts_with("import ") && l.contains(needle))
+    };
+    let wants_react = imports("react.js");
+    // react.js is built on VUI, so it implies the UI kit.
+    let wants_ui_kit = wants_react || imports("ui.js");
+
+    let mut parts: Vec<String> = vec![strip(GODOT_PRELUDE_JS)];
     if wants_ui_kit {
-        format!(
-            "{}\n\n{}\n\n{}",
-            strip(GODOT_PRELUDE_JS),
-            strip(GODOT_UI_KIT_JS),
-            strip(user_source)
-        )
-    } else {
-        format!("{}\n\n{}", strip(GODOT_PRELUDE_JS), strip(user_source))
+        parts.push(strip(GODOT_UI_KIT_JS));
     }
+    if wants_react {
+        parts.push(strip(GODOT_REACT_JS));
+    }
+    parts.push(strip(user_source));
+    parts.join("\n\n")
 }
 
 fn c_str<'a>(p: *const c_char) -> Option<&'a str> {

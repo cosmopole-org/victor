@@ -1,0 +1,17 @@
+{
+  "name": "victor-nextjs-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Next.js-style React app that runs on the Victor engine (Elpian VM + Godot) instead of a browser.",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "watch": "node tools/build.mjs --watch",
+    "clean": "rm -rf build"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/plugin-transform-react-jsx": "^7.23.0",
+    "@babel/preset-typescript": "^7.23.0"
+  }
+}
