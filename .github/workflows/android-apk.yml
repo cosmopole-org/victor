@@ -147,17 +147,19 @@ jobs:
           EOF
           done
 
-      # CI-only override: export the Victor × React demo instead of the TPS
-      # game — a Next.js-style React app (react.js runtime driving VUI) that is
-      # a portrait app, so the manifest orientation and the boot viewport flip
-      # to portrait too. The runtime (VictorClient.mountApp → VUI.app) re-asserts
-      # orientation + content scale on boot; this makes the APK launch portrait
-      # from the very first frame. Swap res://react_demo.tscn back to
-      # res://ui_demo.tscn to ship the widget-kit showcase instead.
-      - name: Point the export at the Victor React demo
+      # CI-only override: export the Victor × React MIXED 2D+3D demo instead of
+      # the TPS game — a React app (react.js runtime driving VUI + the G3 3D
+      # layer) that embeds a live Godot 3D scene (camera, light, rotating cubes)
+      # inside a 2D UI, animated with useFrame. It is a portrait app, so the
+      # manifest orientation and the boot viewport flip to portrait too; the
+      # runtime (VictorClient.mountApp → VUI.app) re-asserts orientation +
+      # content scale on boot so the APK launches portrait from the first frame.
+      # Swap res://react_3d_demo.tscn for res://react_demo.tscn (pure 2D) or
+      # res://ui_demo.tscn (the widget-kit showcase) to ship a different demo.
+      - name: Point the export at the Victor React 2D+3D demo
         run: |
           sed -i \
-            -e 's|^run/main_scene=.*|run/main_scene="res://react_demo.tscn"|' \
+            -e 's|^run/main_scene=.*|run/main_scene="res://react_3d_demo.tscn"|' \
             -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
             -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
             -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \

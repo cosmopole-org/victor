@@ -15,6 +15,9 @@ function NavBar() {
       <Link href="/todos" active={router.path == "/todos"}>
         Todos
       </Link>
+      <Link href="/scene" active={router.path == "/scene"}>
+        3D
+      </Link>
     </row>
   );
 }

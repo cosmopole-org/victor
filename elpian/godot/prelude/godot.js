@@ -1241,3 +1241,239 @@ class GTimer {
     return askHost("dart:async/Timer.cancel", [this.id]);
   }
 }
+
+// ---------------------------------------------------------------------------
+// G3 — a small 3D convenience layer over the reflective bridge.
+// ---------------------------------------------------------------------------
+// Everything G3 builds is a plain Godot node/resource created with GD.create;
+// it is sugar, not a new capability (a raw guest can do all of this by hand).
+// It exists so hand-written JS guests AND the VReact 3D host drivers share one
+// correct vocabulary for meshes, materials, lights, cameras and — crucially —
+// the 2D<->3D viewport bridge (SubViewportContainer + SubViewport) that lets a
+// 3D world live inside a 2D Control UI. All names/properties match Godot 4.
+
+// Read a numeric option with a default.
+function __g3num(v, d) {
+  if (__isType(v, "num")) {
+    return v;
+  }
+  return d;
+}
+
+// Coerce an option into a Vector3: a [x,y,z] list, a scalar (uniform), a
+// Vector3, or a default (dx,dy,dz).
+function __g3vec(v, dx, dy, dz) {
+  if (v == null) {
+    return new Vector3(dx, dy, dz);
+  }
+  if (__isType(v, "Vector3")) {
+    return v;
+  }
+  if (__isType(v, "num")) {
+    return new Vector3(v, v, v);
+  }
+  if (__isType(v, "List")) {
+    let x = v.length > 0 ? v[0] : dx;
+    let y = v.length > 1 ? v[1] : dy;
+    let z = v.length > 2 ? v[2] : dz;
+    return new Vector3(x, y, z);
+  }
+  return new Vector3(dx, dy, dz);
+}
+
+
+// G3 is an object namespace (not a class) so its methods can call each other by
+// name — `G3.mesh` composes `G3.primitive`/`G3.material`/`G3.setTransform`, the
+// same sibling-dispatch pattern VUI uses. (Class *static* methods cannot call
+// one another in this subset.)
+var G3 = {};
+
+// A StandardMaterial3D from { color, metallic, roughness, emission,
+// emissionEnergy, transparency }.
+G3.material = (o) => {
+  o = o ?? {};
+  let m = GD.create("StandardMaterial3D");
+  let col = o.color;
+  if (col == null) {
+    col = new Color(0.8, 0.82, 0.9, 1.0);
+  }
+  m.set("albedo_color", col);
+  if (o.metallic != null) {
+    m.set("metallic", GFloat(o.metallic));
+  }
+  if (o.roughness != null) {
+    m.set("roughness", GFloat(o.roughness));
+  }
+  if (o.emission != null) {
+    m.set("emission_enabled", true);
+    m.set("emission", o.emission);
+    if (o.emissionEnergy != null) {
+      m.set("emission_energy_multiplier", GFloat(o.emissionEnergy));
+    }
+  }
+  if (o.transparency == true) {
+    m.set("transparency", GInt(1)); // BaseMaterial3D.TRANSPARENCY_ALPHA
+  }
+  return m;
+};
+
+// A primitive mesh RESOURCE (BoxMesh/SphereMesh/…) from a shape name + dims.
+G3.primitive = (shape, o) => {
+  o = o ?? {};
+  let mesh = null;
+  if (shape == "sphere") {
+    mesh = GD.create("SphereMesh");
+    let r = __g3num(o.radius, 0.5);
+    mesh.set("radius", GFloat(r));
+    mesh.set("height", GFloat(__g3num(o.height, r * 2.0)));
+  } else if (shape == "cylinder") {
+    mesh = GD.create("CylinderMesh");
+    let r = __g3num(o.radius, 0.5);
+    mesh.set("top_radius", GFloat(__g3num(o.topRadius, r)));
+    mesh.set("bottom_radius", GFloat(__g3num(o.bottomRadius, r)));
+    mesh.set("height", GFloat(__g3num(o.height, 1.0)));
+  } else if (shape == "capsule") {
+    mesh = GD.create("CapsuleMesh");
+    mesh.set("radius", GFloat(__g3num(o.radius, 0.4)));
+    mesh.set("height", GFloat(__g3num(o.height, 1.4)));
+  } else if (shape == "plane") {
+    mesh = GD.create("PlaneMesh");
+    mesh.set("size", new Vector2(__g3num(o.width, 2.0), __g3num(o.depth, 2.0)));
+  } else if (shape == "prism") {
+    mesh = GD.create("PrismMesh");
+    mesh.set("size", __g3vec(o.size, 1.0, 1.0, 1.0));
+  } else if (shape == "torus") {
+    mesh = GD.create("TorusMesh");
+    mesh.set("inner_radius", GFloat(__g3num(o.innerRadius, 0.3)));
+    mesh.set("outer_radius", GFloat(__g3num(o.outerRadius, 0.6)));
+  } else {
+    mesh = GD.create("BoxMesh");
+    mesh.set("size", __g3vec(o.size, 1.0, 1.0, 1.0));
+  }
+  return mesh;
+};
+
+// A MeshInstance3D with a primitive mesh + material + transform.
+G3.mesh = (shape, o) => {
+  o = o ?? {};
+  let mi = GD.create("MeshInstance3D");
+  let prim = G3.primitive(shape, o);
+  let mat = o.material;
+  if (mat == null) {
+    mat = G3.material(o);
+  }
+  prim.set("material", mat);
+  mi.set("mesh", prim);
+  G3.setTransform(mi, o);
+  return mi;
+};
+
+// A bare Node3D (a 3D group) with an optional transform.
+G3.node = (o) => {
+  let n = GD.create("Node3D");
+  G3.setTransform(n, o);
+  return n;
+};
+
+G3.camera = (o) => {
+  o = o ?? {};
+  let c = GD.create("Camera3D");
+  if (o.fov != null) {
+    c.set("fov", GFloat(o.fov));
+  }
+  if (o.current != false) {
+    c.set("current", true);
+  }
+  G3.setTransform(c, o);
+  return c;
+};
+
+G3.dirLight = (o) => {
+  o = o ?? {};
+  let l = GD.create("DirectionalLight3D");
+  l.set("light_color", o.color ?? new Color(1.0, 0.98, 0.92, 1.0));
+  l.set("light_energy", GFloat(__g3num(o.energy, 1.0)));
+  if (o.shadow == true) {
+    l.set("shadow_enabled", true);
+  }
+  G3.setTransform(l, o);
+  return l;
+};
+
+G3.omniLight = (o) => {
+  o = o ?? {};
+  let l = GD.create("OmniLight3D");
+  l.set("light_color", o.color ?? new Color(1.0, 1.0, 1.0, 1.0));
+  l.set("light_energy", GFloat(__g3num(o.energy, 1.0)));
+  if (o.range != null) {
+    l.set("omni_range", GFloat(o.range));
+  }
+  G3.setTransform(l, o);
+  return l;
+};
+
+G3.spotLight = (o) => {
+  o = o ?? {};
+  let l = GD.create("SpotLight3D");
+  l.set("light_color", o.color ?? new Color(1.0, 1.0, 1.0, 1.0));
+  l.set("light_energy", GFloat(__g3num(o.energy, 1.0)));
+  if (o.range != null) {
+    l.set("spot_range", GFloat(o.range));
+  }
+  if (o.angle != null) {
+    l.set("spot_angle", GFloat(o.angle));
+  }
+  G3.setTransform(l, o);
+  return l;
+};
+
+// A WorldEnvironment + Environment (color background + ambient light) so a 3D
+// scene is lit and framed even before you add explicit lights.
+G3.environment = (o) => {
+  o = o ?? {};
+  let we = GD.create("WorldEnvironment");
+  let env = GD.create("Environment");
+  env.set("background_mode", GD.constant("Environment.BG_COLOR"));
+  env.set("background_color", o.bg ?? new Color(0.05, 0.06, 0.09, 1.0));
+  env.set("ambient_light_source", GD.constant("Environment.AMBIENT_SOURCE_COLOR"));
+  env.set("ambient_light_color", o.ambient ?? new Color(0.5, 0.55, 0.7, 1.0));
+  env.set("ambient_light_energy", GFloat(__g3num(o.ambientEnergy, 0.6)));
+  we.set("environment", env);
+  return we;
+};
+
+// The 2D<->3D bridge: a SubViewportContainer (a Control you place in the UI)
+// wrapping a SubViewport (where 3D nodes live). Returns { container, viewport }.
+G3.viewport = (o) => {
+  o = o ?? {};
+  let vpc = GD.create("SubViewportContainer");
+  vpc.set("stretch", true);
+  let vp = GD.create("SubViewport");
+  vp.set("own_world_3d", true);
+  if (o.transparent == true) {
+    vp.set("transparent_bg", true);
+  }
+  vp.set("render_target_update_mode", GD.constant("SubViewport.UPDATE_ALWAYS"));
+  if (o.msaa == true) {
+    vp.set("msaa_3d", GInt(2)); // Viewport.MSAA_4X
+  }
+  vpc.call("add_child", [vp]);
+  return { container: vpc, viewport: vp };
+};
+
+// Apply { position, rotation(deg), scale, visible } to any Node3D.
+G3.setTransform = (node, o) => {
+  o = o ?? {};
+  if (o.position != null) {
+    node.set("position", __g3vec(o.position, 0.0, 0.0, 0.0));
+  }
+  if (o.rotation != null) {
+    node.set("rotation_degrees", __g3vec(o.rotation, 0.0, 0.0, 0.0));
+  }
+  if (o.scale != null) {
+    node.set("scale", __g3vec(o.scale, 1.0, 1.0, 1.0));
+  }
+  if (o.visible != null) {
+    node.set("visible", o.visible == true);
+  }
+};

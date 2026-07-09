@@ -70,7 +70,25 @@ React's host config here targets Godot `Control` nodes instead of the DOM:
 - Capitalised primitives: `View`, `Row`, `Column`, `Stack`, `Scroll`, `Center`,
   `Panel`, `Card`, `Grid`, `Text`, `Heading`, `Caption`, `Icon`, `Button`,
   `TextInput`, `Image`, `Progress`, `Slider`, `Switch`, `Checkbox`, `Divider`,
-  `Spacer`.
+  `Spacer` — and 3D: `Scene3D`, `Node3D`, `Mesh`, `Box`, `Sphere`, `Cylinder`,
+  `Capsule`, `Plane3D`, `Torus`, `Camera3D`, `DirectionalLight`, `OmniLight`,
+  `SpotLight`, `Environment3D`, `StaticBody3D`, `Area3D`, `CollisionShape3D`.
+- `useFrame(delta => …)` — a per-frame callback (react-three-fiber idiom) fanned
+  out from a single `GD.onProcess`, always calling the latest closure via a ref.
+
+## Mixed 2D + 3D
+
+Victor renders with Godot, so 3D is first-class. VReact adds a `Node3D`-family of
+host drivers plus the `<scene3d>` element — a `SubViewportContainer` + `SubViewport`
+(built by `G3.viewport` in `godot.js`) that embeds a real 3D world inside the 2D
+Control tree. Inside a `<scene3d>` you place `<camera3d>`, lights, an
+`<environment>`, meshes (`<box>`, `<sphere>`, `<plane3d>`, …) and `<node3d>`
+groups; transforms are props (`position`, `rotation` in degrees, `scale`,
+`visible`), materials are props (`color`, `emission`, `metallic`, `roughness`).
+Refs on 3D elements yield the live Godot node (`GObj`) to drive imperatively in
+`useFrame`. `<node type="AnyGodotClass" />` is a reflective escape hatch to any
+engine class the named tags don't cover. The 3D vocabulary lives in the `G3`
+namespace in `godot.js`, so raw JS guests (no React) get the same helpers.
 
 ## Documented subset caveats
 

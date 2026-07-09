@@ -33,6 +33,7 @@ declare module "react" {
   export function useTransition(): [boolean, (cb: () => void) => void];
   export function useDeferredValue<T>(value: T): T;
   export function useDebugValue(value: any): void;
+  export function useFrame(cb: (delta: number) => void): void;
 
   export interface Context<T> {
     Provider: FC<{ value: T; children?: any }>;
@@ -87,6 +88,28 @@ declare module "@victor/react" {
   export const Checkbox: FC<{ checked?: boolean; onChange?: (on: boolean) => void; children?: any }>;
   export const Divider: FC<{ thickness?: number }>;
   export const Spacer: FC<{}>;
+
+  // 3D primitives.
+  type Vec3 = [number, number, number] | number;
+  type Xform = { position?: Vec3; rotation?: Vec3; scale?: Vec3; visible?: boolean; ref?: any; children?: any };
+  type MeshProps = Xform & { shape?: string; size?: Vec3; radius?: number; height?: number; width?: number; depth?: number; color?: any; emission?: any; emissionEnergy?: number; metallic?: number; roughness?: number };
+  export const Scene3D: FC<{ height?: number; transparent?: boolean; msaa?: boolean; grow?: boolean; children?: any }>;
+  export const Node3D: FC<Xform>;
+  export const Mesh: FC<MeshProps>;
+  export const Box: FC<MeshProps>;
+  export const Sphere: FC<MeshProps>;
+  export const Cylinder: FC<MeshProps>;
+  export const Capsule: FC<MeshProps>;
+  export const Plane3D: FC<MeshProps>;
+  export const Torus: FC<MeshProps>;
+  export const Camera3D: FC<Xform & { fov?: number; current?: boolean }>;
+  export const DirectionalLight: FC<Xform & { color?: any; energy?: number; shadow?: boolean }>;
+  export const OmniLight: FC<Xform & { color?: any; energy?: number; range?: number }>;
+  export const SpotLight: FC<Xform & { color?: any; energy?: number; range?: number; angle?: number }>;
+  export const Environment3D: FC<{ bg?: any; ambient?: any; ambientEnergy?: number }>;
+  export const StaticBody3D: FC<Xform>;
+  export const Area3D: FC<Xform>;
+  export const CollisionShape3D: FC<Xform & { shape?: string; radius?: number; height?: number; width?: number; depth?: number }>;
 
   // Victor extras.
   export const Victor: {
