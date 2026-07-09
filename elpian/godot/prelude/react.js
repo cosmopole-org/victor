@@ -430,6 +430,48 @@ function useDebugValue(v) {
   // no-op (devtools hook)
 }
 
+// useFrame(cb) — run cb(deltaSeconds) every rendered frame, the react-three-
+// fiber idiom for imperative animation (rotate a mesh via its ref, step a
+// simulation, …). A single GD.onProcess handler fans out to every registered
+// callback; the callback always reads the latest closure through a ref, so it
+// never goes stale across renders. Registration is cleaned up on unmount.
+var __vrFrameCbs = [];
+var __vrFrameInstalled = false;
+
+function __vrInstallFrame() {
+  if (__vrFrameInstalled) {
+    return;
+  }
+  __vrFrameInstalled = true;
+  GD.onProcess((d) => {
+    let cbs = __vrFrameCbs;
+    for (let i = 0; i < cbs.length; i++) {
+      cbs[i](d);
+    }
+  });
+}
+
+function useFrame(cb) {
+  let ref = useRef(cb);
+  ref.current = cb;
+  useEffect(() => {
+    __vrInstallFrame();
+    let wrapper = (d) => {
+      ref.current(d);
+    };
+    __vrFrameCbs.push(wrapper);
+    return () => {
+      let out = [];
+      for (let i = 0; i < __vrFrameCbs.length; i++) {
+        if (__vrFrameCbs[i] != wrapper) {
+          out.push(__vrFrameCbs[i]);
+        }
+      }
+      __vrFrameCbs = out;
+    };
+  }, []);
+}
+
 // ---------------------------------------------------------------------------
 // context
 // ---------------------------------------------------------------------------
@@ -701,8 +743,13 @@ function __vrMount(child, hostContainer) {
   if (inst.ref == null) {
     inst.ref = child.ref;
   }
-  __vrReconcileChildren(inst, __vrNormalize(child.props.children), inst);
-  __vrSyncFrom(inst);
+  // Only container hosts adopt element children; leaf hosts (text, button,
+  // camera, …) fold their children into a prop (label text) inside the driver,
+  // so reconciling them would build orphan nodes.
+  if (inst.container != null) {
+    __vrReconcileChildren(inst, __vrNormalize(child.props.children), inst);
+    __vrSyncFrom(inst);
+  }
   __vrApplyHostRef(inst);
   return inst;
 }
@@ -754,8 +801,10 @@ function __vrUpdate(inst, child, hostContainer) {
   inst.element = child;
   inst.props = child.props;
   __vrDriverUpdate(inst, oldProps, child.props);
-  __vrReconcileChildren(inst, __vrNormalize(child.props.children), inst);
-  __vrSyncFrom(inst);
+  if (inst.container != null) {
+    __vrReconcileChildren(inst, __vrNormalize(child.props.children), inst);
+    __vrSyncFrom(inst);
+  }
   if (inst.ref != child.ref) {
     inst.ref = child.ref;
     __vrApplyHostRef(inst);
@@ -1148,10 +1197,228 @@ function __vrIsContainerTag(tag) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// 3D host tags — Node3D-family elements + the <scene3d> viewport bridge, all
+// built through G3 (godot.js). A <scene3d> is a Control that embeds a 3D world;
+// every other 3D tag is a Node3D that lives inside one.
+// ---------------------------------------------------------------------------
+
+function __vrIs3DTag(tag) {
+  if (tag == "scene3d") { return true; }
+  if (tag == "viewport3d") { return true; }
+  if (tag == "canvas3d") { return true; }
+  if (tag == "node3d") { return true; }
+  if (tag == "spatial") { return true; }
+  if (tag == "group3d") { return true; }
+  if (tag == "mesh") { return true; }
+  if (tag == "box") { return true; }
+  if (tag == "sphere") { return true; }
+  if (tag == "cylinder") { return true; }
+  if (tag == "capsule") { return true; }
+  if (tag == "plane3d") { return true; }
+  if (tag == "torus") { return true; }
+  if (tag == "prism") { return true; }
+  if (tag == "camera3d") { return true; }
+  if (tag == "camera") { return true; }
+  if (tag == "directionallight") { return true; }
+  if (tag == "sun") { return true; }
+  if (tag == "omnilight") { return true; }
+  if (tag == "pointlight") { return true; }
+  if (tag == "spotlight") { return true; }
+  if (tag == "environment") { return true; }
+  if (tag == "worldenvironment") { return true; }
+  if (tag == "staticbody3d") { return true; }
+  if (tag == "rigidbody3d") { return true; }
+  if (tag == "characterbody3d") { return true; }
+  if (tag == "area3d") { return true; }
+  if (tag == "collisionshape3d") { return true; }
+  if (tag == "node") { return true; }
+  return false;
+}
+
+function __vr3dMeshOpts(props) {
+  return {
+    size: props.size,
+    radius: props.radius,
+    height: props.height,
+    width: props.width,
+    depth: props.depth,
+    topRadius: props.topRadius,
+    bottomRadius: props.bottomRadius,
+    innerRadius: props.innerRadius,
+    outerRadius: props.outerRadius,
+    color: __vrColor(props.color),
+    metallic: props.metallic,
+    roughness: props.roughness,
+    emission: __vrColor(props.emission),
+    emissionEnergy: props.emissionEnergy,
+    transparency: props.transparency,
+    position: props.position,
+    rotation: props.rotation,
+    scale: props.scale,
+    visible: props.visible,
+  };
+}
+
+function __vr3dCollisionShape(props) {
+  let shape = props.shape;
+  if (shape == "sphere") {
+    let s = GD.create("SphereShape3D");
+    s.set("radius", GFloat(__vrNum(props.radius, 0.5)));
+    return s;
+  }
+  if (shape == "capsule") {
+    let s = GD.create("CapsuleShape3D");
+    s.set("radius", GFloat(__vrNum(props.radius, 0.4)));
+    s.set("height", GFloat(__vrNum(props.height, 1.4)));
+    return s;
+  }
+  let s = GD.create("BoxShape3D");
+  s.set("size", new Vector3(__vrNum(props.width, 1.0), __vrNum(props.height, 1.0), __vrNum(props.depth, 1.0)));
+  return s;
+}
+
+function __vrCreate3D(inst, tag, props) {
+  if (tag == "scene3d" || tag == "viewport3d" || tag == "canvas3d") {
+    let v = G3.viewport({ transparent: props.transparent, msaa: props.msaa });
+    inst.node = v.container;
+    inst.container = v.viewport;
+    v.container.set("size_flags_horizontal", GInt(3));
+    v.container.set("size_flags_vertical", GInt(3));
+    if (props.height != null) {
+      __vrSetMinSize(v.container, 0.0, __vrNum(props.height, 320.0));
+    } else {
+      __vrSetMinSize(v.container, 0.0, 320.0);
+    }
+    return;
+  }
+  if (tag == "node3d" || tag == "spatial" || tag == "group3d") {
+    let n = G3.node({ position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
+    inst.node = n;
+    inst.container = n;
+    return;
+  }
+  if (tag == "mesh" || tag == "box" || tag == "sphere" || tag == "cylinder" || tag == "capsule" || tag == "plane3d" || tag == "torus" || tag == "prism") {
+    let shape = props.shape;
+    if (shape == null) {
+      shape = tag == "mesh" ? "box" : tag;
+    }
+    if (shape == "plane3d") {
+      shape = "plane";
+    }
+    let mi = G3.mesh(shape, __vr3dMeshOpts(props));
+    inst.node = mi;
+    inst.container = mi;
+    inst.meshShape = shape;
+    return;
+  }
+  if (tag == "camera3d" || tag == "camera") {
+    let c = G3.camera({ fov: props.fov, current: props.current, position: props.position, rotation: props.rotation, scale: props.scale });
+    inst.node = c;
+    inst.container = null;
+    return;
+  }
+  if (tag == "directionallight" || tag == "sun") {
+    let l = G3.dirLight({ color: __vrColor(props.color), energy: props.energy, shadow: props.shadow, position: props.position, rotation: props.rotation });
+    inst.node = l;
+    inst.container = null;
+    return;
+  }
+  if (tag == "omnilight" || tag == "pointlight") {
+    let l = G3.omniLight({ color: __vrColor(props.color), energy: props.energy, range: props.range, position: props.position });
+    inst.node = l;
+    inst.container = null;
+    return;
+  }
+  if (tag == "spotlight") {
+    let l = G3.spotLight({ color: __vrColor(props.color), energy: props.energy, range: props.range, angle: props.angle, position: props.position, rotation: props.rotation });
+    inst.node = l;
+    inst.container = null;
+    return;
+  }
+  if (tag == "environment" || tag == "worldenvironment") {
+    let e = G3.environment({ bg: __vrColor(props.bg), ambient: __vrColor(props.ambient), ambientEnergy: props.ambientEnergy });
+    inst.node = e;
+    inst.container = null;
+    return;
+  }
+  if (tag == "staticbody3d" || tag == "rigidbody3d" || tag == "characterbody3d" || tag == "area3d") {
+    let cls = "StaticBody3D";
+    if (tag == "rigidbody3d") { cls = "RigidBody3D"; }
+    else if (tag == "characterbody3d") { cls = "CharacterBody3D"; }
+    else if (tag == "area3d") { cls = "Area3D"; }
+    let b = GD.create(cls);
+    G3.setTransform(b, { position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
+    inst.node = b;
+    inst.container = b;
+    return;
+  }
+  if (tag == "collisionshape3d") {
+    let cs = GD.create("CollisionShape3D");
+    let shape = __vr3dCollisionShape(props);
+    if (shape != null) {
+      cs.set("shape", shape);
+    }
+    G3.setTransform(cs, { position: props.position, rotation: props.rotation });
+    inst.node = cs;
+    inst.container = null;
+    return;
+  }
+  // generic reflective escape hatch: <node type="AnyGodotClass" .../> — any
+  // engine class becomes a host element, a container so it can hold children.
+  let cls = props.type ?? "Node";
+  let n = GD.create(cls);
+  G3.setTransform(n, { position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
+  inst.node = n;
+  inst.container = n;
+}
+
+function __vrUpdate3D(inst, oldProps, props) {
+  let tag = inst.tag;
+  // Declarative transform (only sets the props that are present).
+  G3.setTransform(inst.node, { position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
+
+  if (tag == "mesh" || tag == "box" || tag == "sphere" || tag == "cylinder" || tag == "capsule" || tag == "plane3d" || tag == "torus" || tag == "prism") {
+    if (props.color != oldProps.color || props.emission != oldProps.emission || props.roughness != oldProps.roughness || props.metallic != oldProps.metallic) {
+      let prim = inst.node.get("mesh");
+      if (prim != null && !GD.isError(prim)) {
+        prim.set("material", G3.material(__vr3dMeshOpts(props)));
+      }
+    }
+    return;
+  }
+  if (tag == "camera3d" || tag == "camera") {
+    if (props.fov != oldProps.fov && props.fov != null) {
+      inst.node.set("fov", GFloat(props.fov));
+    }
+    if (props.current != oldProps.current) {
+      inst.node.set("current", props.current == true);
+    }
+    return;
+  }
+  if (tag == "directionallight" || tag == "sun" || tag == "omnilight" || tag == "pointlight" || tag == "spotlight") {
+    if (props.color != oldProps.color) {
+      let c = __vrColor(props.color);
+      if (c != null) {
+        inst.node.set("light_color", c);
+      }
+    }
+    if (props.energy != oldProps.energy && props.energy != null) {
+      inst.node.set("light_energy", GFloat(props.energy));
+    }
+    return;
+  }
+}
+
 function __vrDriverCreate(inst) {
   let tag = inst.tag;
   let props = inst.props;
   let t = VUI.theme();
+
+  if (__vrIs3DTag(tag)) {
+    __vrCreate3D(inst, tag, props);
+    return;
+  }
 
   if (__vrIsContainerTag(tag)) {
     __vrCreateContainer(inst, tag, props, t);
@@ -1562,6 +1829,11 @@ function __vrDriverUpdate(inst, oldProps, props) {
   let tag = inst.tag;
   let t = VUI.theme();
 
+  if (__vrIs3DTag(tag)) {
+    __vrUpdate3D(inst, oldProps, props);
+    return;
+  }
+
   if (__vrIsContainerTag(tag)) {
     if (props.grow == true || props.expand == true) {
       inst.node.set("size_flags_horizontal", GInt(3));
@@ -1667,6 +1939,7 @@ var React = {
   useTransition: useTransition,
   useDeferredValue: useDeferredValue,
   useDebugValue: useDebugValue,
+  useFrame: useFrame,
   memo: memo,
   forwardRef: forwardRef,
 };
@@ -1776,7 +2049,13 @@ var Victor = {
     VUI.dialog(o);
   },
   onFrame: (cb) => {
-    GD.onProcess(cb);
+    __vrInstallFrame();
+    __vrFrameCbs.push(cb);
+  },
+  useFrame: useFrame,
+  // 3D building blocks for imperative use (inside useFrame, refs, escape hatch).
+  g3: () => {
+    return G3;
   },
   interval: (ms, cb) => {
     return GTimer.periodic(ms, cb);
@@ -1813,3 +2092,22 @@ function Switch(props) { return jsx("switch", props); }
 function Checkbox(props) { return jsx("checkbox", props); }
 function Divider(props) { return jsx("divider", props); }
 function Spacer(props) { return jsx("spacer", props); }
+
+// 3D primitives (the 2D<->3D bridge and the Node3D family).
+function Scene3D(props) { return jsx("scene3d", props); }
+function Node3D(props) { return jsx("node3d", props); }
+function Mesh(props) { return jsx("mesh", props); }
+function Box(props) { return jsx("box", props); }
+function Sphere(props) { return jsx("sphere", props); }
+function Cylinder(props) { return jsx("cylinder", props); }
+function Capsule(props) { return jsx("capsule", props); }
+function Plane3D(props) { return jsx("plane3d", props); }
+function Torus(props) { return jsx("torus", props); }
+function Camera3D(props) { return jsx("camera3d", props); }
+function DirectionalLight(props) { return jsx("directionallight", props); }
+function OmniLight(props) { return jsx("omnilight", props); }
+function SpotLight(props) { return jsx("spotlight", props); }
+function Environment3D(props) { return jsx("environment", props); }
+function StaticBody3D(props) { return jsx("staticbody3d", props); }
+function Area3D(props) { return jsx("area3d", props); }
+function CollisionShape3D(props) { return jsx("collisionshape3d", props); }

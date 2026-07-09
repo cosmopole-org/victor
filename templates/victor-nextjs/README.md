@@ -80,6 +80,50 @@ Host tags and their web aliases:
 | text       | `text`/`span`/`p`, `heading`/`h1`/`h2`/`h3`, `title`, `caption`/`small`, `icon` |
 | controls   | `button`, `input`/`field`, `slider`, `switch`/`toggle`, `checkbox`, `progress` |
 | media/misc | `image`/`img`, `divider`/`hr`, `spacer` |
+| **3D**     | `scene3d` (the 2D↔3D bridge), `node3d`, `mesh`/`box`/`sphere`/`cylinder`/`capsule`/`plane3d`/`torus`/`prism`, `camera3d`, `directionallight`/`omnilight`/`spotlight`, `environment`, `staticbody3d`/`rigidbody3d`/`area3d`, `collisionshape3d`, and `node type="AnyGodotClass"` (reflective escape hatch) |
+
+## Mixed 2D + 3D
+
+Victor is a Godot app, so 3D is first-class. Put a `<scene3d>` anywhere in your
+2D tree — it is the bridge (a `SubViewportContainer` + `SubViewport`) that hosts
+a real 3D world. Inside it, `Node3D`-family elements describe the scene; outside
+it, ordinary 2D React drives the scene through state. See `app/scene/page.jsx`.
+
+```jsx
+import { useState, useRef, useFrame } from "react";
+
+function Spinner({ speed }) {
+  const ref = useRef(null);
+  const a = useRef(0);
+  useFrame((d) => {                       // runs every frame (react-three-fiber style)
+    if (ref.current) {
+      a.current += d * speed;
+      ref.current.set("rotation_degrees", new Vector3(0, a.current, 0));
+    }
+  });
+  return (
+    <node3d ref={ref}>
+      <box size={[1, 1, 1]} color="accent" />
+    </node3d>
+  );
+}
+
+<scene3d height={480}>
+  <environment ambientEnergy={0.7} />
+  <directionallight rotation={[-50, -30, 0]} energy={1.2} />
+  <camera3d position={[0, 3, 8]} rotation={[-18, 0, 0]} fov={55} />
+  <plane3d width={18} depth={18} />
+  <Spinner speed={40} />
+</scene3d>
+```
+
+Transforms are props: `position={[x,y,z]}`, `rotation={[x,y,z]}` (degrees),
+`scale`, `visible`. Meshes take `color`/`emission`/`metallic`/`roughness` and
+per-shape dims (`size`, `radius`, `height`, `width`/`depth`, …). Refs on 3D
+elements give you the live Godot node (a `GObj`) to drive imperatively inside
+`useFrame`. The whole reflective engine is reachable via `<node type="…">` or
+`Victor.g3()` for anything the named tags don't cover. Colours use `new Color(r,g,b,a)`
+or a theme token; vectors use `new Vector3(x,y,z)` (both from the `godot.js` prelude).
 
 Common props: `gap`, `pad`, `grow`, `bg`, `color` (theme token name like
 `"primary"`/`"accent"`/`"muted"`, a `"#rrggbb"` string, or a Color), `align`,
@@ -93,7 +137,8 @@ All of them are implemented and behave as in React:
 `useInsertionEffect` · `useRef` · `useMemo` · `useCallback` · `useContext` +
 `createContext` · `useImperativeHandle` · `useId` · `useSyncExternalStore` ·
 `useTransition` · `useDeferredValue` · `useDebugValue`. Plus `memo`,
-`forwardRef`, `Fragment`, and `StrictMode`.
+`forwardRef`, `Fragment`, and `StrictMode` — and `useFrame(delta => …)` for
+per-frame work (3D animation, simulation), the react-three-fiber idiom.
 
 ## The authored dialect — honest constraints
 
