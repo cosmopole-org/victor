@@ -1444,6 +1444,8 @@ G3.environment = (o) => {
 
 // The 2D<->3D bridge: a SubViewportContainer (a Control you place in the UI)
 // wrapping a SubViewport (where 3D nodes live). Returns { container, viewport }.
+// Pass picking: true to enable physics object picking inside the viewport
+// (bodies/areas then receive `input_event` for taps/clicks/drags).
 G3.viewport = (o) => {
   o = o ?? {};
   let vpc = GD.create("SubViewportContainer");
@@ -1456,6 +1458,10 @@ G3.viewport = (o) => {
   vp.set("render_target_update_mode", GD.constant("SubViewport.UPDATE_ALWAYS"));
   if (o.msaa == true) {
     vp.set("msaa_3d", GInt(2)); // Viewport.MSAA_4X
+  }
+  if (o.picking == true) {
+    vp.set("physics_object_picking", true);
+    vp.set("physics_object_picking_sort", true);
   }
   vpc.call("add_child", [vp]);
   return { container: vpc, viewport: vp };
@@ -1476,4 +1482,118 @@ G3.setTransform = (node, o) => {
   if (o.visible != null) {
     node.set("visible", o.visible == true);
   }
+};
+
+// ---------------------------------------------------------------------------
+// G3 — models & scenes (GLTF/GLB), instancing, picking
+// ---------------------------------------------------------------------------
+
+// Instantiate a PackedScene resource by path (res://…tscn / an imported .glb).
+G3.instanceScene = (path) => {
+  let ps = GD.load(path);
+  if (ps == null || GD.isError(ps)) {
+    return null;
+  }
+  let node = ps.call("instantiate");
+  if (node == null || GD.isError(node)) {
+    return null;
+  }
+  return node;
+};
+
+// Load a glTF / GLB model and return its root Node3D, or null on failure.
+//
+//   G3.gltf("res://assets/models/buildings/town_hall.glb")
+//   G3.gltf("user://cache/hero.glb")
+//   G3.gltf({ base64: b64 })            // raw GLB bytes fetched over the net
+//
+// A res:// path uses the import pipeline when available (GD.load of an
+// imported scene) and falls back to GLTFDocument parsing of the raw file, so
+// models work both inside an exported project and from loose asset folders.
+// Options: { position, rotation, scale, visible } apply to the returned root.
+G3.gltf = (src, o) => {
+  o = o ?? {};
+  let root = null;
+  if (__isType(src, "Map")) {
+    if (src.base64 != null) {
+      let doc = GD.create("GLTFDocument");
+      let state = GD.create("GLTFState");
+      let buf = new Packed("u8", src.base64);
+      let err = doc.call("append_from_buffer", [buf, "", state]);
+      if (!GD.isError(err) && err == 0) {
+        root = doc.call("generate_scene", [state]);
+      }
+    }
+  } else {
+    let path = "" + src;
+    if (path.startsWith("res://")) {
+      root = G3.instanceScene(path);
+    }
+    if (root == null || GD.isError(root)) {
+      let doc = GD.create("GLTFDocument");
+      let state = GD.create("GLTFState");
+      let err = doc.call("append_from_file", [path, state]);
+      if (!GD.isError(err) && err == 0) {
+        root = doc.call("generate_scene", [state]);
+      }
+    }
+  }
+  if (root == null || GD.isError(root)) {
+    return null;
+  }
+  G3.setTransform(root, o);
+  return root;
+};
+
+// Fit a freshly loaded model to a target height: scales the node uniformly so
+// its AABB height equals `targetHeight` (mirrors the web client's
+// "targetHeight" model-normalisation convention). Requires the node to be in
+// the tree (AABB is computed from visual instances).
+G3.fitHeight = (node, targetHeight) => {
+  let aabb = GD.eval(
+    "n.get_aabb() if n.has_method(\"get_aabb\") else AABB()",
+    ["n"],
+    [node]
+  );
+  if (aabb == null || GD.isError(aabb) || !__isType(aabb, "AABB")) {
+    return node;
+  }
+  if (aabb.sy > 0.0) {
+    let k = targetHeight / aabb.sy;
+    node.set("scale", new Vector3(k, k, k));
+  }
+  return node;
+};
+
+// Cast a physics ray from a camera through a screen point in its viewport.
+// Returns the intersect dictionary ({position, normal, collider, …}) or null.
+G3.raycast = (viewport, camera, x, y, dist) => {
+  let from = camera.call("project_ray_origin", [new Vector2(x, y)]);
+  let dir = camera.call("project_ray_normal", [new Vector2(x, y)]);
+  if (from == null || dir == null || GD.isError(from) || GD.isError(dir)) {
+    return null;
+  }
+  let d = __g3num(dist, 2000.0);
+  let to = new Vector3(from.x + dir.x * d, from.y + dir.y * d, from.z + dir.z * d);
+  let world = viewport.call("get_world_3d");
+  if (world == null || GD.isError(world)) {
+    return null;
+  }
+  let space = world.call("get_direct_space_state");
+  if (space == null || GD.isError(space)) {
+    return null;
+  }
+  let q = GD.eval(
+    "PhysicsRayQueryParameters3D.create(f, t)",
+    ["f", "t"],
+    [from, to]
+  );
+  if (q == null || GD.isError(q)) {
+    return null;
+  }
+  let hit = space.call("intersect_ray", [q]);
+  if (hit == null || GD.isError(hit)) {
+    return null;
+  }
+  return hit;
 };

@@ -77,10 +77,27 @@ Host tags and their web aliases:
 | category   | tags |
 |------------|------|
 | layout     | `view`/`div`, `column`, `row`, `stack`, `scroll`, `center`, `panel`, `card`, `grid`, `section`/`header`/`footer`/`nav` |
-| text       | `text`/`span`/`p`, `heading`/`h1`/`h2`/`h3`, `title`, `caption`/`small`, `icon` |
-| controls   | `button`, `input`/`field`, `slider`, `switch`/`toggle`, `checkbox`, `progress` |
+| text       | `text`/`span`/`p`, `heading`/`h1`/`h2`/`h3`, `title`, `caption`/`small`, `icon`, `richtext` (BBCode) |
+| controls   | `button`, `input`/`field`, `textarea`, `select`/`dropdown`, `slider`, `switch`/`toggle`, `checkbox`, `progress` |
 | media/misc | `image`/`img`, `divider`/`hr`, `spacer` |
-| **3D**     | `scene3d` (the 2D↔3D bridge), `node3d`, `mesh`/`box`/`sphere`/`cylinder`/`capsule`/`plane3d`/`torus`/`prism`, `camera3d`, `directionallight`/`omnilight`/`spotlight`, `environment`, `staticbody3d`/`rigidbody3d`/`area3d`, `collisionshape3d`, and `node type="AnyGodotClass"` (reflective escape hatch) |
+| **3D**     | `scene3d` (the 2D↔3D bridge; `picking` enables tap/click picking), `node3d`, `mesh`/`box`/`sphere`/`cylinder`/`capsule`/`plane3d`/`torus`/`prism`, `gltf`/`model` (glTF/GLB scenes: `src`, `targetHeight`), `camera3d`, `directionallight`/`omnilight`/`spotlight`, `environment`, `staticbody3d`/`rigidbody3d`/`area3d` (`onPick`/`onInputEvent`/`onHover`), `collisionshape3d`, and `node type="AnyGodotClass"` (reflective escape hatch) |
+
+## 3D models and picking
+
+`<gltf src="res://assets/models/tower.glb" position={[2, 0, 0]} targetHeight={3} />`
+loads a glTF/GLB scene (import pipeline when available, raw `GLTFDocument`
+parsing otherwise). Wrap it in a `<staticbody3d onPick={...}>` with a
+`<collisionshape3d>` inside a `<scene3d picking={true}>` and taps on the model
+arrive as React events — the Victor equivalent of a three.js raycaster.
+
+## Networking
+
+Set `net: true` in `victor.config.mjs` and the `net.js` prelude is composed in:
+`Net` (HTTP over Godot's HTTPRequest with a base URL + automatic cookie jar),
+`WSocket` (WebSocketPeer pumped on a guest timer) and `SocketIO` (a Socket.IO
+v4 client). An app talks to its Next.js API server exactly like a browser
+client would — `Net.postJson("/api/auth/signin", body, cb)` — with session
+cookies handled for it.
 
 ## Mixed 2D + 3D
 

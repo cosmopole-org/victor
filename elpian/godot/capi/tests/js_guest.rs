@@ -295,3 +295,98 @@ fn ui_kit_composes_on_import_and_builds_control_nodes() {
     assert!(log.contains("ui built"), "log was: {log}");
     assert!(log.contains("ui tap #1"), "log was: {log}");
 }
+
+#[test]
+fn net_composes_on_import_and_speaks_http_with_a_cookie_jar() {
+    let src = r#"
+        import 'godot.js';
+        import 'net.js';
+        function main() {
+            Net.setBase('https://play.example');
+            Net.postJson('/api/auth/signin', { email: 'k@example.com', password: 'pw' }, (res) => {
+                print('status ' + res.status);
+                let data = res.json();
+                print('user ' + data.user.username);
+                print('cookie ' + Net.cookie('sid'));
+            });
+            print('request sent');
+        }
+        main();
+    "#;
+    let (mut mgr, mock) = boot_js("js-net", src);
+    // The request built one HTTPRequest node, connected its completion signal
+    // and invoked `request` with the resolved URL + method code POST(2).
+    let (request_args, cb) = {
+        let m = mock.borrow();
+        assert_eq!(m.created("HTTPRequest"), 1);
+        let cb = m
+            .connects
+            .iter()
+            .find(|(_, s, _)| s == "request_completed")
+            .map(|(_, _, cb)| *cb)
+            .expect("request_completed connected");
+        let call = m
+            .ops
+            .iter()
+            .find(|op| op.get("method").and_then(|v| v.as_str()) == Some("request"))
+            .cloned()
+            .expect("HTTPRequest.request invoked");
+        (call.get("args").cloned().unwrap(), cb)
+    };
+    let args = request_args.as_array().unwrap();
+    assert_eq!(args[0], json!("https://play.example/api/auth/signin"));
+    assert_eq!(args[2], json!({ "int": 2 }), "POST method code");
+    let body: Value =
+        serde_json::from_str(args[3].as_str().expect("json body string")).unwrap();
+    assert_eq!(body, json!({ "email": "k@example.com", "password": "pw" }));
+
+    // Complete the request through the dispatch path: 200, a Set-Cookie header
+    // and a JSON body (PackedByteArray → u8/base64 on the wire).
+    mgr.invoke(
+        "__godotDispatch",
+        json!([
+            cb,
+            [
+                0,
+                200,
+                { "strs": ["Content-Type: application/json", "Set-Cookie: sid=abc123; HttpOnly; Path=/"] },
+                { "u8": "eyJvayI6dHJ1ZSwidXNlciI6eyJ1c2VybmFtZSI6ImthaSJ9fQ==" }
+            ]
+        ]),
+    );
+    let log = mgr.take_log().join("\n");
+    assert!(log.contains("request sent"), "log was: {log}");
+    assert!(log.contains("status 200"), "log was: {log}");
+    assert!(log.contains("user kai"), "log was: {log}");
+    assert!(log.contains("cookie abc123"), "log was: {log}");
+}
+
+#[test]
+fn socket_io_frames_ride_a_websocket_peer() {
+    let src = r#"
+        import 'godot.js';
+        import 'net.js';
+        function main() {
+            let socket = SocketIO.connect('https://play.example', {});
+            socket.on('connect', (x) => { print('sio connected'); });
+            socket.on('chat:new', (data) => { print('chat from ' + data.from); });
+            print('sio dialing');
+        }
+        main();
+    "#;
+    let (mut mgr, mock) = boot_js("js-sio", src);
+    {
+        let m = mock.borrow();
+        assert_eq!(m.created("WebSocketPeer"), 1);
+        let dial = m
+            .ops
+            .iter()
+            .find(|op| op.get("method").and_then(|v| v.as_str()) == Some("connect_to_url"))
+            .cloned()
+            .expect("connect_to_url invoked");
+        let url = dial["args"][0].as_str().unwrap();
+        assert_eq!(url, "wss://play.example/socket.io/?EIO=4&transport=websocket");
+    }
+    let log = mgr.take_log().join("\n");
+    assert!(log.contains("sio dialing"), "log was: {log}");
+}

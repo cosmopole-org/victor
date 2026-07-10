@@ -17,6 +17,10 @@ export default {
   // The route that renders first (matches a folder under app/, "/" = app/page).
   initialRoute: "/",
 
+  // Compose the Victor networking prelude (`net.js`: the Net HTTP client with
+  // a cookie jar, WSocket, and the SocketIO client) ahead of the app.
+  net: false,
+
   // Output location for the compiled single-file guest program the Victor
   // engine loads (drop it into elpian/godot/project/scripts and point an
   // ElpianVM node at it, exactly like ui_demo.js).

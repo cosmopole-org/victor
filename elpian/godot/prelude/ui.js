@@ -1564,6 +1564,182 @@ VUI.sheet = (o) => {
   return { node: holder, close: close };
 };
 
+// A dropdown selector (OptionButton): { items: [label], index, onSelect(i) }.
+// Returns a handle { node, getIndex(), select(i) }.
+VUI.dropdown = (o) => {
+  o = o ?? {};
+  let t = VUI.theme();
+  let st = { index: __vuiNum(o.index, 0) };
+  let e = GD.create("OptionButton");
+  e.set("focus_mode", GInt(0));
+  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
+  __vuiMinSize(e, 0.0, t.controlHeight);
+  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, padX: 26, border: 1, borderColor: t.outline }));
+  e.set("theme_override_styles/hover", VUI.styleBox({ bg: t.surface3, radius: t.radiusM, padX: 26, border: 1, borderColor: t.outline }));
+  e.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.surface3, radius: t.radiusM, padX: 26, border: 1, borderColor: t.primary }));
+  e.set("theme_override_colors/font_color", t.text);
+  let items = o.items ?? [];
+  for (let i = 0; i < items.length; i++) {
+    e.call("add_item", ["" + items[i], GInt(i)]);
+  }
+  if (items.length > 0) {
+    e.call("select", [GInt(st.index)]);
+  }
+  e.connect("item_selected", (a) => {
+    st.index = a[0];
+    if (o.onSelect != null) {
+      o.onSelect(a[0]);
+    }
+  });
+  return {
+    node: e,
+    getIndex: () => st.index,
+    select: (i) => {
+      st.index = i;
+      e.call("select", [GInt(i)]);
+    },
+  };
+};
+
+// A multiline text input (TextEdit): { placeholder, value, height,
+// onChanged(text) }. Returns a handle { node, getText(), setText(v) }.
+VUI.textarea = (o) => {
+  o = o ?? {};
+  let t = VUI.theme();
+  let st = { text: "" + (o.value ?? "") };
+  let e = GD.create("TextEdit");
+  if (o.placeholder != null) {
+    e.set("placeholder_text", o.placeholder);
+  }
+  if (st.text != "") {
+    e.set("text", st.text);
+  }
+  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
+  e.set("wrap_mode", GInt(1));
+  __vuiMinSize(e, 0.0, __vuiNum(o.height, t.controlHeight * 2.4));
+  __vuiExpandH(e);
+  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, pad: 20, border: 1, borderColor: t.outline }));
+  e.set("theme_override_styles/focus", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, pad: 20, border: 2, borderColor: t.primary }));
+  e.set("theme_override_colors/font_color", t.text);
+  e.set("theme_override_colors/font_placeholder_color", t.textFaint);
+  e.set("theme_override_colors/caret_color", t.primary);
+  e.connect("text_changed", (a) => {
+    st.text = "" + e.get("text");
+    if (o.onChanged != null) {
+      o.onChanged(st.text);
+    }
+  });
+  return {
+    node: e,
+    getText: () => st.text,
+    setText: (v) => {
+      st.text = "" + v;
+      e.set("text", st.text);
+    },
+  };
+};
+
+// A draggable, closable floating window (the desktop-game "panel window"
+// idiom): { title, subtitle, accent (Color), width, height, x, y, child,
+// children, gap, onClose }. Mounts on the app overlay; returns
+// { node, close(), setTitle(v) }. Drag the title bar to move it.
+VUI.window = (o) => {
+  o = o ?? {};
+  let t = VUI.theme();
+  let w = __vuiNum(o.width, __vuiApp.w - 160.0);
+  let h = __vuiNum(o.height, 0.0);
+  let accent = o.accent ?? t.primary;
+
+  let holder = GD.create("PanelContainer");
+  holder.set(
+    "theme_override_styles/panel",
+    VUI.styleBox({ bg: t.surface, radius: t.radiusL, border: 1, borderColor: accent, shadow: 18 })
+  );
+  holder.set("position", new Vector2(__vuiNum(o.x, 80.0), __vuiNum(o.y, 120.0)));
+  __vuiMinSize(holder, w, h);
+
+  let closed = { done: false };
+  let close = () => {
+    if (closed.done) {
+      return;
+    }
+    closed.done = true;
+    holder.queueFree();
+    if (o.onClose != null) {
+      o.onClose();
+    }
+  };
+
+  let titleLabel = VUI.text(o.title ?? "", { size: t.fontM, color: accent });
+  __vuiExpandH(titleLabel);
+  let closeBtn = VUI.iconButton("✕", { size: 64.0, onTap: close });
+
+  // Title bar doubles as the drag handle.
+  let bar = GD.create("PanelContainer");
+  bar.set(
+    "theme_override_styles/panel",
+    VUI.styleBox({ bg: t.surface2, radiusTL: t.radiusL, radiusTR: t.radiusL, radius: 0, padX: 24, padY: 10 })
+  );
+  let barRow = GD.create("HBoxContainer");
+  barRow.set("theme_override_constants/separation", GInt(16));
+  let titleItems = [titleLabel];
+  if (o.subtitle != null) {
+    let col = VUI.column({ gap: 2, children: [titleLabel, VUI.caption(o.subtitle)] });
+    __vuiExpandH(col);
+    titleItems = [col];
+  }
+  __vuiAddAll(barRow, titleItems);
+  barRow.call("add_child", [closeBtn]);
+  bar.call("add_child", [barRow]);
+
+  let drag = { on: false };
+  bar.connect("gui_input", (a) => {
+    let ev = a[0];
+    if (ev == null || !__isType(ev, "GObj")) {
+      return;
+    }
+    if (ev.cls == "InputEventMouseButton" || ev.cls == "InputEventScreenTouch") {
+      drag.on = ev.get("pressed") == true;
+    } else if (ev.cls == "InputEventMouseMotion" || ev.cls == "InputEventScreenDrag") {
+      if (drag.on) {
+        let rel = ev.get("relative");
+        let pos = holder.get("position");
+        holder.set("position", new Vector2(pos.x + rel.x, pos.y + rel.y));
+      }
+    }
+  });
+
+  let bodyChildren = [];
+  if (o.child != null) {
+    bodyChildren.push(o.child);
+  }
+  if (o.children != null) {
+    for (let i = 0; i < o.children.length; i++) {
+      bodyChildren.push(o.children[i]);
+    }
+  }
+  let body = VUI.column({ gap: __vuiNum(o.gap, 16), pad: 24, children: bodyChildren });
+
+  let frame = GD.create("VBoxContainer");
+  frame.set("theme_override_constants/separation", GInt(0));
+  frame.call("add_child", [bar]);
+  if (h > 0.0) {
+    frame.call("add_child", [__vuiNode(VUI.scroll({ child: body }))]);
+  } else {
+    frame.call("add_child", [__vuiNode(body)]);
+  }
+  holder.call("add_child", [frame]);
+
+  __vuiApp.overlay.call("add_child", [holder]);
+  return {
+    node: holder,
+    close: close,
+    setTitle: (v) => {
+      titleLabel.set("text", "" + v);
+    },
+  };
+};
+
 // A toast / snackbar: (msg, { kind: 'info'|'success'|'warning'|'danger',
 // ms }). Auto-dismisses; a new toast replaces the previous one.
 VUI.toast = (msg, o) => {
