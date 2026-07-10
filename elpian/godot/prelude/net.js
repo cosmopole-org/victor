@@ -217,6 +217,9 @@ Net.request = (o, cb) => {
 
   node.connect("request_completed", (a) => {
     // a = [result, response_code, headers (PackedStringArray), body (PackedByteArray)]
+    // result is HTTPRequest.Result: 0 OK, 2 CANT_CONNECT, 3 CANT_RESOLVE,
+    // 4 CONNECTION_ERROR, 5 TLS_HANDSHAKE_ERROR, 13 TIMEOUT, ...
+    let transport = a[0];
     let status = a[1];
     let rawHeaders = a[2];
     let headerMap = {};
@@ -242,6 +245,7 @@ Net.request = (o, cb) => {
     let res = {
       ok: status >= 200 && status < 300,
       status: status,
+      transport: transport,
       headers: headerMap,
       body: text,
       json: () => {
@@ -261,7 +265,7 @@ Net.request = (o, cb) => {
   if (GD.isError(err)) {
     node.queueFree();
     if (cb != null) {
-      cb({ ok: false, status: 0, headers: {}, body: "", json: () => { return null; } });
+      cb({ ok: false, status: 0, transport: -1, headers: {}, body: "", json: () => { return null; } });
     }
   }
 };
