@@ -172,6 +172,11 @@ async function build() {
   chunks.push("// ahead of it by the engine; every module below is flattened into one scope.");
   chunks.push("// ===========================================================================");
   chunks.push("import 'godot.js';");
+  if (config.net) {
+    // Victor networking (HTTP + WebSocket + Socket.IO) — composed when the
+    // app opts in via `net: true` in victor.config.mjs.
+    chunks.push("import 'net.js';");
+  }
   chunks.push("import 'ui.js';");
   chunks.push("import 'react.js';");
   chunks.push("");

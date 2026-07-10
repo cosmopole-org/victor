@@ -1232,6 +1232,8 @@ function __vrIs3DTag(tag) {
   if (tag == "characterbody3d") { return true; }
   if (tag == "area3d") { return true; }
   if (tag == "collisionshape3d") { return true; }
+  if (tag == "gltf") { return true; }
+  if (tag == "model") { return true; }
   if (tag == "node") { return true; }
   return false;
 }
@@ -1278,17 +1280,98 @@ function __vr3dCollisionShape(props) {
   return s;
 }
 
+// Wire 3D pick/input events onto a body/area host: `input_event` fires when
+// the enclosing <scene3d picking> viewport picks the body. The handler reads
+// the CURRENT props off the instance, so re-renders never re-wire the signal.
+function __vrWire3DPick(inst) {
+  let p = inst.props;
+  if (p.onPick == null && p.onInputEvent == null && p.onPress == null) {
+    return;
+  }
+  inst.node.set("input_ray_pickable", true);
+  inst.node.connect("input_event", (a) => {
+    // a = [camera, event, event_position, normal, shape_idx]
+    let cur = inst.props;
+    let ev = a[1];
+    let evCls = "";
+    if (__isType(ev, "GObj")) {
+      evCls = ev.cls;
+    }
+    let info = {
+      camera: a[0],
+      event: ev,
+      eventClass: evCls,
+      position: a[2],
+      normal: a[3],
+      node: inst.node,
+    };
+    __vrCall(cur.onInputEvent, info);
+    // onPick / onPress: only on press of a button/touch (not motion).
+    if (cur.onPick != null || cur.onPress != null) {
+      let pressed = GD.eval(
+        "e.pressed if (e is InputEventMouseButton or e is InputEventScreenTouch) else false",
+        ["e"],
+        [ev]
+      );
+      if (pressed == true) {
+        __vrCall(cur.onPick, info);
+        __vrCall(cur.onPress, info);
+      }
+    }
+  });
+  if (p.onHover != null) {
+    inst.node.connect("mouse_entered", (a) => {
+      __vrCall(inst.props.onHover, true);
+    });
+    inst.node.connect("mouse_exited", (a) => {
+      __vrCall(inst.props.onHover, false);
+    });
+  }
+}
+
 function __vrCreate3D(inst, tag, props) {
   if (tag == "scene3d" || tag == "viewport3d" || tag == "canvas3d") {
-    let v = G3.viewport({ transparent: props.transparent, msaa: props.msaa });
+    let v = G3.viewport({ transparent: props.transparent, msaa: props.msaa, picking: props.picking });
     inst.node = v.container;
     inst.container = v.viewport;
+    inst.viewport = v.viewport;
     v.container.set("size_flags_horizontal", GInt(3));
     v.container.set("size_flags_vertical", GInt(3));
     if (props.height != null) {
-      __vrSetMinSize(v.container, 0.0, __vrNum(props.height, 320.0));
+      __vrSetMinSize(v.container, __vrNum(props.width, 0.0), __vrNum(props.height, 320.0));
+    } else if (props.grow == true || props.expand == true) {
+      __vrSetMinSize(v.container, __vrNum(props.width, 0.0), 0.0);
     } else {
-      __vrSetMinSize(v.container, 0.0, 320.0);
+      __vrSetMinSize(v.container, __vrNum(props.width, 0.0), 320.0);
+    }
+    // Raw viewport input hook (camera drags, wheel zoom, hover): receives the
+    // GObj InputEvent for every event the embedded world sees.
+    if (props.onInput != null) {
+      v.viewport.connect("gui_focus_changed", (a) => {});
+      v.container.connect("gui_input", (a) => {
+        __vrCall(inst.props.onInput, a[0]);
+      });
+    }
+    return;
+  }
+  if (tag == "gltf" || tag == "model") {
+    // A Node3D wrapper holding the loaded model, so src swaps and element
+    // children (lights, extra meshes, bodies) reconcile against the wrapper.
+    let wrap = G3.node({ position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
+    inst.node = wrap;
+    inst.container = wrap;
+    inst.modelSrc = null;
+    inst.modelNode = null;
+    if (props.src != null) {
+      let m = G3.gltf(props.src, { scale: props.modelScale, rotation: props.modelRotation });
+      if (m != null) {
+        wrap.call("add_child", [m]);
+        inst.modelSrc = props.src;
+        inst.modelNode = m;
+        if (props.targetHeight != null) {
+          G3.fitHeight(m, __vrNum(props.targetHeight, 1.0));
+        }
+      }
     }
     return;
   }
@@ -1351,6 +1434,7 @@ function __vrCreate3D(inst, tag, props) {
     G3.setTransform(b, { position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
     inst.node = b;
     inst.container = b;
+    __vrWire3DPick(inst);
     return;
   }
   if (tag == "collisionshape3d") {
@@ -1377,6 +1461,27 @@ function __vrUpdate3D(inst, oldProps, props) {
   let tag = inst.tag;
   // Declarative transform (only sets the props that are present).
   G3.setTransform(inst.node, { position: props.position, rotation: props.rotation, scale: props.scale, visible: props.visible });
+
+  if (tag == "gltf" || tag == "model") {
+    if (props.src != inst.modelSrc) {
+      if (inst.modelNode != null) {
+        inst.modelNode.queueFree();
+        inst.modelNode = null;
+      }
+      inst.modelSrc = props.src;
+      if (props.src != null) {
+        let m = G3.gltf(props.src, { scale: props.modelScale, rotation: props.modelRotation });
+        if (m != null) {
+          inst.node.call("add_child", [m]);
+          inst.modelNode = m;
+          if (props.targetHeight != null) {
+            G3.fitHeight(m, __vrNum(props.targetHeight, 1.0));
+          }
+        }
+      }
+    }
+    return;
+  }
 
   if (tag == "mesh" || tag == "box" || tag == "sphere" || tag == "cylinder" || tag == "capsule" || tag == "plane3d" || tag == "torus" || tag == "prism") {
     if (props.color != oldProps.color || props.emission != oldProps.emission || props.roughness != oldProps.roughness || props.metallic != oldProps.metallic) {
@@ -1464,6 +1569,18 @@ function __vrDriverCreate(inst) {
   }
   if (tag == "input" || tag == "field" || tag == "textinput") {
     __vrCreateField(inst, props, t);
+    return;
+  }
+  if (tag == "textarea") {
+    __vrCreateTextArea(inst, props, t);
+    return;
+  }
+  if (tag == "select" || tag == "dropdown" || tag == "option") {
+    __vrCreateSelect(inst, props, t);
+    return;
+  }
+  if (tag == "richtext") {
+    __vrCreateRichText(inst, props, t);
     return;
   }
   if (tag == "image" || tag == "img") {
@@ -1730,6 +1847,110 @@ function __vrCreateField(inst, props, t) {
   });
 }
 
+// ---- textarea (multiline input) ---------------------------------------------
+
+function __vrCreateTextArea(inst, props, t) {
+  let e = GD.create("TextEdit");
+  inst.node = e;
+  inst.container = null;
+  inst.fieldValue = "" + (props.value ?? props.defaultValue ?? "");
+  if (props.placeholder != null) {
+    e.set("placeholder_text", props.placeholder);
+  }
+  if (inst.fieldValue != "") {
+    e.set("text", inst.fieldValue);
+  }
+  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
+  e.set("wrap_mode", GInt(1)); // TextEdit.LINE_WRAPPING_BOUNDARY
+  __vrSetMinSize(e, 0.0, __vrNum(props.height, t.controlHeight * 2.4));
+  e.set("size_flags_horizontal", GInt(3));
+  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, pad: 20, border: 1, borderColor: t.outline }));
+  e.set("theme_override_styles/focus", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, pad: 20, border: 2, borderColor: t.primary }));
+  e.set("theme_override_colors/font_color", t.text);
+  e.set("theme_override_colors/font_placeholder_color", t.textFaint);
+  e.set("theme_override_colors/caret_color", t.primary);
+  e.connect("text_changed", (a) => {
+    let v = inst.node.get("text");
+    inst.fieldValue = "" + v;
+    __vrCall(inst.props.onChange, inst.fieldValue);
+    __vrCall(inst.props.onChanged, inst.fieldValue);
+  });
+}
+
+// ---- select / dropdown -------------------------------------------------------
+
+function __vrApplySelectItems(inst, props, t) {
+  let e = inst.node;
+  e.call("clear");
+  let items = props.options ?? props.items ?? [];
+  inst.selectValues = [];
+  for (let i = 0; i < items.length; i++) {
+    let it = items[i];
+    let label = it;
+    let value = it;
+    if (__isType(it, "Map")) {
+      label = it.label ?? ("" + it.value);
+      value = it.value ?? it.label;
+    }
+    e.call("add_item", ["" + label, GInt(i)]);
+    inst.selectValues.push(value);
+  }
+  let idx = __vrNum(props.index, -1);
+  if (idx < 0 && props.value != null) {
+    for (let i = 0; i < inst.selectValues.length; i++) {
+      if (inst.selectValues[i] == props.value) {
+        idx = i;
+      }
+    }
+  }
+  if (idx >= 0) {
+    e.call("select", [GInt(idx)]);
+  }
+}
+
+function __vrCreateSelect(inst, props, t) {
+  let e = GD.create("OptionButton");
+  inst.node = e;
+  inst.container = null;
+  e.set("focus_mode", GInt(0));
+  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
+  __vrSetMinSize(e, __vrNum(props.minWidth, 0.0), __vrNum(props.height, t.controlHeight));
+  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, padX: 26, border: 1, borderColor: t.outline }));
+  e.set("theme_override_styles/hover", VUI.styleBox({ bg: t.surface3, radius: t.radiusM, padX: 26, border: 1, borderColor: t.outline }));
+  e.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.surface3, radius: t.radiusM, padX: 26, border: 1, borderColor: t.primary }));
+  e.set("theme_override_colors/font_color", t.text);
+  if (props.wide == true || props.grow == true) {
+    e.set("size_flags_horizontal", GInt(3));
+  }
+  __vrApplySelectItems(inst, props, t);
+  e.connect("item_selected", (a) => {
+    let i = a[0];
+    let value = null;
+    if (inst.selectValues != null && i >= 0 && i < inst.selectValues.length) {
+      value = inst.selectValues[i];
+    }
+    __vrCall(inst.props.onChange, value);
+    __vrCall(inst.props.onSelect, i);
+  });
+}
+
+// ---- richtext (BBCode) --------------------------------------------------------
+
+function __vrCreateRichText(inst, props, t) {
+  let l = GD.create("RichTextLabel");
+  inst.node = l;
+  inst.container = null;
+  l.set("bbcode_enabled", true);
+  l.set("fit_content", true);
+  l.set("text", props.markup ?? __vrTextOf(props));
+  l.set("theme_override_font_sizes/normal_font_size", GInt(__vrNum(props.size, t.fontM)));
+  l.set("theme_override_colors/default_color", __vrColor(props.color) ?? t.text);
+  l.set("size_flags_horizontal", GInt(3));
+  if (props.height != null) {
+    __vrSetMinSize(l, 0.0, __vrNum(props.height, 0.0));
+  }
+}
+
 // ---- image -----------------------------------------------------------------
 
 function __vrCreateImage(inst, props, t) {
@@ -1872,7 +2093,7 @@ function __vrDriverUpdate(inst, oldProps, props) {
     }
     return;
   }
-  if (tag == "input" || tag == "field" || tag == "textinput") {
+  if (tag == "input" || tag == "field" || tag == "textinput" || tag == "textarea") {
     // Controlled input: push value when the prop diverges from the widget.
     if (props.value != null && ("" + props.value) != inst.fieldValue) {
       inst.fieldValue = "" + props.value;
@@ -1881,6 +2102,16 @@ function __vrDriverUpdate(inst, oldProps, props) {
     if (props.placeholder != oldProps.placeholder && props.placeholder != null) {
       inst.node.set("placeholder_text", props.placeholder);
     }
+    return;
+  }
+  if (tag == "select" || tag == "dropdown" || tag == "option") {
+    if (props.options != oldProps.options || props.items != oldProps.items || props.index != oldProps.index || props.value != oldProps.value) {
+      __vrApplySelectItems(inst, props, t);
+    }
+    return;
+  }
+  if (tag == "richtext") {
+    inst.node.set("text", props.markup ?? __vrTextOf(props));
     return;
   }
   if (tag == "image" || tag == "img") {
@@ -2093,8 +2324,13 @@ function Checkbox(props) { return jsx("checkbox", props); }
 function Divider(props) { return jsx("divider", props); }
 function Spacer(props) { return jsx("spacer", props); }
 
+function TextArea(props) { return jsx("textarea", props); }
+function Select(props) { return jsx("select", props); }
+function RichText(props) { return jsx("richtext", props); }
+
 // 3D primitives (the 2D<->3D bridge and the Node3D family).
 function Scene3D(props) { return jsx("scene3d", props); }
+function GltfModel(props) { return jsx("gltf", props); }
 function Node3D(props) { return jsx("node3d", props); }
 function Mesh(props) { return jsx("mesh", props); }
 function Box(props) { return jsx("box", props); }

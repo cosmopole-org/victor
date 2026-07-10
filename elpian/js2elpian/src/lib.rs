@@ -398,9 +398,28 @@ fn js_universal_member(name: &str) -> Option<&'static str> {
         "toUpperCase" => "upper",
         "toLowerCase" => "lower",
         "charCodeAt" => "codeUnitAt",
+        "filter" => "where",
         _ => return None,
     })
 }
+
+/// Runtime prelude prepended to every JS program — the js2elpian counterpart
+/// of the Dart emitter's PRELUDE. The `__List_*` functions implement the
+/// higher-order list methods in the language itself: the VM's indexer binds a
+/// `list.map` / `.where` / `.forEach` / `.fold` / `.any` / `.every` /
+/// `.reduce` member read to the matching helper with the receiver as `this`
+/// (see `elpian-vm/src/sdk/type_methods.rs`, `Dispatch::Prelude`). Without
+/// these, calling `.map` in a JS guest hits "data is not runnable".
+/// The callback also receives the element index, matching JS conventions.
+const JS_LIST_PRELUDE: &str = concat!(
+    "function __List_map(f){ var out = []; var i = 0; while (i < this.length) { out.push(f(this[i], i)); i = i + 1; } return out; }\n",
+    "function __List_where(f){ var out = []; var i = 0; while (i < this.length) { if (f(this[i], i)) { out.push(this[i]); } i = i + 1; } return out; }\n",
+    "function __List_forEach(f){ var i = 0; while (i < this.length) { f(this[i], i); i = i + 1; } return null; }\n",
+    "function __List_fold(init, f){ var acc = init; var i = 0; while (i < this.length) { acc = f(acc, this[i]); i = i + 1; } return acc; }\n",
+    "function __List_any(f){ var i = 0; while (i < this.length) { if (f(this[i], i)) { return true; } i = i + 1; } return false; }\n",
+    "function __List_every(f){ var i = 0; while (i < this.length) { if (!f(this[i], i)) { return false; } i = i + 1; } return true; }\n",
+    "function __List_reduce(f){ var acc = this[0]; var i = 1; while (i < this.length) { acc = f(acc, this[i]); i = i + 1; } return acc; }\n",
+);
 
 /// Scan the token stream for class method declarations — an identifier at
 /// class-body brace depth immediately followed by `(`. Used to guard the
@@ -1632,7 +1651,8 @@ impl JsParser {
 /// syntax error in the supported subset; use [`try_parse_js`] for a fallible
 /// variant.
 pub fn parse_js(src: &str) -> serde_json::Value {
-    JsParser::new(tokenize_js(src)).parse_program()
+    let full = format!("{JS_LIST_PRELUDE}\n{src}");
+    JsParser::new(tokenize_js(&full)).parse_program()
 }
 
 /// Parse JavaScript source into Elpian AST JSON, returning an error instead of
