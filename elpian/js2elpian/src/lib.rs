@@ -84,7 +84,19 @@ enum JsTok {
     Str(String),
     Ident(String),
     Punct(String),
+    /// A template / interpolated string (`` `a${x}b` ``) as an ordered list of
+    /// literal-text and embedded-expression-source parts. The parser lowers it to
+    /// the VM's native `template` node.
+    Template(Vec<TplPart>),
     Eof,
+}
+
+/// One segment of a template literal: either fixed literal text or the raw
+/// source of an interpolated `${ … }` expression (re-parsed by the parser).
+#[derive(Clone, Debug, PartialEq)]
+enum TplPart {
+    Lit(String),
+    Expr(String),
 }
 
 fn tokenize_js(src: &str) -> Vec<JsTok> {
@@ -95,9 +107,9 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
     // Longest punctuators first so the greedy scan never splits `===` into
     // `==` + `=`, `<=` into `<` + `=`, and so on.
     let puncts: &[&str] = &[
-        "===", "!==", "**", "~/", "??", "==", "!=", "<=", ">=", "=>", "&&", "||", "++", "--", "+=",
-        "-=", "*=", "/=", "%=", "(", ")", "{", "}", "[", "]", ";", ",", ".", ":", "?", "<", ">", "=",
-        "+", "-", "*", "/", "%", "!", "^", "&", "|",
+        "...", "===", "!==", "**", "~/", "??", "==", "!=", "<=", ">=", "=>", "&&", "||", "++", "--",
+        "+=", "-=", "*=", "/=", "%=", "(", ")", "{", "}", "[", "]", ";", ",", ".", ":", "?", "<",
+        ">", "=", "+", "-", "*", "/", "%", "!", "^", "&", "|",
     ];
     while i < n {
         let c = chars[i];
@@ -146,6 +158,62 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
             }
             i += 1; // closing quote
             toks.push(JsTok::Str(s));
+            continue;
+        }
+        // Template / interpolated string literals (backtick-quoted), split into
+        // alternating literal-text and `${ … }` expression-source parts. Nested
+        // braces inside an interpolation are balanced so `${ {a:1}[x] }` works.
+        if c == '`' {
+            i += 1;
+            let mut parts: Vec<TplPart> = vec![];
+            let mut lit = String::new();
+            while i < n && chars[i] != '`' {
+                if chars[i] == '\\' && i + 1 < n {
+                    match chars[i + 1] {
+                        'n' => lit.push('\n'),
+                        't' => lit.push('\t'),
+                        'r' => lit.push('\r'),
+                        '\\' => lit.push('\\'),
+                        '`' => lit.push('`'),
+                        '$' => lit.push('$'),
+                        other => lit.push(other),
+                    }
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '$' && i + 1 < n && chars[i + 1] == '{' {
+                    if !lit.is_empty() {
+                        parts.push(TplPart::Lit(std::mem::take(&mut lit)));
+                    }
+                    i += 2; // skip `${`
+                    let mut depth = 1i32;
+                    let mut expr = String::new();
+                    while i < n && depth > 0 {
+                        match chars[i] {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        expr.push(chars[i]);
+                        i += 1;
+                    }
+                    i += 1; // skip closing `}`
+                    parts.push(TplPart::Expr(expr));
+                    continue;
+                }
+                lit.push(chars[i]);
+                i += 1;
+            }
+            i += 1; // closing backtick
+            if !lit.is_empty() || parts.is_empty() {
+                parts.push(TplPart::Lit(lit));
+            }
+            toks.push(JsTok::Template(parts));
             continue;
         }
         // Numeric literals (integer, fractional, exponent).
@@ -230,6 +298,12 @@ fn js_arith(op: &str, a: Value, b: Value) -> Value {
 }
 fn js_def(name: &str, val: Value) -> Value {
     json!({ "type": "definition", "data": { "leftSide": js_ident(name), "rightSide": val } })
+}
+/// Wrap a value in a spread element (`...value`) — the VM's universal
+/// expand-in-place marker, valid in array literals, object literals and call
+/// argument lists.
+fn js_spread(v: Value) -> Value {
+    json!({ "type": "spread", "data": { "value": v } })
 }
 /// Build an assignment for any JS lvalue. A bare identifier or a *direct* indexer
 /// (`a.b` / `a[i]`, whose base is a named variable) uses the native `assignment`
@@ -965,6 +1039,15 @@ impl JsParser {
             self.advance();
             let mut out: Vec<Value> = vec![];
             loop {
+                // An object / array pattern binds a native `destructure` statement
+                // instead of a single name.
+                if self.at_punct("{") || self.at_punct("[") {
+                    out.push(self.parse_destructure_decl());
+                    if !self.eat_punct(",") {
+                        break;
+                    }
+                    continue;
+                }
                 let name = self.expect_ident_name();
                 let val = if self.eat_punct("=") {
                     self.parse_expr()
@@ -1231,7 +1314,11 @@ impl JsParser {
         self.expect_punct("(");
         let mut args: Vec<Value> = vec![];
         while !self.at_punct(")") && !self.at_eof() {
-            args.push(self.parse_expr());
+            if self.eat_punct("...") {
+                args.push(js_spread(self.parse_expr()));
+            } else {
+                args.push(self.parse_expr());
+            }
             if !self.eat_punct(",") {
                 break;
             }
@@ -1318,6 +1405,108 @@ impl JsParser {
         js_ident(&name)
     }
 
+    /// Lower a tokenized template literal into the VM's native `template` node:
+    /// literal segments become string parts, `${ … }` segments are re-parsed as
+    /// expressions (sharing this parser's desugaring context).
+    fn build_template(&mut self, parts: Vec<TplPart>) -> Value {
+        let mut out: Vec<Value> = vec![];
+        for p in parts {
+            match p {
+                TplPart::Lit(s) => out.push(js_string(&s)),
+                TplPart::Expr(src) => out.push(self.parse_subexpr(&src)),
+            }
+        }
+        json!({ "type": "template", "data": { "parts": out } })
+    }
+
+    /// Parse a standalone expression source (an interpolation body) with a fresh
+    /// parser that inherits this one's class / member context, then carry back
+    /// any lifted closures and the advanced anonymous-name counter so synthetic
+    /// names stay globally unique.
+    fn parse_subexpr(&mut self, src: &str) -> Value {
+        let mut sub = JsParser::new(tokenize_js(src));
+        sub.class_parent = self.class_parent.clone();
+        sub.class_statics = self.class_statics.clone();
+        sub.class_ctor_params = self.class_ctor_params.clone();
+        sub.user_members = self.user_members.clone();
+        sub.anon_counter = self.anon_counter;
+        let e = sub.parse_expr();
+        self.anon_counter = sub.anon_counter;
+        self.lifted.append(&mut sub.lifted);
+        e
+    }
+
+    /// Parse one destructuring declarator (`{ … } = src` or `[ … ] = src`) into a
+    /// native `destructure` statement node. Supports member renaming (object),
+    /// per-binding defaults, holes (array) and a trailing rest binding.
+    fn parse_destructure_decl(&mut self) -> Value {
+        let is_array = self.at_punct("[");
+        let mut bindings: Vec<Value> = vec![];
+        if is_array {
+            self.expect_punct("[");
+            loop {
+                if self.at_punct("]") {
+                    break;
+                }
+                if self.at_punct(",") {
+                    // An elision / hole (`[a, , c]`).
+                    bindings.push(json!({ "hole": true }));
+                    self.advance();
+                    continue;
+                }
+                if self.eat_punct("...") {
+                    let name = self.expect_ident_name();
+                    bindings.push(json!({ "name": name, "rest": true }));
+                } else {
+                    let name = self.expect_ident_name();
+                    if self.eat_punct("=") {
+                        let def = self.parse_expr();
+                        bindings.push(json!({ "name": name, "default": def }));
+                    } else {
+                        bindings.push(json!({ "name": name }));
+                    }
+                }
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            self.expect_punct("]");
+        } else {
+            self.expect_punct("{");
+            loop {
+                if self.at_punct("}") {
+                    break;
+                }
+                if self.eat_punct("...") {
+                    let name = self.expect_ident_name();
+                    bindings.push(json!({ "name": name, "rest": true }));
+                } else {
+                    let key = self.expect_ident_name();
+                    // `{ key: name }` renames; plain `{ key }` binds the same name.
+                    let name = if self.eat_punct(":") {
+                        self.expect_ident_name()
+                    } else {
+                        key.clone()
+                    };
+                    if self.eat_punct("=") {
+                        let def = self.parse_expr();
+                        bindings.push(json!({ "name": name, "key": key, "default": def }));
+                    } else {
+                        bindings.push(json!({ "name": name, "key": key }));
+                    }
+                }
+                if !self.eat_punct(",") {
+                    break;
+                }
+            }
+            self.expect_punct("}");
+        }
+        self.expect_punct("=");
+        let source = self.parse_expr();
+        json!({ "type": "destructure", "data": {
+            "isArray": is_array, "source": source, "bindings": bindings } })
+    }
+
     fn parse_primary(&mut self) -> Value {
         match self.peek().clone() {
             JsTok::Num(s) => {
@@ -1327,6 +1516,10 @@ impl JsParser {
             JsTok::Str(s) => {
                 self.advance();
                 js_string(&s)
+            }
+            JsTok::Template(parts) => {
+                self.advance();
+                self.build_template(parts)
             }
             JsTok::Ident(name) => match name.as_str() {
                 "true" => {
@@ -1376,7 +1569,11 @@ impl JsParser {
         self.expect_punct("[");
         let mut items: Vec<Value> = vec![];
         while !self.at_punct("]") && !self.at_eof() {
-            items.push(self.parse_expr());
+            if self.eat_punct("...") {
+                items.push(js_spread(self.parse_expr()));
+            } else {
+                items.push(self.parse_expr());
+            }
             if !self.eat_punct(",") {
                 break;
             }
@@ -1387,8 +1584,20 @@ impl JsParser {
 
     fn parse_object(&mut self) -> Value {
         self.expect_punct("{");
-        let mut map = serde_json::Map::new();
+        // Collect ordered entries so a spread (`{ ...src }`) keeps its position;
+        // if none appears we emit the classic unordered `value` map so existing
+        // behaviour (and its bytecode) is byte-for-byte unchanged.
+        let mut entries: Vec<Value> = vec![];
+        let mut had_spread = false;
         while !self.at_punct("}") && !self.at_eof() {
+            if self.eat_punct("...") {
+                had_spread = true;
+                entries.push(json!({ "spread": self.parse_expr() }));
+                if !self.eat_punct(",") {
+                    break;
+                }
+                continue;
+            }
             let key = match self.advance() {
                 JsTok::Ident(s) => s,
                 JsTok::Str(s) => s,
@@ -1401,13 +1610,21 @@ impl JsParser {
                 // Shorthand `{ a }` is `{ a: a }`.
                 js_ident(&key)
             };
-            map.insert(key, val);
+            entries.push(json!({ "key": key, "value": val }));
             if !self.eat_punct(",") {
                 break;
             }
         }
         self.expect_punct("}");
-        json!({ "type": "object", "data": { "value": Value::Object(map) } })
+        if had_spread {
+            json!({ "type": "object", "data": { "entries": entries } })
+        } else {
+            let mut map = serde_json::Map::new();
+            for e in entries {
+                map.insert(e["key"].as_str().unwrap().to_string(), e["value"].clone());
+            }
+            json!({ "type": "object", "data": { "value": Value::Object(map) } })
+        }
     }
 }
 

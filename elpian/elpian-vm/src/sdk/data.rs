@@ -211,6 +211,27 @@ impl Val {
             _ => out.push_str("\"[undefined]\""),
         }
     }
+    /// The value's *display* (human-readable) string coercion — the form used by
+    /// interpolated / template strings and any front-end "value to text"
+    /// operation. Unlike [`stringify`], a string coerces to itself with **no**
+    /// surrounding quotes and null coerces to the word `null`; numbers, booleans
+    /// and functions render as their bare text, while objects and arrays fall
+    /// back to their structural (JSON) encoding since they have no shorter
+    /// canonical text. This is deliberately language-neutral: it is the VM's own
+    /// notion of "the text of a value", not any one language's `toString`.
+    pub fn to_display(&self) -> String {
+        match self.typ {
+            0 => "null".to_string(),
+            7 => self.as_string(),
+            8 | 9 => self.stringify(),
+            10 => self.as_func().borrow().name.clone(),
+            _ => {
+                let mut out = String::new();
+                self.stringify_into(&mut out);
+                out
+            }
+        }
+    }
     fn clone_data(&self) -> Self {
         // Deep-copy scalars and strings; objects and arrays get a *fresh* inner
         // `Rc<RefCell<…>>` with recursively cloned contents (value semantics);

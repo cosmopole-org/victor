@@ -107,13 +107,39 @@ fn serialize_expr(val: serde_json::Value) -> Vec<u8> {
         "object" => {
             result.push(8);
             result.append(&mut i64::to_be_bytes(-2).to_vec());
-            result.append(&mut i32::to_be_bytes(val["data"]["value"].as_object().unwrap().iter().len() as i32).to_vec());
-            for (k, v) in val["data"]["value"].as_object().unwrap().iter() {
-                result.push(7);
-                let mut key_bytes = k.as_bytes().to_vec();
-                result.append(&mut i32::to_be_bytes(key_bytes.len() as i32).to_vec());
-                result.append(&mut key_bytes);
-                result.append(&mut serialize_expr(v.clone()));
+            // Two authoring forms are accepted. The classic `data.value` map is an
+            // unordered `{ key: expr }` object. The `data.entries` array is the
+            // *ordered* form that additionally supports **spread entries**
+            // (`{ "spread": <expr> }`, which merges another object's members in
+            // place). Each property — including a spread — is one serialized pair:
+            // a spread emits the reserved spread-key marker (0x1a) where the key
+            // literal would go, so the object builder recognises it and merges
+            // rather than inserts. `props_len` counts entries, not the expanded
+            // member count.
+            if let Some(entries) = val["data"].get("entries").and_then(|e| e.as_array()) {
+                result.append(&mut i32::to_be_bytes(entries.len() as i32).to_vec());
+                for entry in entries.iter() {
+                    if let Some(spread) = entry.get("spread") {
+                        result.push(0x1a); // spread-key marker (no operand)
+                        result.append(&mut serialize_expr(spread.clone()));
+                    } else {
+                        result.push(7);
+                        let key = entry["key"].as_str().unwrap();
+                        let mut key_bytes = key.as_bytes().to_vec();
+                        result.append(&mut i32::to_be_bytes(key_bytes.len() as i32).to_vec());
+                        result.append(&mut key_bytes);
+                        result.append(&mut serialize_expr(entry["value"].clone()));
+                    }
+                }
+            } else {
+                result.append(&mut i32::to_be_bytes(val["data"]["value"].as_object().unwrap().iter().len() as i32).to_vec());
+                for (k, v) in val["data"]["value"].as_object().unwrap().iter() {
+                    result.push(7);
+                    let mut key_bytes = k.as_bytes().to_vec();
+                    result.append(&mut i32::to_be_bytes(key_bytes.len() as i32).to_vec());
+                    result.append(&mut key_bytes);
+                    result.append(&mut serialize_expr(v.clone()));
+                }
             }
         }
         "array" => {
@@ -251,8 +277,85 @@ fn serialize_expr(val: serde_json::Value) -> Vec<u8> {
             });
             result.append(&mut serialize_expr(input.clone()));
         }
+        "spread" => {
+            // Spread element (`...value`): a universal "expand this collection in
+            // place" marker. Valid inside an array literal, an object literal
+            // (via the `entries` form), and a call's argument list. Layout:
+            // [0x19][inner value expression]. At run time the inner value is
+            // wrapped in a spread marker that the enclosing array/object/call
+            // builder flattens. `value` is the collection to expand.
+            result.push(0x19);
+            result.append(&mut serialize_expr(val["data"]["value"].clone()));
+        }
+        "template" => {
+            // Interpolated / template string: an ordered list of `parts`, each an
+            // arbitrary value expression, concatenated using the VM's display
+            // coercion (a string contributes itself verbatim; other values their
+            // text form). Literal text segments are simply string-literal parts.
+            // Layout: [0x1b][part count: i32][part expression]*.
+            result.push(0x1b);
+            let parts = val["data"]["parts"].as_array().unwrap();
+            result.append(&mut i32::to_be_bytes(parts.len() as i32).to_vec());
+            for part in parts.iter() {
+                result.append(&mut serialize_expr(part.clone()));
+            }
+        }
         _ => {
             panic!("unknown val type");
+        }
+    }
+    result
+}
+
+/// Serialize the metadata + inline expressions of a `destructure` statement.
+/// Layout produced (statement opcode 0x1c): `[0x1c][flags][binding count: i32]`
+/// then, for each binding, its fixed metadata record, then the **source**
+/// value expression, then the default-value expression of every binding that
+/// declares one, in binding order. The executor evaluates the source first and
+/// each default next, binding by key (object) or position (array).
+///
+/// `flags` bit 0 selects array (1) vs object (0) form. Per-binding metadata:
+///   object: `[bind flags][key len: i32][key][name len: i32][name]`
+///   array:  `[bind flags][name len: i32][name]`
+/// where a binding's flags are bit0 = has default, bit1 = is rest, bit2 = is
+/// hole (array only; no name/key follows).
+fn serialize_destructure(data: &Value) -> Vec<u8> {
+    let mut result: Vec<u8> = vec![];
+    result.push(0x1c);
+    let is_array = data["isArray"].as_bool().unwrap_or(false);
+    result.push(if is_array { 1 } else { 0 });
+    let bindings = data["bindings"].as_array().unwrap();
+    result.append(&mut i32::to_be_bytes(bindings.len() as i32).to_vec());
+    for b in bindings.iter() {
+        let is_hole = b.get("hole").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_rest = b.get("rest").and_then(|v| v.as_bool()).unwrap_or(false);
+        let has_default = b.get("default").is_some();
+        let mut flags = 0u8;
+        if has_default { flags |= 1; }
+        if is_rest { flags |= 2; }
+        if is_hole { flags |= 4; }
+        result.push(flags);
+        if is_hole {
+            continue;
+        }
+        if !is_array {
+            // Object bindings carry the source key; it defaults to the bound name.
+            let name = b["name"].as_str().unwrap();
+            let key = b.get("key").and_then(|k| k.as_str()).unwrap_or(name);
+            let mut key_bytes = key.as_bytes().to_vec();
+            result.append(&mut i32::to_be_bytes(key_bytes.len() as i32).to_vec());
+            result.append(&mut key_bytes);
+        }
+        let name = b["name"].as_str().unwrap();
+        let mut name_bytes = name.as_bytes().to_vec();
+        result.append(&mut i32::to_be_bytes(name_bytes.len() as i32).to_vec());
+        result.append(&mut name_bytes);
+    }
+    // Source expression, then each present default in binding order.
+    result.append(&mut serialize_expr(data["source"].clone()));
+    for b in bindings.iter() {
+        if let Some(def) = b.get("default") {
+            result.append(&mut serialize_expr(def.clone()));
         }
     }
     result
@@ -352,6 +455,15 @@ fn collect_bound(node: &Value, bound: &mut std::collections::BTreeSet<String>) {
                 }
             }
         }
+        "destructure" => {
+            // Every non-hole binding introduces a name at this scope level.
+            if let Some(bindings) = node["data"]["bindings"].as_array() {
+                for b in bindings {
+                    if b.get("hole").and_then(|v| v.as_bool()).unwrap_or(false) { continue; }
+                    if let Some(n) = b["name"].as_str() { bound.insert(n.to_string()); }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -395,6 +507,12 @@ fn collect_used(node: &Value, used: &mut std::collections::BTreeSet<String>) {
         }
         "returnOperation" => collect_used(&node["data"]["value"], used),
         "object" => {
+            if let Some(entries) = node["data"].get("entries").and_then(|e| e.as_array()) {
+                for entry in entries {
+                    if let Some(spread) = entry.get("spread") { collect_used(spread, used); }
+                    else { collect_used(&entry["value"], used); }
+                }
+            }
             if let Some(obj) = node["data"]["value"].as_object() {
                 for (_k, v) in obj { collect_used(v, used); }
             }
@@ -402,6 +520,20 @@ fn collect_used(node: &Value, used: &mut std::collections::BTreeSet<String>) {
         "array" => {
             if let Some(arr) = node["data"]["value"].as_array() {
                 for v in arr { collect_used(v, used); }
+            }
+        }
+        "spread" => collect_used(&node["data"]["value"], used),
+        "template" => {
+            if let Some(parts) = node["data"]["parts"].as_array() {
+                for p in parts { collect_used(p, used); }
+            }
+        }
+        "destructure" => {
+            collect_used(&node["data"]["source"], used);
+            if let Some(bindings) = node["data"]["bindings"].as_array() {
+                for b in bindings {
+                    if let Some(def) = b.get("default") { collect_used(def, used); }
+                }
             }
         }
         "ifStmt" => {
@@ -510,6 +642,14 @@ pub fn compile_ast(program: serde_json::Value, start_point: usize) -> Vec<u8> {
             "returnOperation" => {
                 result.push(0x14);
                 result.append(&mut serialize_expr(operation["data"]["value"].clone()).to_vec());
+            }
+            "destructure" => {
+                // Destructuring binding: evaluate one source value and bind a list
+                // of names from its members (object keys) or positions (array
+                // indices), with optional per-binding defaults and a trailing rest
+                // binding. A native statement opcode so every front-end shares one
+                // implementation. See `serialize_destructure`.
+                result.append(&mut serialize_destructure(&operation["data"]));
             }
             "continueStmt" => {
                 result.push(0x17);

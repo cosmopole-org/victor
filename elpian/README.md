@@ -80,6 +80,27 @@ calls are *recorded* into a serializable scene tree that the real, native
 (AOT-compiled, iOS-legal) engine rasterizes — the guest never touches the GPU or
 generates code.
 
+## Universal "shape" operators (native VM opcodes)
+
+Beyond scalars, arithmetic and the classic collection literals, the VM natively
+implements a set of language-neutral **shape operators** as first-class opcodes
+in the executor state machine — *not* front-end desugaring — so **every** language
+lowered to the Elpian AST gets them uniformly, with one shared implementation.
+They carry no language-specific naming.
+
+| Operator | AST node → opcode | Behaviour |
+|---|---|---|
+| **Spread** (`...value`) | `spread` → `0x19` / `0x1a` | Expands a collection in place inside an **array** literal, an **object** literal, or a **call** argument list. Spreading an array contributes its elements; a string, its characters; an object (in an object literal), its members. |
+| **Template / interpolation** | `template` → `0x1b` | Concatenates an ordered list of value parts using the VM's display coercion (a string contributes itself; other values their text form). Literal segments are string parts. |
+| **Destructuring** | `destructure` → `0x1c` | Binds many names from one source value by **member key** (object) or **position** (array), with per-binding **defaults**, array **holes**, and a trailing **rest** binding that gathers the remainder into a fresh collection. |
+
+These are exercised end-to-end on the real VM by `elpian-vm/tests/vm_shape_ops.rs`
+(built straight from the AST, as any front-end would) and through the JavaScript
+front-end by `js2elpian/tests/js_shape_ops.rs` (`[...a]`, `{...o}`, `f(...args)`,
+`` `a${x}b` ``, `let {a, b: r, c = 1, ...rest} = o`, `let [x, , y, ...tail] = a`).
+The value model's `Val::to_display` supplies the neutral "text of a value" the
+template operator concatenates.
+
 ## Governance (the controlling mechanisms) — two layers
 
 Every `dart:*` call passes through both:
