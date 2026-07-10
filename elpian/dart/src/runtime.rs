@@ -447,6 +447,9 @@ impl DartRuntime {
 
         match api_name {
             "log" => {
+                if std::env::var("ELPIAN_LOG_STDERR").is_ok() {
+                    eprintln!("[guest] {}", stringify_args(&args));
+                }
                 self.log.push(stringify_args(&args));
                 Value::Null
             }

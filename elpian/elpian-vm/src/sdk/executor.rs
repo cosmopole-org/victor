@@ -3475,6 +3475,15 @@ impl Executor {
                 match v2.typ {
                     8 => {
                         let v2_val = v2.as_object();
+                        // Identity short-circuit: the same object is always
+                        // equal to itself. Besides being fast, this is what
+                        // terminates comparisons of self-referential object
+                        // graphs (e.g. a UI tree with parent/child
+                        // back-references), which the structural walk below
+                        // would recurse into forever.
+                        if std::rc::Rc::ptr_eq(&v_val, &v2_val) {
+                            return true;
+                        }
                         if v_val.borrow().data.data.iter().all(|(k, _d)| {
                             if !v2_val.borrow().data.data.contains_key(&k.clone()) {
                                 return false;
@@ -3503,6 +3512,10 @@ impl Executor {
                 match v2.typ {
                     9 => {
                         let v2_val = v2.as_array();
+                        // Identity short-circuit (see the object case above).
+                        if std::rc::Rc::ptr_eq(&v_val, &v2_val) {
+                            return true;
+                        }
                         if v_val.borrow().data.len() != v2_val.borrow().data.len() {
                             return false;
                         }
