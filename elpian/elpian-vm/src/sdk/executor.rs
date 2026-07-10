@@ -6,7 +6,7 @@ use crate::sdk::{
     data::{Array, Function, Object, Payload, Val, ValGroup, ValMap},
     lifecycle::ExecControl,
     limits::{Governor, ResourceLimits},
-    program::{DecodedProgram, LogicalKind, UnitKind},
+    program::{DecodedProgram, DestructurePlan, LogicalKind, UnitKind},
     stdlib,
     type_methods::{self, CoreType, Dispatch},
 };
@@ -34,6 +34,9 @@ pub enum OperationTypes {
     TypeTest,
     Logical,
     Conditional,
+    Spread,
+    Template,
+    Destructure,
     Dummy,
 }
 
@@ -91,6 +94,13 @@ pub enum ExecStates {
     LogicalExtractOp2,
     CondExprExtractCond,
     CondExprExtractValue,
+    SpreadStarted,
+    SpreadFinished,
+    TemplateExtractInfo,
+    TemplateExtractPart,
+    TemplateFinished,
+    DestructureExtractValue,
+    DestructureFinished,
     Dummy,
 }
 
@@ -175,6 +185,12 @@ pub trait Operation {
     /// operations never collect cases, so the default is unused.
     fn next_case_bounds(&self) -> (usize, usize) {
         (0, 0)
+    }
+    /// For a [`Destructure`] operation: the binding plan describing how to bind
+    /// the collected source (and default) values. Every other operation returns
+    /// `None`; the executor only asks a `Destructure` register for it.
+    fn destructure_plan(&self) -> Option<Rc<DestructurePlan>> {
+        None
     }
 }
 
@@ -472,7 +488,10 @@ impl Operation for CallFunction {
             Val {
                 typ: 9,
                 data: Payload::from(Rc::new(RefCell::new(Array::new(
-                    self.params.clone(),
+                    // Expand any spread arguments (`f(...args)`) into the flat
+                    // positional list before the frame is built or a native
+                    // builtin reads them. A call with no spreads is untouched.
+                    flatten_spread(&self.params),
                 )))),
             },
         ]
@@ -990,6 +1009,282 @@ impl Operation for ArrayExpr {
             },
         ]
     }
+}
+
+// ---- spread / template / destructuring (universal collection operators) -----
+//
+// These three operations implement language-neutral "shape" operators that the
+// classic scalar/collection opcodes could not express: expanding one collection
+// into another (spread), building a string from interpolated parts (template),
+// and binding many names from one value (destructuring). They are native VM
+// operations — no front-end desugaring — so any language lowered to the Elpian
+// AST gets them for free.
+
+/// Value type tag of a *spread marker*: a transient one-element wrapper produced
+/// by the spread operator (`...value`) that the enclosing array / object / call
+/// builder recognises and flattens. It never escapes into guest-visible state —
+/// it lives only between a `Spread` unit and the collection that consumes it.
+const SPREAD_MARKER: i64 = 200;
+/// Value type tag of an *object-spread key marker*: occupies an object literal's
+/// key slot to signal that the paired value is an object whose members are
+/// merged in place rather than stored under a literal key.
+const SPREAD_KEY_MARKER: i64 = 201;
+
+/// Wrap `inner` in a spread marker (see [`SPREAD_MARKER`]).
+fn make_spread_marker(inner: Val) -> Val {
+    Val {
+        typ: SPREAD_MARKER,
+        data: Payload::from(Rc::new(RefCell::new(Array::new(vec![inner])))),
+    }
+}
+
+/// Flatten any spread markers in a list of collected items (array elements or
+/// call arguments): a marker wrapping an array contributes its elements, one
+/// wrapping a string contributes its characters (each as a one-char string), and
+/// any other wrapped value contributes itself; a plain item is kept as-is. The
+/// common case — no spreads at all — returns a straight clone so the hot call
+/// path pays nothing extra.
+fn flatten_spread(items: &[Val]) -> Vec<Val> {
+    if !items.iter().any(|i| i.typ == SPREAD_MARKER) {
+        return items.to_vec();
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if item.typ == SPREAD_MARKER {
+            let inner_rc = item.as_array();
+            let inner = inner_rc.borrow().data[0].clone();
+            match inner.typ {
+                9 => {
+                    for e in inner.as_array().borrow().data.iter() {
+                        out.push(e.clone());
+                    }
+                }
+                7 => {
+                    for c in inner.as_string().chars() {
+                        out.push(Val { typ: 7, data: Payload::from(c.to_string()) });
+                    }
+                }
+                _ => out.push(inner),
+            }
+        } else {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
+/// Spread operator `...value`: collects its single inner value and re-emits it
+/// wrapped in a spread marker. One-operand, mirroring [`NotValue`].
+struct SpreadOp {
+    typ: OperationTypes,
+    state: ExecStates,
+    pub value: Option<Val>,
+}
+
+impl SpreadOp {
+    pub fn new() -> Self {
+        SpreadOp { typ: OperationTypes::Spread, state: ExecStates::SpreadStarted, value: None }
+    }
+}
+
+impl Operation for SpreadOp {
+    fn get_state(&self) -> ExecStates {
+        self.state
+    }
+    fn get_type(&self) -> OperationTypes {
+        self.typ
+    }
+    fn set_state(&mut self, state: ExecStates, data: StateData) {
+        self.state = state;
+        if state == ExecStates::SpreadFinished {
+            self.value = Some(data.val());
+        }
+    }
+    fn get_data(&self) -> Vec<Val> {
+        vec![self.value.clone().unwrap()]
+    }
+}
+
+/// Interpolated / template string: collects `part_count` value parts, then joins
+/// their display coercions into one string. Structurally a sibling of
+/// [`ArrayExpr`] (collect N, then reduce).
+struct TemplateExpr {
+    typ: OperationTypes,
+    state: ExecStates,
+    pub part_count: i32,
+    pub parts: Vec<Val>,
+}
+
+impl TemplateExpr {
+    pub fn new() -> Self {
+        TemplateExpr {
+            typ: OperationTypes::Template,
+            state: ExecStates::TemplateExtractInfo,
+            part_count: 0,
+            parts: vec![],
+        }
+    }
+}
+
+impl Operation for TemplateExpr {
+    fn get_state(&self) -> ExecStates {
+        self.state
+    }
+    fn get_type(&self) -> OperationTypes {
+        self.typ
+    }
+    fn set_state(&mut self, state: ExecStates, data: StateData) {
+        self.state = state;
+        if state == ExecStates::TemplateExtractInfo {
+            self.part_count = data.i32v();
+        } else if state == ExecStates::TemplateExtractPart {
+            self.parts.push(data.val());
+        }
+        if (self.part_count as usize) == self.parts.len() {
+            self.state = ExecStates::TemplateFinished;
+        }
+    }
+    fn get_data(&self) -> Vec<Val> {
+        let mut out = String::new();
+        for p in self.parts.iter() {
+            out.push_str(&p.to_display());
+        }
+        vec![Val { typ: 7, data: Payload::from(out) }]
+    }
+}
+
+/// Destructuring binding: collects the source value (and one value per
+/// defaulted binding), then the executor binds each name from the source's
+/// members (object) or positions (array). Carries its [`DestructurePlan`].
+struct DestructureOp {
+    typ: OperationTypes,
+    state: ExecStates,
+    pub plan: Rc<DestructurePlan>,
+    pub values: Vec<Val>,
+}
+
+impl DestructureOp {
+    pub fn new(plan: Rc<DestructurePlan>) -> Self {
+        DestructureOp {
+            typ: OperationTypes::Destructure,
+            state: ExecStates::DestructureExtractValue,
+            plan,
+            values: vec![],
+        }
+    }
+}
+
+impl Operation for DestructureOp {
+    fn get_state(&self) -> ExecStates {
+        self.state
+    }
+    fn get_type(&self) -> OperationTypes {
+        self.typ
+    }
+    fn set_state(&mut self, state: ExecStates, data: StateData) {
+        self.state = state;
+        if state == ExecStates::DestructureExtractValue {
+            self.values.push(data.val());
+        }
+        if self.values.len() == self.plan.value_count {
+            self.state = ExecStates::DestructureFinished;
+        }
+    }
+    fn get_data(&self) -> Vec<Val> {
+        self.values.clone()
+    }
+    fn destructure_plan(&self) -> Option<Rc<DestructurePlan>> {
+        Some(self.plan.clone())
+    }
+}
+
+/// Compute the `(name, value)` bindings a destructuring statement produces, from
+/// its plan and the collected values (`values[0]` is the source; the remaining
+/// values are the defaults, in binding order). Pure — the executor performs the
+/// actual `define` for each returned pair. Missing / nullish members fall back
+/// to a declared default (consistent with the VM's `??` nullish test); a rest
+/// binding gathers whatever the earlier bindings did not consume.
+fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val)> {
+    let null = Val { typ: 0, data: Payload::Null };
+    let source = values.first().cloned().unwrap_or_else(|| null.clone());
+    let mut default_idx = 1usize;
+    let mut out: Vec<(String, Val)> = Vec::with_capacity(plan.bindings.len());
+    if plan.is_array {
+        let elems: Vec<Val> = if source.typ == 9 {
+            source.as_array().borrow().data.clone()
+        } else if source.typ == 7 {
+            source.as_string().chars().map(|c| Val { typ: 7, data: Payload::from(c.to_string()) }).collect()
+        } else {
+            vec![]
+        };
+        let mut pos = 0usize;
+        for b in plan.bindings.iter() {
+            if b.is_rest {
+                let rest: Vec<Val> = if pos < elems.len() { elems[pos..].to_vec() } else { vec![] };
+                pos = elems.len();
+                out.push((
+                    b.name.clone(),
+                    Val { typ: 9, data: Payload::from(Rc::new(RefCell::new(Array::new(rest)))) },
+                ));
+                continue;
+            }
+            let elem = elems.get(pos).cloned();
+            pos += 1;
+            if b.is_hole {
+                continue;
+            }
+            let mut v = elem.unwrap_or_else(|| null.clone());
+            if b.has_default {
+                let dv = values.get(default_idx).cloned().unwrap_or_else(|| null.clone());
+                default_idx += 1;
+                if is_nullish(&v) {
+                    v = dv;
+                }
+            }
+            out.push((b.name.clone(), v));
+        }
+    } else {
+        let obj = if source.typ == 8 { Some(source.as_object()) } else { None };
+        // Keys claimed by explicit bindings, excluded from a rest binding.
+        let claimed: Vec<&str> =
+            plan.bindings.iter().filter(|b| !b.is_rest && !b.is_hole).map(|b| b.key.as_str()).collect();
+        for b in plan.bindings.iter() {
+            if b.is_rest {
+                let mut map = ValMap::default();
+                if let Some(o) = &obj {
+                    for (k, v) in o.borrow().data.data.iter() {
+                        if !claimed.contains(&k.as_str()) {
+                            map.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                out.push((
+                    b.name.clone(),
+                    Val {
+                        typ: 8,
+                        data: Payload::from(Rc::new(RefCell::new(Object::new(-2, ValGroup::new(map))))),
+                    },
+                ));
+                continue;
+            }
+            if b.is_hole {
+                continue;
+            }
+            let mut v = obj
+                .as_ref()
+                .and_then(|o| o.borrow().data.data.get(&b.key).cloned())
+                .unwrap_or_else(|| null.clone());
+            if b.has_default {
+                let dv = values.get(default_idx).cloned().unwrap_or_else(|| null.clone());
+                default_idx += 1;
+                if is_nullish(&v) {
+                    v = dv;
+                }
+            }
+            out.push((b.name.clone(), v));
+        }
+    }
+    out
 }
 
 struct CondBranch {
@@ -4350,6 +4645,50 @@ impl Executor {
                                     == ExecStates::NotValFinished;
                             continue;
                         }
+                    } else if op_type == OperationTypes::Spread {
+                        if self.registers.last().unwrap().get_state()
+                            == ExecStates::SpreadStarted
+                        {
+                            self.registers.last_mut().unwrap().set_state(
+                                ExecStates::SpreadFinished,
+                                StateData::Val(main_reg.take().unwrap()),
+                            );
+                            main_reg = None;
+                            is_reg_state_final =
+                                self.registers.last().unwrap().get_state()
+                                    == ExecStates::SpreadFinished;
+                            continue;
+                        }
+                    } else if op_type == OperationTypes::Template {
+                        if self.registers.last().unwrap().get_state()
+                            == ExecStates::TemplateExtractInfo
+                            || self.registers.last().unwrap().get_state()
+                                == ExecStates::TemplateExtractPart
+                        {
+                            self.registers.last_mut().unwrap().set_state(
+                                ExecStates::TemplateExtractPart,
+                                StateData::Val(main_reg.take().unwrap()),
+                            );
+                            main_reg = None;
+                            is_reg_state_final =
+                                self.registers.last().unwrap().get_state()
+                                    == ExecStates::TemplateFinished;
+                            continue;
+                        }
+                    } else if op_type == OperationTypes::Destructure {
+                        if self.registers.last().unwrap().get_state()
+                            == ExecStates::DestructureExtractValue
+                        {
+                            self.registers.last_mut().unwrap().set_state(
+                                ExecStates::DestructureExtractValue,
+                                StateData::Val(main_reg.take().unwrap()),
+                            );
+                            main_reg = None;
+                            is_reg_state_final =
+                                self.registers.last().unwrap().get_state()
+                                    == ExecStates::DestructureFinished;
+                            continue;
+                        }
                     } else if op_type
                         == OperationTypes::CondBrch
                     {
@@ -4485,9 +4824,15 @@ impl Executor {
                         == ExecStates::ArrExprFinished
                     {
                         let regs = self.registers.last().unwrap().get_data();
-                        let items_vec = regs[1].clone();
+                        let items_arr = regs[1].as_array();
+                        // Expand any spread elements (`[...xs, y]`) in place before
+                        // materialising the array; a plain array is untouched.
+                        let flattened = flatten_spread(&items_arr.borrow().data);
                         self.registers.pop();
-                        main_reg = Some(items_vec);
+                        main_reg = Some(Val {
+                            typ: 9,
+                            data: Payload::from(Rc::new(RefCell::new(Array::new(flattened)))),
+                        });
                         is_reg_state_final = false;
                         continue;
                     } else if self.registers.last().unwrap().get_state()
@@ -4498,10 +4843,21 @@ impl Executor {
                         let props_vec = regs[2].as_array();
                         let mut props_map = ValMap::default();
                         for i in (0..props_vec.borrow().data.len()).step_by(2) {
-                            props_map.insert(
-                                props_vec.borrow().data[i].as_string(),
-                                props_vec.borrow().data[i + 1].clone(),
-                            );
+                            let key = props_vec.borrow().data[i].clone();
+                            let val = props_vec.borrow().data[i + 1].clone();
+                            if key.typ == SPREAD_KEY_MARKER {
+                                // Object spread (`{...src}`): merge the paired
+                                // object's members, later entries winning — exactly
+                                // the ordered-override semantics of a literal.
+                                if val.typ == 8 {
+                                    let src = val.as_object();
+                                    for (k, v) in src.borrow().data.data.iter() {
+                                        props_map.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            } else {
+                                props_map.insert(key.as_string(), val);
+                            }
                         }
                         let result = Val {
                             typ: 8,
@@ -5130,6 +5486,42 @@ impl Executor {
                             typ: 6,
                             data: Payload::from(!val.truthy()),
                         });
+                        is_reg_state_final = false;
+                        continue;
+                    } else if self.registers.last().unwrap().get_state()
+                        == ExecStates::SpreadFinished
+                    {
+                        // Wrap the inner value in a spread marker; the enclosing
+                        // array / object / call builder flattens it.
+                        let data = self.registers.last().unwrap().get_data();
+                        let inner = data[0].clone();
+                        self.registers.pop();
+                        main_reg = Some(make_spread_marker(inner));
+                        is_reg_state_final = false;
+                        continue;
+                    } else if self.registers.last().unwrap().get_state()
+                        == ExecStates::TemplateFinished
+                    {
+                        // The joined interpolation is already built by the
+                        // operation's `get_data`.
+                        let data = self.registers.last().unwrap().get_data();
+                        let joined = data[0].clone();
+                        self.registers.pop();
+                        main_reg = Some(joined);
+                        is_reg_state_final = false;
+                        continue;
+                    } else if self.registers.last().unwrap().get_state()
+                        == ExecStates::DestructureFinished
+                    {
+                        // Bind each name from the source value; a statement, so it
+                        // produces no register value.
+                        let plan = self.registers.last().unwrap().destructure_plan().unwrap();
+                        let values = self.registers.last().unwrap().get_data();
+                        self.registers.pop();
+                        for (name, value) in apply_destructure(&plan, &values) {
+                            self.define(name, value);
+                        }
+                        main_reg = None;
                         is_reg_state_final = false;
                         continue;
                     } else if self.registers.last().unwrap().get_state()
@@ -5859,6 +6251,34 @@ impl Executor {
                         is_reg_state_final = true;
                         continue;
                     }
+                }
+                // spread element `...value` (the inner value expression follows)
+                UnitKind::Spread => {
+                    self.registers.push(Box::new(SpreadOp::new()));
+                }
+                // object-spread key marker: emits the marker value directly (no
+                // operand), exactly like a literal.
+                UnitKind::SpreadKey => {
+                    main_reg = Some(Val { typ: SPREAD_KEY_MARKER, data: Payload::Null });
+                    continue;
+                }
+                // interpolated / template string (part count folded into the unit)
+                UnitKind::Template { count } => {
+                    self.registers.push(Box::new(TemplateExpr::new()));
+                    self.registers
+                        .last_mut()
+                        .unwrap()
+                        .set_state(ExecStates::TemplateExtractInfo, StateData::I32(count as i32));
+                    if self.registers.last().unwrap().get_state() == ExecStates::TemplateFinished {
+                        main_reg = None;
+                        is_reg_state_final = true;
+                        continue;
+                    }
+                }
+                // destructuring binding (plan folded into the unit; source and
+                // default value expressions follow)
+                UnitKind::Destructure { plan } => {
+                    self.registers.push(Box::new(DestructureOp::new(plan)));
                 }
                 // ----------------------------------
                 // Bare immediates (consumed by a state transition, not dispatched

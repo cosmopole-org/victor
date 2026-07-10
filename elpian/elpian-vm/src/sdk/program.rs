@@ -61,6 +61,34 @@ impl LogicalKind {
     }
 }
 
+/// One binding of a [`UnitKind::Destructure`]. A destructuring statement binds a
+/// list of these from a single source value: object bindings read member `key`,
+/// array bindings read by position (their order in the plan). `is_hole` (array
+/// only) skips a position with no binding; `is_rest` collects everything not yet
+/// consumed into a fresh collection; `has_default` means a default-value
+/// expression was serialized for this binding (defaults appear as inline
+/// expressions after the source, in binding order, and are supplied to the
+/// executor as collected values).
+#[derive(Clone)]
+pub struct DestructureBinding {
+    pub name: String,
+    pub key: String,
+    pub has_default: bool,
+    pub is_rest: bool,
+    pub is_hole: bool,
+}
+
+/// The fixed metadata of a `destructure` statement, shared (`Rc`) into the
+/// `Destructure` unit. The source value and any default expressions are separate
+/// value units the executor evaluates and hands back; `value_count` is how many
+/// such values the operation collects (`1` for the source plus one per default).
+#[derive(Clone)]
+pub struct DestructurePlan {
+    pub is_array: bool,
+    pub bindings: Vec<DestructureBinding>,
+    pub value_count: usize,
+}
+
 /// One decoded operation, with every operand already parsed. Cheap to clone
 /// (scalars are copied; names, parameter lists and case tables are `Rc` pointer
 /// bumps), which the dispatch loop relies on. Every position field is a **unit
@@ -147,6 +175,21 @@ pub enum UnitKind {
     ObjHead { typ: i64, props_len: i32 },
     /// `0x09` — array-literal head (element count).
     ArrHead { len: i32 },
+    /// `0x19` — spread element (`...value`): the inner value expression follows.
+    /// Produces a spread marker the enclosing array / object / call builder
+    /// flattens; a universal "expand this collection in place" operator.
+    Spread,
+    /// `0x1a` — object-spread key marker (no operand). Sits in an object
+    /// literal's key position to signal that the following value expression is an
+    /// object whose members are merged in, rather than a single named property.
+    SpreadKey,
+    /// `0x1b` — interpolated / template string: `count` value expressions follow;
+    /// each is coerced to display text and the results concatenated.
+    Template { count: u32 },
+    /// `0x1c` — destructuring binding. The source value follows, then one default
+    /// expression per binding that declares a default (in binding order); the
+    /// plan describes how to bind names from the source's members / positions.
+    Destructure { plan: Rc<DestructurePlan> },
     /// `0x13` — function definition (hoisted; body follows). `start`/`end` are
     /// unit indices.
     FuncDef {
@@ -424,6 +467,26 @@ impl<'a> Decoder<'a> {
             0x0d => self.decode_call(pos),
             8 => self.decode_object(pos),
             9 => self.decode_array(pos),
+            0x19 => {
+                // Spread: opcode then the inner value expression.
+                self.emit(pos, UnitKind::Spread);
+                self.decode_value(pos + 1)
+            }
+            0x1a => {
+                // Object-spread key marker: no operand.
+                self.emit(pos, UnitKind::SpreadKey);
+                pos + 1
+            }
+            0x1b => {
+                // Template: opcode, part count, then that many value expressions.
+                let count = self.read_i32(pos + 1) as u32;
+                self.emit(pos, UnitKind::Template { count });
+                let mut p = pos + 5;
+                for _ in 0..count {
+                    p = self.decode_value(p);
+                }
+                p
+            }
             other => panic!("program decode: unknown value tag 0x{other:02x} at offset {pos}"),
         }
     }
@@ -531,6 +594,7 @@ impl<'a> Decoder<'a> {
                 body_end
             }
             0x12 => self.decode_switch(pos),
+            0x1c => self.decode_destructure(pos),
             0x13 => self.decode_funcdef(pos),
             0x0e => {
                 // definition: 0x0e, 0x0b discriminator, name, value expression.
@@ -632,6 +696,58 @@ impl<'a> Decoder<'a> {
         }
         self.units[idx] = UnitKind::Switch { branch_after, cases: Rc::new(cases) };
         branch_after
+    }
+
+    /// Decode a destructuring statement: `[0x1c][flags][binding count]` then a
+    /// fixed metadata record per binding, then the source value expression, then
+    /// one default expression per binding that declares a default (in binding
+    /// order). Mirrors `compiler::serialize_destructure`.
+    fn decode_destructure(&mut self, pos: usize) -> usize {
+        let is_array = self.bytes[pos + 1] == 1;
+        let count = self.read_i32(pos + 2) as usize;
+        let mut p = pos + 6;
+        let mut bindings = Vec::with_capacity(count);
+        let mut num_defaults = 0usize;
+        for _ in 0..count {
+            let flags = self.bytes[p];
+            p += 1;
+            let has_default = flags & 1 != 0;
+            let is_rest = flags & 2 != 0;
+            let is_hole = flags & 4 != 0;
+            if has_default {
+                num_defaults += 1;
+            }
+            if is_hole {
+                bindings.push(DestructureBinding {
+                    name: String::new(),
+                    key: String::new(),
+                    has_default,
+                    is_rest,
+                    is_hole,
+                });
+                continue;
+            }
+            let mut key = String::new();
+            if !is_array {
+                let (k, consumed) = self.read_str(p);
+                key = k;
+                p += consumed;
+            }
+            let (name, consumed) = self.read_str(p);
+            p += consumed;
+            bindings.push(DestructureBinding { name, key, has_default, is_rest, is_hole });
+        }
+        let value_count = 1 + num_defaults;
+        self.emit(pos, UnitKind::Destructure {
+            plan: Rc::new(DestructurePlan { is_array, bindings, value_count }),
+        });
+        // Source expression, then each default expression, all emitted as value
+        // units the executor evaluates in order.
+        p = self.decode_value(p);
+        for _ in 0..num_defaults {
+            p = self.decode_value(p);
+        }
+        p
     }
 
     fn decode_funcdef(&mut self, pos: usize) -> usize {
