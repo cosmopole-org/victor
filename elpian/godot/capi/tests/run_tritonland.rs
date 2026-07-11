@@ -9,11 +9,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// The VM registry behind the capi is process-global, so the tests must not
+/// interleave: each takes this lock for its whole body.
+static SERIAL: Mutex<()> = Mutex::new(());
+
 use elpian_godot::{GuestLang, VmManager};
 use serde_json::{json, Value};
 
 #[derive(Default)]
 struct Mock {
+    /// Simulate the web export: OS.has_feature("web") is true and
+    /// JavaScriptBridge.eval returns the page origin.
+    web: bool,
     ops: usize,
     creates: HashMap<String, usize>,
     next_handle: i64,
@@ -59,7 +66,7 @@ impl Mock {
                     None => v.to_string(),
                 })
                 .unwrap_or_default();
-            self.calls.push((method.to_string(), arg0));
+            self.calls.push((method.to_string(), arg0.clone()));
             match method {
                 "get_root" | "create_tween" | "get_parent" => {
                     self.next_handle -= 1;
@@ -68,6 +75,12 @@ impl Mock {
                 // HTTPRequest.request must report OK (0) or net.js treats it
                 // as an immediate transport failure.
                 "request" => return json!(0),
+                "has_feature" => return json!(self.web && arg0 == "web"),
+                "eval" => {
+                    if self.web {
+                        return json!("https://tritonland.onrender.com");
+                    }
+                }
                 _ => {}
             }
             return Value::Null;
@@ -95,8 +108,8 @@ impl Mock {
     }
 }
 
-fn boot(id: &str, source: &str) -> (VmManager, Arc<Mutex<Mock>>) {
-    let mock = Arc::new(Mutex::new(Mock::default()));
+fn boot(id: &str, source: &str, web: bool) -> (VmManager, Arc<Mutex<Mock>>) {
+    let mock = Arc::new(Mutex::new(Mock { web, ..Mock::default() }));
     let mut mgr = VmManager::new_root_lang(id.to_string(), source, GuestLang::Js, true, 0, 0)
         .expect("the TritonLand guest must COMPILE in the js2elpian subset");
     let hooked = mock.clone();
@@ -128,9 +141,10 @@ fn pump(mgr: &mut VmManager, frames: usize) {
 
 #[test]
 fn dive_in_press_reaches_the_network() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let guest = std::fs::read_to_string("/home/user/TritonLand/victor-client/build/guest.js")
         .expect("guest.js must be built first (node tools/build.mjs)");
-    let (mut mgr, mock) = boot("tritonland-boot", &guest);
+    let (mut mgr, mock) = boot("tritonland-boot", &guest, false);
     pump(&mut mgr, 3);
 
     // The boot gate mounted: a LineEdit (server URL) and a Button (Dive In).
@@ -191,5 +205,88 @@ fn dive_in_press_reaches_the_network() {
         "BOOT DIAG OK: {} ops, texts tail: {:?}",
         m.ops,
         m.texts.iter().rev().take(4).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn web_boot_auto_connects_and_reaches_auth() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let guest = std::fs::read_to_string("/home/user/TritonLand/victor-client/build/guest.js")
+        .expect("guest.js must be built first (node tools/build.mjs)");
+    let (mut mgr, mock) = boot("tritonland-web", &guest, true);
+    pump(&mut mgr, 4);
+
+    // No press, no typing: the web boot detected its own origin and dialed out.
+    let (requested, completed_cb) = {
+        let m = mock.lock().unwrap();
+        assert!(
+            m.texts.iter().any(|t| t.contains("Contacting the Triton currents")),
+            "web boot never entered the busy state; texts: {:?}",
+            m.texts
+        );
+        assert!(m.created("HTTPRequest") >= 1, "web boot never created an HTTPRequest");
+        let req = m
+            .calls
+            .iter()
+            .find(|(method, _)| method == "request")
+            .map(|(_, url)| url.clone());
+        let cb = m
+            .connects
+            .iter()
+            .rev()
+            .find(|(s, _)| s == "request_completed")
+            .map(|(_, cb)| *cb)
+            .expect("request_completed never connected");
+        (req, cb)
+    };
+    assert_eq!(
+        requested.as_deref(),
+        Some("https://tritonland.onrender.com/api/auth/me"),
+        "auto-connect requested the wrong URL"
+    );
+
+    // Deliver the real Render answers for a fresh visitor: every request in
+    // the chain (me -> refresh -> me retry) gets a 401, after which the
+    // client must route to /auth — the sign-in screen mounts.
+    let mut answered = vec![completed_cb];
+    mgr.invoke(
+        "__godotDispatch",
+        json!([completed_cb, [0, 401, [], "{\"authenticated\":false}"]]),
+    );
+    pump(&mut mgr, 3);
+    for _ in 0..5 {
+        let pending: Vec<i64> = {
+            let m = mock.lock().unwrap();
+            m.connects
+                .iter()
+                .filter(|(sig, cb)| sig == "request_completed" && !answered.contains(cb))
+                .map(|(_, cb)| *cb)
+                .collect()
+        };
+        if pending.is_empty() {
+            break;
+        }
+        for cb in pending {
+            answered.push(cb);
+            mgr.invoke(
+                "__godotDispatch",
+                json!([cb, [0, 401, [], "{\"error\":\"No refresh token\"}"]]),
+            );
+            pump(&mut mgr, 3);
+        }
+    }
+    pump(&mut mgr, 3);
+
+    let log = mgr.take_log().join("\n");
+    let m = mock.lock().unwrap();
+    assert!(
+        m.texts.iter().any(|t| t.contains("Sign In") || t.contains("Return to your empire")),
+        "the auth screen never mounted after the 401; texts tail: {:?}\nlog:\n{}",
+        m.texts.iter().rev().take(8).collect::<Vec<_>>(),
+        log
+    );
+    println!(
+        "WEB BOOT DIAG OK: auto-connected and reached /auth; {} ops",
+        m.ops
     );
 }
