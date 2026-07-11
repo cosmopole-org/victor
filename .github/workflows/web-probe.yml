@@ -13,6 +13,10 @@ name: Web pipeline probe
 
 on:
   workflow_dispatch:
+  push:
+    branches: [claude/android-apk-github-workflow-dpy09r]
+    paths:
+      - ".github/workflows/web-probe.yml"
 
 permissions:
   contents: read
