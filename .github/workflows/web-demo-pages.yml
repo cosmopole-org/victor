@@ -155,6 +155,15 @@ jobs:
             "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html"
           ls -la elpian/godot/build/web
 
+      # Godot's official web templates are built without exception catching,
+      # but Rust's prebuilt emscripten std unwinds panics emscripten-style, so
+      # the side module imports invoke_* thunks the template's JS glue never
+      # defines — the extension's first call aborts with "undefined symbol
+      # 'invoke_viii'". Teach the exported glue to synthesize them (see the
+      # script header for the full story).
+      - name: Patch exported JS glue for the Rust side module
+        run: node elpian/godot/patch-web-export.mjs elpian/godot/build/web/index.js
+
       # No COOP/COEP shim needed: the nothreads build never touches
       # SharedArrayBuffer, so plain GitHub Pages hosting is sufficient.
 

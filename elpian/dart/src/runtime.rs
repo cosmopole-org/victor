@@ -319,6 +319,17 @@ impl DartRuntime {
     fn pump_with(&mut self, due_only: bool) -> Result<(), DartError> {
         let mut ran: u64 = 0;
         loop {
+            // Re-entrancy guard: an embedder callback can re-enter the runtime
+            // while a guest turn is still on the native call stack — e.g. a
+            // Godot notification fired synchronously from inside one of the
+            // turn's own engine ops. Delivering event-loop tasks now would
+            // bounce off the busy VM (`vm_busy`) and silently consume them —
+            // including VReact's one-shot render-flush microtask, wedging the
+            // UI forever. Leave the queue untouched instead; the embedder's
+            // next regular pump (frame tick) drains it once the turn is done.
+            if api::vm_is_processing(&self.machine_id) {
+                return Ok(());
+            }
             ran += 1;
             if ran > self.max_pump_tasks {
                 return Err(DartError::PumpBudgetExceeded);

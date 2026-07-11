@@ -285,6 +285,20 @@ pub fn vm_exists(machine_id: String) -> bool {
     VMS.lock().unwrap().contains_key(&machine_id)
 }
 
+/// Whether the VM is currently mid-turn (its executor is on the call stack
+/// servicing a host call). Event-loop drains must not deliver while this is
+/// true: `execute_vm_func*` would bounce with `vm_busy` and the task would be
+/// consumed unrun. An embedder callback that re-enters the runtime from inside
+/// a host call (e.g. a Godot notification fired synchronously by an engine op)
+/// checks this to defer its drain to the next regular pump instead.
+pub fn vm_is_processing(machine_id: &str) -> bool {
+    VMS.lock()
+        .unwrap()
+        .get(machine_id)
+        .map(|vm| vm.is_exec_processing())
+        .unwrap_or(false)
+}
+
 /// Compile source to bytecode and report its length (debug aid).
 pub fn compile_code_to_info(code: String) -> String {
     let bytecode = compiler::compile_code(code);
