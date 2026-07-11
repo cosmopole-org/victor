@@ -480,3 +480,97 @@ void main() {
         assert!(err.contains("compile"), "unexpected error: {err}");
     }
 }
+
+// ---- engine-callback re-entrancy (the web-export boot freeze) ---------------
+
+mod reentrant_engine_callback {
+    use super::*;
+    use elpian_godot::*;
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    /// The runtime handle, published so the host callback can re-enter the C
+    /// ABI mid-turn — exactly what the GDExtension node does when the engine
+    /// fires a notification (e.g. NOTIFICATION_CHILD_ORDER_CHANGED while the
+    /// guest mounts its UI) from inside one of the guest's own ops.
+    static RT: AtomicPtr<ElpianGodotRuntime> = AtomicPtr::new(std::ptr::null_mut());
+
+    extern "C" fn host(
+        _user: *mut c_void,
+        api_name: *const c_char,
+        args_json: *const c_char,
+    ) -> *mut c_char {
+        let name = unsafe { CStr::from_ptr(api_name) }.to_str().unwrap();
+        let args: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(args_json) }.to_str().unwrap()).unwrap();
+        if name == "godot.op" && args[0]["const"] == json!("REENTER") {
+            let rt = RT.load(Ordering::SeqCst);
+            let fn_name = CString::new("__godotEvent").unwrap();
+            let arg = CString::new(r#"["_notification", 24]"#).unwrap();
+            elpian_godot_invoke(rt, fn_name.as_ptr(), arg.as_ptr());
+            return CString::new("42").unwrap().into_raw();
+        }
+        CString::new("null").unwrap().into_raw()
+    }
+
+    extern "C" fn host_free(_user: *mut c_void, s: *mut c_char) {
+        unsafe { drop(CString::from_raw(s)) };
+    }
+
+    /// The guest schedules a microtask, then makes an op during which the
+    /// "engine" re-enters the runtime. The re-entrant delivery necessarily
+    /// bounces off the busy VM — but it must NOT consume the queued microtask
+    /// with it: the task must still run once the turn completes. (Unguarded,
+    /// the re-entrant drain ate VReact's one-shot render-flush microtask on
+    /// the web export, freezing the TritonLand boot gate forever.)
+    #[test]
+    fn microtasks_survive_reentrant_engine_callbacks() {
+        let src = CString::new(
+            r#"
+__cbReg.push(function () { print("microtask ran"); });
+askHost("dart:async/scheduleMicrotask", [__cbReg.length - 1]);
+var v = askHost("godot.op", [{ "const": "REENTER" }]);
+print("op answered " + v);
+"#,
+        )
+        .unwrap();
+        let lang = CString::new("js").unwrap();
+        let rt = elpian_godot_new_lang(src.as_ptr(), lang.as_ptr(), 1, 0, 0);
+        assert!(!rt.is_null(), "boot failed: {:?}", unsafe {
+            CStr::from_ptr(elpian_godot_last_error())
+        });
+        RT.store(rt, Ordering::SeqCst);
+        elpian_godot_set_host(rt, Some(host), Some(host_free), std::ptr::null_mut());
+        assert_eq!(elpian_godot_run(rt), 0, "run failed: {:?}", unsafe {
+            CStr::from_ptr(elpian_godot_last_error())
+        });
+        // The frame pump is the fallback drain for anything the boot run left
+        // queued (the run's own trailing drain already suffices; this mirrors
+        // the node's per-frame call).
+        elpian_godot_pump(rt, 16);
+
+        let log_ptr = elpian_godot_take_log(rt);
+        assert!(!log_ptr.is_null(), "guest produced no output at all");
+        let log: Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(log_ptr) }.to_str().unwrap()).unwrap();
+        elpian_godot_string_free(log_ptr);
+        let lines: Vec<String> = log
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.contains("op answered 42")),
+            "the re-entered op never completed; log: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("microtask ran")),
+            "the microtask scheduled before the re-entrant callback was \
+             consumed unrun; log: {lines:?}"
+        );
+
+        RT.store(std::ptr::null_mut(), Ordering::SeqCst);
+        elpian_godot_free(rt);
+    }
+}
