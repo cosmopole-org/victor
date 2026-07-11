@@ -113,10 +113,16 @@ jobs:
       # they also drop the SharedArrayBuffer/COOP/COEP requirement — which
       # GitHub Pages cannot satisfy with headers anyway. The export preset sets
       # variant/thread_support=false to match.
+      # generate_bindings=yes on BOTH scons calls: godot-cpp generates its
+      # bindings (gen/) with builtin sizes for the FIRST build config only —
+      # wasm32 is 32-bit, linux x86_64 is 64-bit — and scons does not
+      # regenerate them on an arch switch. Without the flag the host .so gets
+      # compiled against 32-bit Variant/String layouts and the 64-bit editor
+      # aborts with "stack smashing detected" during import/export.
       - name: Build GDExtension (.wasm side module, nothreads)
         working-directory: elpian/godot/extension
         run: |
-          scons platform=web threads=no target=template_release \
+          scons platform=web threads=no target=template_release generate_bindings=yes \
             elpian_capi=../../target/wasm32-unknown-emscripten/release/libelpian_godot.a
           ls -la ../project/bin/
 
@@ -125,7 +131,7 @@ jobs:
       # archive automatically when it is missing.
       - name: Build GDExtension for the host platform
         working-directory: elpian/godot/extension
-        run: scons platform=linux target=template_release
+        run: scons platform=linux target=template_release generate_bindings=yes
 
       - name: Install Godot editor + export templates
         run: |
