@@ -275,9 +275,13 @@ Two workflows at the repo root build the demo for the other platforms
   threads=no` — Rust's prebuilt emscripten std has no atomics, and nothreads
   also removes the SharedArrayBuffer/COOP/COEP requirement GitHub Pages
   cannot meet), exports headless with the nothreads dlink templates
-  (`variant/extensions_support=true`, `variant/thread_support=false`), and
-  deploys to **GitHub Pages**. Enable Pages with source "GitHub Actions" in
-  the repo settings.
+  (`variant/extensions_support=true`, `variant/thread_support=false`),
+  patches the exported `index.js` with `patch-web-export.mjs` (Rust's
+  prebuilt emscripten std unwinds panics emscripten-style, so the side
+  module imports `invoke_*` thunks that Godot's exception-catching-disabled
+  official templates never define — unpatched, the extension's first call
+  aborts with `undefined symbol 'invoke_viii'`), and deploys to **GitHub
+  Pages**. Enable Pages with source "GitHub Actions" in the repo settings.
 * `.github/workflows/android-apk.yml` — cross-compiles the VM to
   `aarch64-linux-android` (NDK clang as linker), builds the extension for
   arm64 (`scons platform=android`), installs the gradle build template
