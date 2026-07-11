@@ -33,6 +33,15 @@ if env["platform"] == "linux":
     env.Append(LIBS=["dl", "pthread", "m"])
 elif env["platform"] == "windows":
     env.Append(LIBS=["ws2_32", "userenv", "bcrypt", "ntdll"])
+elif env["platform"] == "web":
+    # Godot 4.3's official web templates (dlink) are linked with
+    # -sWASM_BIGINT, so their libc exports keep real i64 signatures
+    # (lseek, ftruncate, pread/pwrite/preadv/pwritev). godot-cpp 4.3 does
+    # not pass the flag, and a side module linked without it imports the
+    # JS-legalized (split-i64) variants instead — dlopen in the browser
+    # then fails with "imported function does not match the expected
+    # type" and the engine hangs at the splash screen.
+    env.Append(LINKFLAGS=["-sWASM_BIGINT"])
 
 # One canonical name per platform/arch (shared with CMake and the bundled
 # .gdextension): libelpian_godot.<platform>.<arch>.<so|dylib|dll>.
