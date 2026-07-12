@@ -1252,8 +1252,14 @@ class GTimer {
 // the 2D<->3D viewport bridge (SubViewportContainer + SubViewport) that lets a
 // 3D world live inside a 2D Control UI. All names/properties match Godot 4.
 
-// Read a numeric option with a default.
+// Read a numeric option with a default. The VM has ONE representation for
+// 0 / null / an absent member, and it type-checks as num — so test for
+// absence (== null) FIRST or every absent option silently becomes 0
+// (zero-radius cylinders, black lights, …).
 function __g3num(v, d) {
+  if (v == null) {
+    return d;
+  }
   if (__isType(v, "num")) {
     return v;
   }
@@ -1549,17 +1555,64 @@ G3.gltf = (src, o) => {
 // its AABB height equals `targetHeight` (mirrors the web client's
 // "targetHeight" model-normalisation convention). Requires the node to be in
 // the tree (AABB is computed from visual instances).
-G3.fitHeight = (node, targetHeight) => {
-  let aabb = GD.eval(
-    "n.get_aabb() if n.has_method(\"get_aabb\") else AABB()",
-    ["n"],
-    [node]
-  );
-  if (aabb == null || GD.isError(aabb) || !__isType(aabb, "AABB")) {
-    return node;
+// Max mesh AABB height in a node subtree (local mesh space, depth-limited).
+// GLB scene roots are plain Node3Ds with no get_aabb of their own, so the
+// height is derived from their MeshInstance3D descendants.
+function __g3MeshHeight(node, depth, scaleAcc) {
+  if (node == null || depth > 10) {
+    return 0.0;
   }
-  if (aabb.sy > 0.0) {
-    let k = targetHeight / aabb.sy;
+  // Accumulate node scales down the tree — GLB exports routinely bake unit
+  // conversions (cm -> m) as node scale, so a mesh's LOCAL AABB says nothing
+  // about its rendered size without them.
+  let acc = scaleAcc;
+  let sc = node.get("scale");
+  if (sc != null && !GD.isError(sc) && __isType(sc, "Vector3")) {
+    acc = acc * sc.y;
+  }
+  let best = 0.0;
+  if (node.call("has_method", ["get_aabb"]) == true) {
+    let aabb = node.call("get_aabb");
+    if (aabb != null && !GD.isError(aabb) && __isType(aabb, "AABB")) {
+      let h0 = aabb.sy * acc;
+      if (h0 > best) {
+        best = h0;
+      }
+    }
+  }
+  let n = node.call("get_child_count");
+  if (n == null || GD.isError(n)) {
+    return best;
+  }
+  for (let i = 0; i < n; i++) {
+    let h = __g3MeshHeight(node.call("get_child", [GInt(i)]), depth + 1, acc);
+    if (h > best) {
+      best = h;
+    }
+  }
+  return best;
+}
+
+G3.fitHeight = (node, targetHeight) => {
+  // The node's own scale participates via the walk; fitHeight REPLACES the
+  // root scale, so measure the subtree below with the root normalized to 1.
+  let sy = __g3MeshHeight(node, 0, 1.0);
+  let rootSc = node.get("scale");
+  if (rootSc != null && !GD.isError(rootSc) && __isType(rootSc, "Vector3")) {
+    if (rootSc.y > 0.0) {
+      sy = sy / rootSc.y;
+    }
+  }
+  if (sy > 0.0) {
+    let k = targetHeight / sy;
+    // Clamp against degenerate AABBs (an empty mesh must not explode the
+    // scale and swallow the camera).
+    if (k < 0.001) {
+      k = 0.001;
+    }
+    if (k > 1000.0) {
+      k = 1000.0;
+    }
     node.set("scale", new Vector3(k, k, k));
   }
   return node;

@@ -73,3 +73,26 @@ fn single_level_assignment_still_works() {
     assert_eq!(run("asg-mem", "function f() { let o = { a: 1 }; o.a = 3; return o.a; }"), "3");
     assert_eq!(run("asg-idx", "function f() { let a = [1, 2]; a[0] = 8; return a[0]; }"), "8");
 }
+
+// ---- String escape decoding (\uXXXX / \u{…} / \xNN) -------------------------
+
+#[test]
+fn unicode_escapes_decode_including_surrogate_pairs() {
+    // Babel emits ASCII-safe output by default, so emoji arrive as surrogate
+    // pairs: "🔱" must decode to U+1F531 (🔱). Previously the lexer
+    // dropped the backslashes and produced the literal text "uD83DuDD31".
+    let js = "function f() { return \"\\uD83D\\uDD31 A\\x42 \\u{1F30A}\"; }";
+    assert_eq!(run("esc-uni", js), "\"\u{1F531} AB \u{1F30A}\"");
+}
+
+#[test]
+fn unicode_escapes_decode_in_template_literals() {
+    let js = "function f() { return `\\u2713 \\uD83C\\uDF0A`; }";
+    assert_eq!(run("esc-tpl", js), "\"✓ 🌊\"");
+}
+
+#[test]
+fn lone_high_surrogate_becomes_replacement_char() {
+    let js = r#"function f() { return "\uD83D!"; }"#;
+    assert_eq!(run("esc-lone", js), "\"\u{FFFD}!\"");
+}

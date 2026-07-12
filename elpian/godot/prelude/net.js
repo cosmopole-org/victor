@@ -500,10 +500,13 @@ SocketIO.connect = (baseUrl, o) => {
         if (o.auth != null) {
           auth = jsonStringify(o.auth);
         }
-        ws.sendText("40" + auth);
+        // NOTE: read the live peer handle off `sock`, not the `ws` local —
+        // this callback outlives the connect frame, and the VM's by-value
+        // closure capture would see the forward-declared local as null.
+        sock.ws.sendText("40" + auth);
       } else if (kind == "2") {
         // ping -> pong
-        ws.sendText("3");
+        sock.ws.sendText("3");
       } else if (kind == "4") {
         let sio = msg.substring(1, msg.length);
         let t = sio.substring(0, 1);
