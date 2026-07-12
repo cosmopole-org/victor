@@ -99,3 +99,109 @@ function driveMe() {
     assert!(v.contains("transport"), "transport code missing from response: {v}");
     assert!(v.contains("probe=1"), "cookie jar did not ingest Set-Cookie: {v}");
 }
+
+/// The Socket.IO handshake path: the engine.io "0{...}" open frame arrives via
+/// the websocket pump TIMER — long after SocketIO.connect's frame returned.
+/// The VM captures closure locals BY VALUE, so the old code's forward
+/// reference to the `ws` local inside onText was null at fire time:
+/// `ws.sendText("40")` crashed the whole engine ("the specified data is not
+/// runnable"). Pins the fix (reading the live handle off `sock.ws`) by
+/// replaying the full handshake + an event frame through the real prelude.
+#[test]
+fn socketio_handshake_survives_deferred_ontext() {
+    let net_src = std::fs::read_to_string("/home/user/victor/elpian/godot/prelude/net.js")
+        .expect("net.js prelude");
+
+    // Stubs: a mock WebSocketPeer the pump can poll, plus a manual timer
+    // registry so the test fires the pump exactly when it wants.
+    let stubs = r#"
+var __sent = [];
+var __timers = [];
+var __peer = null;
+
+function GInt(v) { return v; }
+function GFloat(v) { return v; }
+function __isType(v, t) {
+  if (t == "String") { return typeOf(v) == "string"; }
+  return false;
+}
+
+var Packed = {
+  strings: (list) => { return list; },
+};
+
+var GD = {
+  create: (kind) => {
+    let n = {
+      kind: kind,
+      props: {},
+      state: 0,
+      queue: [],
+      set: null, call: null, connect: null, queueFree: null,
+    };
+    n.set = (k, v) => { n.props[k] = v; return null; };
+    n.connect = (sig, f) => { return null; };
+    n.queueFree = () => { return null; };
+    n.call = (m, args) => {
+      if (m == "connect_to_url") { return 0; }
+      if (m == "poll") { return null; }
+      if (m == "get_ready_state") { return n.state; }
+      if (m == "get_available_packet_count") { return n.queue.length; }
+      if (m == "get_packet") { return n.queue.pop(); }
+      if (m == "was_string_packet") { return true; }
+      if (m == "send_text") { __sent.push("" + args[0]); return 0; }
+      if (m == "get_close_code") { return 1000; }
+      return 0;
+    };
+    __peer = n;
+    return n;
+  },
+  mount: (n) => { return null; },
+  isError: (v) => { return false; },
+};
+
+class GTimer {
+  constructor(id) { this.id = id; }
+  static periodic(ms, cb) { __timers.push(cb); return new GTimer(__timers.length - 1); }
+  static after(ms, cb) { __timers.push(cb); return new GTimer(__timers.length - 1); }
+  cancel() { return null; }
+}
+"#;
+
+    let driver = r#"
+var __events = [];
+
+function driveSio() {
+  Net.setBase("https://play.example");
+  let socket = SocketIO.connect(Net.base(), { path: "/socket.io" });
+  socket.on("connect", (x) => { __events.push("connect"); });
+  socket.on("state:update", (d) => { __events.push("state:" + d.gold); });
+  // The connect frame returned; NOW the engine.io open frame arrives on a
+  // later pump tick (the crash scenario).
+  __peer.state = 1;
+  __peer.queue.push("0{\"sid\":\"abc\",\"pingInterval\":25000}");
+  __timers[0]();
+  // Server acks the namespace, pings, then pushes an event.
+  __peer.queue.push("40{\"sid\":\"n1\"}");
+  __timers[0]();
+  __peer.queue.push("2");
+  __timers[0]();
+  __peer.queue.push("42[\"state:update\",{\"gold\":7}]");
+  __timers[0]();
+  return jsonStringify({ sent: __sent, events: __events, sid: socket.sid });
+}
+"#;
+
+    let program = format!("{stubs}\n{net_src}\n{driver}");
+    assert!(
+        js2elpian::create_vm_from_js("tl-sio".to_string(), program),
+        "net.js + sio driver failed to COMPILE in js2elpian"
+    );
+    let _boot = api::execute_vm("tl-sio".to_string());
+    let out = api::execute_vm_func("tl-sio".to_string(), "driveSio".to_string(), 1);
+    println!("SIO DIAG: {}", out.result_value);
+    let v = out.result_value;
+    assert!(v.contains("\\\"40\\\"") || v.contains("40"), "namespace connect not sent: {v}");
+    assert!(v.contains("connect"), "connect event not dispatched: {v}");
+    assert!(v.contains("state:7"), "event payload not dispatched: {v}");
+}

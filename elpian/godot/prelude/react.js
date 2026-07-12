@@ -472,6 +472,21 @@ function useFrame(cb) {
   }, []);
 }
 
+// The live logical viewport (VUI.metrics()): { w, h, scale, compact, medium,
+// expanded, portrait }. The component re-renders on every window resize, so
+// responsive layouts just branch on the returned metrics.
+function useViewport() {
+  let s = useState(0);
+  let setTick = s[1];
+  useEffect(() => {
+    let un = VUI.onResize((m) => {
+      setTick((v) => v + 1);
+    });
+    return un;
+  }, []);
+  return VUI.metrics();
+}
+
 // ---------------------------------------------------------------------------
 // context
 // ---------------------------------------------------------------------------
@@ -1062,14 +1077,51 @@ function __vrColor(v) {
   return null;
 }
 
-// Parse "#rrggbb" via the engine (the subset has no hex literals; Color.html
-// does the work over the bridge).
-function __vrColorHtml(hex) {
-  let r = GD.eval("Color.html(h)", ["h"], [hex]);
-  if (GD.isError(r)) {
-    return VUI.theme().text;
+// One hex nibble → 0..15, or -1 (accepts both cases; no case builtin needed).
+function __vrHexDigit(ch) {
+  let lower = "0123456789abcdef";
+  let upper = "0123456789ABCDEF";
+  let i = lower.indexOf(ch);
+  if (i >= 0) {
+    return i;
   }
-  return r;
+  return upper.indexOf(ch);
+}
+
+// Parse "#rgb", "#rrggbb" or "#rrggbbaa" in pure JS (the subset has no hex
+// literals, and the engine's Expression cannot reach Color.html). Returns
+// null on anything unparseable so callers fall back to their own default.
+function __vrColorHtml(hex) {
+  let s = "" + hex;
+  if (s.startsWith("#")) {
+    s = s.substring(1, s.length);
+  }
+  if (s.length == 3) {
+    let r3 = __vrHexDigit(s.substring(0, 1));
+    let g3 = __vrHexDigit(s.substring(1, 2));
+    let b3 = __vrHexDigit(s.substring(2, 3));
+    if (r3 < 0 || g3 < 0 || b3 < 0) {
+      return null;
+    }
+    return new Color((r3 * 17) / 255.0, (g3 * 17) / 255.0, (b3 * 17) / 255.0, 1.0);
+  }
+  if (s.length != 6 && s.length != 8) {
+    return null;
+  }
+  let vals = [];
+  for (let i = 0; i < s.length; i = i + 2) {
+    let hi = __vrHexDigit(s.substring(i, i + 1));
+    let lo = __vrHexDigit(s.substring(i + 1, i + 2));
+    if (hi < 0 || lo < 0) {
+      return null;
+    }
+    vals.push((hi * 16 + lo) / 255.0);
+  }
+  let alpha = 1.0;
+  if (vals.length == 4) {
+    alpha = vals[3];
+  }
+  return new Color(vals[0], vals[1], vals[2], alpha);
 }
 
 // Call a possibly-absent event prop with an argument.
@@ -1085,12 +1137,24 @@ function __vrCall0(fn) {
   }
 }
 
-// Read a numeric prop with a default (the subset's `??` also defaults 0).
+// Read a numeric prop with a default. The VM's single 0/null/absent value
+// means an absent prop and an explicit 0 both take the default; pass -1 for
+// an explicit zero (spacing sinks clamp negatives to 0).
 function __vrNum(v, d) {
+  if (v == null) {
+    return d;
+  }
   if (__isType(v, "num")) {
     return v;
   }
   return d;
+}
+
+function __vrPx(v) {
+  if (v < 0) {
+    return 0;
+  }
+  return v;
 }
 
 // The subset of style-object keys we understand (so `style={{...}}` from an
@@ -1546,6 +1610,13 @@ function __vrDriverCreate(inst) {
     inst.node = l;
     inst.container = null;
     __vrApplyTextProps(inst, null, props, size, false);
+    if (props.weight == null) {
+      // Headlines default to the medium weight, Material-style.
+      let hf = VUI.fonts();
+      if (hf.medium != null) {
+        l.set("theme_override_fonts/font", hf.medium);
+      }
+    }
     return;
   }
   if (tag == "caption" || tag == "small" || tag == "muted") {
@@ -1615,6 +1686,67 @@ function __vrDriverCreate(inst) {
     inst.container = null;
     return;
   }
+  if (tag == "chip") {
+    let handle = VUI.chip(__vrTextOf(props), {
+      selected: props.selected == true,
+      glyph: props.glyph,
+      onTap: (on) => {
+        __vrCall(inst.props.onChange, on);
+        __vrCall0(inst.props.onPress);
+      },
+    });
+    inst.node = handle.node;
+    inst.container = null;
+    inst.chipHandle = handle;
+    return;
+  }
+  if (tag == "badge") {
+    inst.node = VUI.badge(__vrTextOf(props), {
+      color: __vrColor(props.color),
+      textColor: __vrColor(props.textColor),
+    });
+    inst.container = null;
+    return;
+  }
+  if (tag == "avatar") {
+    inst.node = VUI.avatar(__vrTextOf(props), {
+      color: __vrColor(props.color),
+      textColor: __vrColor(props.textColor),
+      size: props.size,
+    });
+    inst.container = null;
+    return;
+  }
+  if (tag == "fab") {
+    inst.node = VUI.fab(props.glyph ?? __vrTextOf(props), {
+      size: props.size,
+      bg: __vrColor(props.bg),
+      color: __vrColor(props.color),
+      onTap: () => {
+        __vrCall0(inst.props.onPress);
+        __vrCall0(inst.props.onClick);
+        __vrCall0(inst.props.onTap);
+      },
+    });
+    inst.container = null;
+    return;
+  }
+  if (tag == "tile" || tag == "listtile") {
+    inst.node = VUI.listTile({
+      leading: props.leading,
+      leadingColor: __vrColor(props.leadingColor),
+      title: props.title ?? __vrTextOf(props),
+      subtitle: props.subtitle,
+      trailing: props.trailing,
+      onTap: () => {
+        __vrCall0(inst.props.onPress);
+        __vrCall0(inst.props.onClick);
+        __vrCall0(inst.props.onTap);
+      },
+    });
+    inst.container = null;
+    return;
+  }
 
   // Unknown tag → a plain transparent container so the tree still renders.
   __vrCreateContainer(inst, "view", props, t);
@@ -1627,13 +1759,13 @@ function __vrCreateContainer(inst, tag, props, t) {
 
   if (tag == "row" || tag == "hstack") {
     box = GD.create("HBoxContainer");
-    box.set("theme_override_constants/separation", GInt(__vrNum(props.gap, 16)));
+    box.set("theme_override_constants/separation", GInt(__vrPx(__vrNum(props.gap, 12))));
     container = box;
     outer = box;
   } else if (tag == "grid") {
     box = GD.create("GridContainer");
     box.set("columns", GInt(__vrNum(props.cols, 2)));
-    let g = __vrNum(props.gap, 16);
+    let g = __vrPx(__vrNum(props.gap, 12));
     box.set("theme_override_constants/h_separation", GInt(g));
     box.set("theme_override_constants/v_separation", GInt(g));
     container = box;
@@ -1641,15 +1773,33 @@ function __vrCreateContainer(inst, tag, props, t) {
   } else if (tag == "scroll") {
     let sc = GD.create("ScrollContainer");
     sc.set("size_flags_horizontal", GInt(3));
-    sc.set("size_flags_vertical", GInt(3));
-    let inner = GD.create("VBoxContainer");
-    inner.set("theme_override_constants/separation", GInt(__vrNum(props.gap, 16)));
-    inner.set("size_flags_horizontal", GInt(3));
+    let horizontal = props.horizontal == true;
+    VUI.scrollbarStyle(sc);
+    let inner = null;
+    if (horizontal) {
+      // A horizontal strip: HBox content, h-scroll on (bar hidden — chips
+      // strips scroll by touch/drag), v-scroll off, natural height.
+      sc.set("horizontal_scroll_mode", GInt(3)); // SCROLL_MODE_SHOW_NEVER
+      sc.set("vertical_scroll_mode", GInt(0));
+      inner = GD.create("HBoxContainer");
+      inner.set("size_flags_vertical", GInt(3));
+      if (props.height != null) {
+        __vrSetMinSize(sc, -1.0, __vrNum(props.height, 48.0));
+      }
+    } else {
+      sc.set("size_flags_vertical", GInt(3));
+      inner = GD.create("VBoxContainer");
+      inner.set("size_flags_horizontal", GInt(3));
+    }
+    inner.set("theme_override_constants/separation", GInt(__vrPx(__vrNum(props.gap, 12))));
     sc.call("add_child", [inner]);
     container = inner;
     outer = sc;
   } else if (tag == "center") {
     let c = GD.create("CenterContainer");
+    // Centering needs room: fill the parent by default (like VUI.center).
+    c.set("size_flags_horizontal", GInt(3));
+    c.set("size_flags_vertical", GInt(3));
     container = c;
     outer = c;
   } else if (tag == "stack") {
@@ -1658,9 +1808,21 @@ function __vrCreateContainer(inst, tag, props, t) {
     outer = c;
   } else if (tag == "panel" || tag == "card") {
     let pc = GD.create("PanelContainer");
-    let bg = t.surface;
-    if (tag == "card") {
-      bg = t.surface2;
+    // Material surfaces: a card is an elevated surfaceContainerLow container
+    // (Flutter Card), a panel is the same surface without the shadow.
+    // variant="filled" -> surfaceContainerHighest, flat; "outlined" ->
+    // surface + hairline outline.
+    let bg = t.surfaceContainerLow;
+    let shadow = tag == "card" ? 1 : 0;
+    if (props.variant == "filled") {
+      bg = t.surfaceContainerHighest;
+      shadow = 0;
+    } else if (props.variant == "outlined") {
+      bg = t.surface;
+      shadow = 0;
+    }
+    if (props.shadow != null) {
+      shadow = __vrNum(props.shadow, shadow);
     }
     if (props.bg != null) {
       let c = __vrColor(props.bg);
@@ -1668,10 +1830,25 @@ function __vrCreateContainer(inst, tag, props, t) {
         bg = c;
       }
     }
-    pc.set("theme_override_styles/panel", VUI.styleBox({ bg: bg, radius: t.radiusL }));
+    let radius = __vrNum(props.radius, tag == "card" ? t.radiusM : t.radiusL);
+    let border = __vrNum(props.border, 0);
+    let borderColor = __vrColor(props.borderColor) ?? __vrColor(props.accent);
+    if (props.variant == "outlined" && border == 0) {
+      border = 1;
+      if (borderColor == null) {
+        borderColor = t.outlineVariant;
+      }
+    }
+    if (props.accent != null && border == 0) {
+      border = 1;
+    }
+    pc.set(
+      "theme_override_styles/panel",
+      VUI.styleBox({ bg: bg, radius: radius, shadow: shadow, border: border, borderColor: borderColor })
+    );
     let inner = GD.create("VBoxContainer");
-    inner.set("theme_override_constants/separation", GInt(__vrNum(props.gap, 14)));
-    let pad = __vrNum(props.pad, 24);
+    inner.set("theme_override_constants/separation", GInt(__vrPx(__vrNum(props.gap, 12))));
+    let pad = __vrNum(props.pad, 16);
     let wrap = __vrPad(inner, pad);
     pc.call("add_child", [wrap]);
     container = inner;
@@ -1679,7 +1856,7 @@ function __vrCreateContainer(inst, tag, props, t) {
   } else {
     // view / div / column / vstack / section / …  → a vertical box
     box = GD.create("VBoxContainer");
-    box.set("theme_override_constants/separation", GInt(__vrNum(props.gap, 16)));
+    box.set("theme_override_constants/separation", GInt(__vrPx(__vrNum(props.gap, 12))));
     container = box;
     outer = box;
   }
@@ -1701,7 +1878,7 @@ function __vrCreateContainer(inst, tag, props, t) {
 }
 
 function __vrPad(inner, pad) {
-  if (pad == null || pad == 0) {
+  if (pad == null || pad <= 0) {
     return inner;
   }
   let m = GD.create("MarginContainer");
@@ -1726,8 +1903,21 @@ function __vrApplyTextProps(inst, oldProps, props, defaultSize, dim) {
     if (dim == true || props.dim == true) {
       color = t.textDim;
     }
+    if (props.faint == true) {
+      color = t.textFaint;
+    }
   }
   l.set("theme_override_colors/font_color", color);
+  // Explicit app font on every label (weight variant or regular) — theme
+  // inheritance alone can miss, and the emoji fallback rides on this font.
+  let wf = VUI.fonts();
+  if (props.weight == "bold" && wf.bold != null) {
+    l.set("theme_override_fonts/font", wf.bold);
+  } else if (props.weight == "medium" && wf.medium != null) {
+    l.set("theme_override_fonts/font", wf.medium);
+  } else if (wf.regular != null) {
+    l.set("theme_override_fonts/font", wf.regular);
+  }
   if (props.align == "center") {
     l.set("horizontal_alignment", GInt(1));
   } else if (props.align == "right") {
@@ -1754,6 +1944,13 @@ function __vrCreateButton(inst, props, t) {
   __vrStyleButton(b, props, t);
   b.set("text", __vrTextOf(props));
   b.set("theme_override_font_sizes/font_size", GInt(__vrNum(props.fontSize, t.fontS)));
+  let bFont = VUI.fonts();
+  if (bFont.medium != null) {
+    b.set("theme_override_fonts/font", bFont.medium);
+  }
+  if (props.disabled == true) {
+    b.set("disabled", true);
+  }
   __vrSetMinSize(b, __vrNum(props.minWidth, 0.0), __vrNum(props.height, t.controlHeight));
   if (props.wide == true || props.grow == true) {
     b.set("size_flags_horizontal", GInt(3));
@@ -1768,48 +1965,8 @@ function __vrCreateButton(inst, props, t) {
 }
 
 function __vrStyleButton(b, props, t) {
-  let kind = props.kind;
-  if (kind == null) {
-    kind = "filled";
-  }
-  let radius = __vrNum(props.radius, t.radiusM);
-  let padX = 36;
-  if (kind == "filled") {
-    b.set("theme_override_styles/normal", VUI.styleBox({ bg: t.primary, radius: radius, padX: padX }));
-    b.set("theme_override_styles/hover", VUI.styleBox({ bg: t.primary.lighter(0.06), radius: radius, padX: padX }));
-    b.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.primary.darker(0.08), radius: radius, padX: padX }));
-    b.set("theme_override_colors/font_color", t.onPrimary);
-    b.set("theme_override_colors/font_hover_color", t.onPrimary);
-    b.set("theme_override_colors/font_pressed_color", t.onPrimary);
-  } else if (kind == "tonal") {
-    b.set("theme_override_styles/normal", VUI.styleBox({ bg: t.primaryDim, radius: radius, padX: padX }));
-    b.set("theme_override_styles/hover", VUI.styleBox({ bg: t.surface3, radius: radius, padX: padX }));
-    b.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.surface2, radius: radius, padX: padX }));
-    b.set("theme_override_colors/font_color", t.primary);
-    b.set("theme_override_colors/font_hover_color", t.primary);
-    b.set("theme_override_colors/font_pressed_color", t.primary);
-  } else if (kind == "danger") {
-    b.set("theme_override_styles/normal", VUI.styleBox({ bg: t.danger, radius: radius, padX: padX }));
-    b.set("theme_override_styles/hover", VUI.styleBox({ bg: t.danger.lighter(0.06), radius: radius, padX: padX }));
-    b.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.danger.darker(0.1), radius: radius, padX: padX }));
-    b.set("theme_override_colors/font_color", new Color(1.0, 1.0, 1.0, 1.0));
-    b.set("theme_override_colors/font_hover_color", new Color(1.0, 1.0, 1.0, 1.0));
-    b.set("theme_override_colors/font_pressed_color", new Color(1.0, 1.0, 1.0, 1.0));
-  } else if (kind == "outline") {
-    b.set("theme_override_styles/normal", VUI.styleBox({ radius: radius, padX: padX, border: 2, borderColor: t.outline, bg: new Color(0.0, 0.0, 0.0, 0.0) }));
-    b.set("theme_override_styles/hover", VUI.styleBox({ radius: radius, padX: padX, border: 2, borderColor: t.primary, bg: t.primaryDim }));
-    b.set("theme_override_styles/pressed", VUI.styleBox({ radius: radius, padX: padX, border: 2, borderColor: t.primary, bg: t.primaryDim }));
-    b.set("theme_override_colors/font_color", t.text);
-    b.set("theme_override_colors/font_hover_color", t.primary);
-    b.set("theme_override_colors/font_pressed_color", t.primary);
-  } else {
-    b.set("theme_override_styles/normal", VUI.styleEmpty());
-    b.set("theme_override_styles/hover", VUI.styleBox({ bg: t.surface2, radius: radius, padX: padX }));
-    b.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.surface3, radius: radius, padX: padX }));
-    b.set("theme_override_colors/font_color", t.primary);
-    b.set("theme_override_colors/font_hover_color", t.primary);
-    b.set("theme_override_colors/font_pressed_color", t.primary);
-  }
+  // One source of truth: the shared Material button styler in ui.js.
+  VUI.buttonStyle(b, props.kind, { radius: props.radius, padX: props.padX });
 }
 
 // ---- field (text input) ----------------------------------------------------
@@ -1828,14 +1985,11 @@ function __vrCreateField(inst, props, t) {
   if (props.obscure == true || props.type == "password") {
     e.set("secret", true);
   }
-  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
-  __vrSetMinSize(e, 0.0, t.controlHeight);
   e.set("size_flags_horizontal", GInt(3));
-  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, padX: 28, border: 1, borderColor: t.outline }));
-  e.set("theme_override_styles/focus", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, padX: 28, border: 2, borderColor: t.primary }));
-  e.set("theme_override_colors/font_color", t.text);
-  e.set("theme_override_colors/font_placeholder_color", t.textFaint);
-  e.set("theme_override_colors/caret_color", t.primary);
+  VUI.fieldStyle(e);
+  if (props.height != null) {
+    __vrSetMinSize(e, 0.0, __vrNum(props.height, t.fieldHeight));
+  }
   e.connect("text_changed", (a) => {
     inst.fieldValue = a[0];
     __vrCall(inst.props.onChange, a[0]);
@@ -1860,15 +2014,10 @@ function __vrCreateTextArea(inst, props, t) {
   if (inst.fieldValue != "") {
     e.set("text", inst.fieldValue);
   }
-  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
   e.set("wrap_mode", GInt(1)); // TextEdit.LINE_WRAPPING_BOUNDARY
-  __vrSetMinSize(e, 0.0, __vrNum(props.height, t.controlHeight * 2.4));
+  __vrSetMinSize(e, 0.0, __vrNum(props.height, 120.0));
   e.set("size_flags_horizontal", GInt(3));
-  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, pad: 20, border: 1, borderColor: t.outline }));
-  e.set("theme_override_styles/focus", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, pad: 20, border: 2, borderColor: t.primary }));
-  e.set("theme_override_colors/font_color", t.text);
-  e.set("theme_override_colors/font_placeholder_color", t.textFaint);
-  e.set("theme_override_colors/caret_color", t.primary);
+  VUI.textareaStyle(e);
   e.connect("text_changed", (a) => {
     let v = inst.node.get("text");
     inst.fieldValue = "" + v;
@@ -1913,12 +2062,8 @@ function __vrCreateSelect(inst, props, t) {
   inst.node = e;
   inst.container = null;
   e.set("focus_mode", GInt(0));
-  e.set("theme_override_font_sizes/font_size", GInt(t.fontS));
-  __vrSetMinSize(e, __vrNum(props.minWidth, 0.0), __vrNum(props.height, t.controlHeight));
-  e.set("theme_override_styles/normal", VUI.styleBox({ bg: t.surface2, radius: t.radiusM, padX: 26, border: 1, borderColor: t.outline }));
-  e.set("theme_override_styles/hover", VUI.styleBox({ bg: t.surface3, radius: t.radiusM, padX: 26, border: 1, borderColor: t.outline }));
-  e.set("theme_override_styles/pressed", VUI.styleBox({ bg: t.surface3, radius: t.radiusM, padX: 26, border: 1, borderColor: t.primary }));
-  e.set("theme_override_colors/font_color", t.text);
+  VUI.dropdownStyle(e);
+  __vrSetMinSize(e, __vrNum(props.minWidth, 0.0), __vrNum(props.height, t.fieldHeight));
   if (props.wide == true || props.grow == true) {
     e.set("size_flags_horizontal", GInt(3));
   }
@@ -1979,8 +2124,16 @@ function __vrCreateProgress(inst, props, t) {
   p.set("max_value", GFloat(__vrNum(props.max, 100.0)));
   p.set("value", GFloat(__vrNum(props.value, 0.0)));
   p.set("show_percentage", false);
-  __vrSetMinSize(p, 0.0, 18.0);
+  __vrSetMinSize(p, 0.0, __vrNum(props.height, 6.0));
   p.set("size_flags_horizontal", GInt(3));
+  p.set(
+    "theme_override_styles/background",
+    VUI.styleBox({ bg: t.surfaceContainerHighest, radius: t.radiusFull })
+  );
+  p.set(
+    "theme_override_styles/fill",
+    VUI.styleBox({ bg: __vrColor(props.color) ?? t.primary, radius: t.radiusFull })
+  );
 }
 
 // ---- slider ----------------------------------------------------------------
@@ -1993,7 +2146,8 @@ function __vrCreateSlider(inst, props, t) {
   s.set("max_value", GFloat(__vrNum(props.max, 100.0)));
   s.set("step", GFloat(__vrNum(props.step, 1.0)));
   s.set("value", GFloat(__vrNum(props.value, 0.0)));
-  __vrSetMinSize(s, 0.0, t.controlHeight);
+  s.set("focus_mode", GInt(0));
+  VUI.sliderStyle(s);
   s.set("size_flags_horizontal", GInt(3));
   s.connect("value_changed", (a) => {
     __vrCall(inst.props.onChange, a[0]);
@@ -2004,31 +2158,48 @@ function __vrCreateSlider(inst, props, t) {
 // ---- switch / checkbox -----------------------------------------------------
 
 function __vrCreateSwitch(inst, props, t) {
-  let c = GD.create("CheckButton");
-  inst.node = c;
-  inst.container = null;
-  c.set("focus_mode", GInt(0));
-  c.set("button_pressed", props.checked == true || props.value == true);
-  c.set("text", __vrTextOf(props));
-  c.set("theme_override_font_sizes/font_size", GInt(t.fontS));
-  c.connect("toggled", (a) => {
-    __vrCall(inst.props.onChange, a[0]);
-    __vrCall(inst.props.onChanged, a[0]);
+  // The Material switch from the kit (pill track + animated knob); the handle
+  // is kept on the instance so prop updates can drive it.
+  let handle = VUI.toggle({
+    value: props.checked == true || props.value == true,
+    onChanged: (on) => {
+      __vrCall(inst.props.onChange, on);
+      __vrCall(inst.props.onChanged, on);
+    },
   });
+  let label = __vrTextOf(props);
+  if (label != "") {
+    let rowBox = GD.create("HBoxContainer");
+    rowBox.set("theme_override_constants/separation", GInt(12));
+    let lab = GD.create("Label");
+    lab.set("text", label);
+    lab.set("theme_override_font_sizes/font_size", GInt(t.fontS));
+    lab.set("theme_override_colors/font_color", t.onSurface);
+    lab.set("vertical_alignment", GInt(1));
+    lab.set("size_flags_horizontal", GInt(3));
+    rowBox.call("add_child", [lab]);
+    rowBox.call("add_child", [handle.node]);
+    inst.node = rowBox;
+  } else {
+    inst.node = handle.node;
+  }
+  inst.container = null;
+  inst.toggleHandle = handle;
 }
 
 function __vrCreateCheckbox(inst, props, t) {
-  let c = GD.create("CheckBox");
-  inst.node = c;
-  inst.container = null;
-  c.set("focus_mode", GInt(0));
-  c.set("button_pressed", props.checked == true || props.value == true);
-  c.set("text", __vrTextOf(props));
-  c.set("theme_override_font_sizes/font_size", GInt(t.fontS));
-  c.connect("toggled", (a) => {
-    __vrCall(inst.props.onChange, a[0]);
-    __vrCall(inst.props.onChanged, a[0]);
+  // The Material checkbox from the kit.
+  let handle = VUI.checkbox({
+    value: props.checked == true || props.value == true,
+    label: __vrTextOf(props),
+    onChanged: (on) => {
+      __vrCall(inst.props.onChange, on);
+      __vrCall(inst.props.onChanged, on);
+    },
   });
+  inst.node = handle.node;
+  inst.container = null;
+  inst.toggleHandle = handle;
 }
 
 // ---- divider ---------------------------------------------------------------
@@ -2037,9 +2208,15 @@ function __vrCreateDivider(inst, props, t) {
   let d = GD.create("Panel");
   inst.node = d;
   inst.container = null;
-  __vrSetMinSize(d, 0.0, __vrNum(props.thickness, 2.0));
-  d.set("size_flags_horizontal", GInt(3));
-  d.set("theme_override_styles/panel", VUI.styleBox({ bg: t.outline, radius: 2 }));
+  if (props.vertical == true) {
+    __vrSetMinSize(d, __vrNum(props.thickness, 1.0), 8.0);
+    d.set("size_flags_vertical", GInt(3));
+  } else {
+    __vrSetMinSize(d, 0.0, __vrNum(props.thickness, 1.0));
+    d.set("size_flags_horizontal", GInt(3));
+  }
+  d.set("mouse_filter", GInt(2));
+  d.set("theme_override_styles/panel", VUI.styleBox({ bg: __vrColor(props.color) ?? t.outlineVariant, radius: 1 }));
 }
 
 // ---------------------------------------------------------------------------
@@ -2138,10 +2315,25 @@ function __vrDriverUpdate(inst, oldProps, props) {
     }
     return;
   }
+  if (tag == "chip") {
+    if (inst.chipHandle != null && props.selected != oldProps.selected) {
+      inst.chipHandle.setSelected(props.selected == true);
+    }
+    return;
+  }
   if (tag == "switch" || tag == "toggle" || tag == "checkbox") {
     let on = props.checked == true || props.value == true;
-    inst.node.set("button_pressed", on);
-    inst.node.set("text", __vrTextOf(props));
+    if (inst.toggleHandle != null) {
+      if (tag == "checkbox") {
+        if (inst.toggleHandle.isChecked() != on) {
+          inst.toggleHandle.setChecked(on);
+        }
+      } else {
+        if (inst.toggleHandle.isOn() != on) {
+          inst.toggleHandle.setOn(on);
+        }
+      }
+    }
     return;
   }
 }
@@ -2171,6 +2363,7 @@ var React = {
   useDeferredValue: useDeferredValue,
   useDebugValue: useDebugValue,
   useFrame: useFrame,
+  useViewport: useViewport,
   memo: memo,
   forwardRef: forwardRef,
 };
@@ -2284,6 +2477,10 @@ var Victor = {
     __vrFrameCbs.push(cb);
   },
   useFrame: useFrame,
+  useViewport: useViewport,
+  metrics: () => {
+    return VUI.metrics();
+  },
   // 3D building blocks for imperative use (inside useFrame, refs, escape hatch).
   g3: () => {
     return G3;
@@ -2325,6 +2522,11 @@ function Divider(props) { return jsx("divider", props); }
 function Spacer(props) { return jsx("spacer", props); }
 
 function TextArea(props) { return jsx("textarea", props); }
+function Chip(props) { return jsx("chip", props); }
+function BadgePill(props) { return jsx("badge", props); }
+function Avatar(props) { return jsx("avatar", props); }
+function Fab(props) { return jsx("fab", props); }
+function ListTile(props) { return jsx("tile", props); }
 function Select(props) { return jsx("select", props); }
 function RichText(props) { return jsx("richtext", props); }
 

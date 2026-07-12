@@ -99,6 +99,92 @@ enum TplPart {
     Expr(String),
 }
 
+/// Decode one backslash escape starting at `chars[i]` (the backslash) inside a
+/// string/template literal, pushing the decoded character(s) onto `out` and
+/// returning the index just past the escape. Handles the classic single-char
+/// escapes plus `\uXXXX` (with UTF-16 surrogate-pair combining), `\u{…}` and
+/// `\xNN` — the forms JS tooling (Babel et al.) routinely emits for non-ASCII
+/// text such as emoji.
+fn js_escape(chars: &[char], i: usize, out: &mut String) -> usize {
+    let n = chars.len();
+    debug_assert!(chars[i] == '\\' && i + 1 < n);
+    let c = chars[i + 1];
+    let hex4 = |at: usize| -> Option<u32> {
+        if at + 4 > n {
+            return None;
+        }
+        let mut v = 0u32;
+        for k in 0..4 {
+            v = v * 16 + chars[at + k].to_digit(16)?;
+        }
+        Some(v)
+    };
+    match c {
+        'n' => out.push('\n'),
+        't' => out.push('\t'),
+        'r' => out.push('\r'),
+        'b' => out.push('\u{0008}'),
+        'f' => out.push('\u{000C}'),
+        'v' => out.push('\u{000B}'),
+        '0' => out.push('\0'),
+        'x' => {
+            // \xNN
+            if i + 4 <= n {
+                if let (Some(h), Some(l)) = (chars[i + 2].to_digit(16), chars[i + 3].to_digit(16)) {
+                    out.push(char::from_u32(h * 16 + l).unwrap_or('\u{FFFD}'));
+                    return i + 4;
+                }
+            }
+            out.push('x');
+        }
+        'u' => {
+            // \u{XXXXXX}
+            if i + 2 < n && chars[i + 2] == '{' {
+                let mut j = i + 3;
+                let mut v = 0u32;
+                let mut any = false;
+                while j < n && chars[j] != '}' {
+                    match chars[j].to_digit(16) {
+                        Some(d) => {
+                            v = v.saturating_mul(16).saturating_add(d);
+                            any = true;
+                            j += 1;
+                        }
+                        None => break,
+                    }
+                }
+                if any && j < n && chars[j] == '}' {
+                    out.push(char::from_u32(v).unwrap_or('\u{FFFD}'));
+                    return j + 1;
+                }
+                out.push('u');
+                return i + 2;
+            }
+            // \uXXXX — combine a high+low surrogate pair into one scalar.
+            if let Some(hi) = hex4(i + 2) {
+                if (0xD800..0xDC00).contains(&hi)
+                    && i + 8 < n
+                    && chars[i + 6] == '\\'
+                    && chars[i + 7] == 'u'
+                {
+                    if let Some(lo) = hex4(i + 8) {
+                        if (0xDC00..0xE000).contains(&lo) {
+                            let scalar = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                            out.push(char::from_u32(scalar).unwrap_or('\u{FFFD}'));
+                            return i + 12;
+                        }
+                    }
+                }
+                out.push(char::from_u32(hi).unwrap_or('\u{FFFD}'));
+                return i + 6;
+            }
+            out.push('u');
+        }
+        other => out.push(other),
+    }
+    i + 2
+}
+
 fn tokenize_js(src: &str) -> Vec<JsTok> {
     let chars: Vec<char> = src.chars().collect();
     let n = chars.len();
@@ -140,17 +226,7 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
             let mut s = String::new();
             while i < n && chars[i] != quote {
                 if chars[i] == '\\' && i + 1 < n {
-                    match chars[i + 1] {
-                        'n' => s.push('\n'),
-                        't' => s.push('\t'),
-                        'r' => s.push('\r'),
-                        '\\' => s.push('\\'),
-                        '\'' => s.push('\''),
-                        '"' => s.push('"'),
-                        '0' => s.push('\0'),
-                        other => s.push(other),
-                    }
-                    i += 2;
+                    i = js_escape(&chars, i, &mut s);
                 } else {
                     s.push(chars[i]);
                     i += 1;
@@ -169,16 +245,7 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
             let mut lit = String::new();
             while i < n && chars[i] != '`' {
                 if chars[i] == '\\' && i + 1 < n {
-                    match chars[i + 1] {
-                        'n' => lit.push('\n'),
-                        't' => lit.push('\t'),
-                        'r' => lit.push('\r'),
-                        '\\' => lit.push('\\'),
-                        '`' => lit.push('`'),
-                        '$' => lit.push('$'),
-                        other => lit.push(other),
-                    }
-                    i += 2;
+                    i = js_escape(&chars, i, &mut lit);
                     continue;
                 }
                 if chars[i] == '$' && i + 1 < n && chars[i + 1] == '{' {
