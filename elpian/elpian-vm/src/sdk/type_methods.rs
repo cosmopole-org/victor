@@ -123,7 +123,9 @@ mod string {
         Some(match name {
             "substring" | "contains" | "indexOf" | "upper" | "lower" | "trim" | "trimStart"
             | "trimEnd" | "split" | "startsWith" | "endsWith" | "replace" | "replaceFirst"
-            | "codeUnitAt" | "padStart" | "padEnd" => Dispatch::Method,
+            | "codeUnitAt" | "padStart" | "padEnd" | "charAt" | "repeat" | "ord" => {
+                Dispatch::Method
+            }
             _ => return None,
         })
     }
@@ -164,6 +166,12 @@ mod tests {
         assert_eq!(resolve(CoreType::List, "first").unwrap().dispatch, Dispatch::Getter);
         assert_eq!(resolve(CoreType::List, "map").unwrap().dispatch, Dispatch::Prelude);
         assert_eq!(resolve(CoreType::String, "upper").unwrap().dispatch, Dispatch::Method);
+        // Regression: charAt/repeat/ord are stdlib string builtins that were
+        // missing from this catalog — a member read then produced a
+        // non-callable and the call panicked the whole VM (web: abort()).
+        assert_eq!(resolve(CoreType::String, "charAt").unwrap().dispatch, Dispatch::Method);
+        assert_eq!(resolve(CoreType::String, "repeat").unwrap().dispatch, Dispatch::Method);
+        assert_eq!(resolve(CoreType::String, "ord").unwrap().dispatch, Dispatch::Method);
         assert_eq!(resolve(CoreType::Num, "isNaN").unwrap().dispatch, Dispatch::Getter);
         assert_eq!(resolve(CoreType::Map, "keys").unwrap().dispatch, Dispatch::Getter);
         // The resolved name is the universal builtin name, used directly by
