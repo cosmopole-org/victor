@@ -61,10 +61,13 @@ automates all of this, including the browser build served over HTTP.
 
 ## Tests
 
-`capi/tests/run_caspigames.rs` — the caspar.js length-prefixed framing
-round-trips byte-for-byte (incl. multi-byte UTF-8 and truncation safety);
-`Caspar.connect` opens and pumps a `StreamPeerTCP` (and a `WebSocketPeer` in
-`transport: 'ws'` mode); the Caspi SDK message contract bridges a sandboxed
-child VM to the platform proxy and back; and — when `CASPIGAMES_CLIENT_JS`
-points at the CaspiGames client script — the full client boots to its
-connect form on a real VM.
+`capi/tests/run_caspar_prelude.rs` — the caspar.js length-prefixed framing
+round-trips byte-for-byte (incl. multi-byte UTF-8 and truncation safety), and
+`Caspar.connect` opens and pumps a `StreamPeerTCP` (default) and a
+`WebSocketPeer` (`transport: 'ws'` mode).
+
+The CaspiGames client/system tests (the client boot flow and the Caspi SDK
+message contract) live with the product in the CaspiGames repo
+(`client/tests/run_caspigames_client.rs`); its `e2e/test-client.sh` injects
+that file into this crate's tests directory and runs it here, since cargo
+integration tests must compile inside the crate that owns the VM harness.

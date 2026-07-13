@@ -1,15 +1,17 @@
-//! CaspiGames coverage: the caspar.js prelude and the super-app client
-//! contract. The client scene itself lives in the CaspiGames platform repo
-//! (`CaspiGames/client/`); its boot test runs when `CASPIGAMES_CLIENT_JS`
-//! points at the script (the CaspiGames e2e pipeline sets it). What this
-//! suite pins unconditionally:
+//! caspar.js prelude coverage: the Caspar signed binary action protocol
+//! client that Victor ships for guests (`import 'caspar.js';`).
 //!
-//!   * `import 'caspar.js'` composes, and the wire-framing helpers round-trip
-//!     the Caspar length-prefixed layout byte-for-byte;
-//!   * `Caspar.connect` opens and pumps a `StreamPeerTCP` (default) or a
-//!     `WebSocketPeer` (`transport: 'ws'` — the browser/web-export path);
-//!   * the Caspi SDK shim pattern (game -> parent JSON messages, parent ->
-//!     game replies) bridges a sandboxed child VM to the platform proxy.
+//!   * the length-prefixed wire framing round-trips byte-for-byte
+//!     (lp(sig)|lp(user)|lp(path)|lp(pkt)|payload; multi-byte UTF-8;
+//!     truncation safety);
+//!   * `Caspar.connect` opens and pumps a `StreamPeerTCP` (the default
+//!     transport) and a `WebSocketPeer` (`transport: 'ws'` — the path a
+//!     browser-served web export takes, where raw TCP is unavailable).
+//!
+//! The CaspiGames super-app built on this prelude lives in the CaspiGames
+//! platform repo; its client/system tests (`client/tests/` there) are
+//! injected into this crate's tests directory and run by that repo's e2e
+//! pipeline (`e2e/test-client.sh`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -93,50 +95,6 @@ fn boot_js(id: &str, source: &str) -> (VmManager, Rc<RefCell<Mock>>) {
     mgr.run_root().expect("main() must run");
     (mgr, mock)
 }
-
-/// The CaspiGames client boots to the connect form: the VUI shell
-/// (transparent, CanvasLayer), five LineEdit form fields (host, port, main
-/// creature id, main program id, player handle) and the enter button.
-///
-/// The client script lives in the CaspiGames platform repo
-/// (`CaspiGames/client/scripts/caspigames.js`); point the
-/// `CASPIGAMES_CLIENT_JS` env var at it to run this test (the CaspiGames e2e
-/// pipeline does), otherwise the test is skipped.
-#[test]
-fn caspigames_client_boots_to_connect_form() {
-    let path = match std::env::var("CASPIGAMES_CLIENT_JS") {
-        Ok(p) if !p.is_empty() => p,
-        _ => {
-            eprintln!("CASPIGAMES_CLIENT_JS not set — skipping the client boot test");
-            return;
-        }
-    };
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
-    let (mut mgr, mock) = boot_js("caspigames", &src);
-    {
-        let m = mock.borrow();
-        assert_eq!(m.created("CanvasLayer"), 1, "one VUI app shell layer");
-        assert!(
-            m.created("LineEdit") >= 5,
-            "the connect form needs host/port/creature/program/player fields, saw {}",
-            m.created("LineEdit")
-        );
-        assert!(m.created("Button") >= 5, "connect + garage HUD buttons");
-        // The 3D garage must NOT exist yet — it is built after discovery.
-        assert_eq!(m.created("WorldEnvironment"), 0, "no garage before connect");
-    }
-    let log = mgr.take_log().join("\n");
-    assert!(log.contains("client up"), "boot log was: {log}");
-
-    // A few frames of the garage ticker while still on the connect page must
-    // be inert (phase gate) — drive them to prove no crash.
-    for _ in 0..5 {
-        mgr.invoke("__godotEvent", json!(["_process", 0.016]));
-        mgr.pump(16).expect("pump");
-    }
-}
-
 /// caspar.js composes on import and its length-prefixed framing round-trips:
 /// request bodies build as lp(sig)|lp(user)|lp(path)|lp(pkt)|payload and the
 /// response/update parsers read back exactly what was written.
@@ -207,79 +165,6 @@ fn caspar_framing_round_trips() {
             "the pump must poll the peer"
         );
     }
-}
-
-/// The Caspi SDK shim contract: a sandboxed game VM reaches the platform
-/// ONLY through JSON messages to its parent. This mirrors the shim inside
-/// caspigames.js and pins the message shapes both sides rely on:
-/// child {caspi:op, id, payload} -> parent; parent {caspi:'result', id,
-/// payload} -> child callback.
-#[test]
-fn caspi_shim_pattern_bridges_game_to_platform() {
-    let src = r#"
-        import 'godot.js';
-        var shim = [
-          "var __caspi = { next: 1, cbs: {} };",
-          "var Caspi = {};",
-          "Caspi.request = (op, payload, cb) => {",
-          "  let id = __caspi.next;",
-          "  __caspi.next = id + 1;",
-          "  if (cb != null) { __caspi.cbs['r' + id] = cb; }",
-          "  VMs.sendParent(jsonStringify({ caspi: op, id: id, payload: payload ?? {} }));",
-          "};",
-          "Caspi.submitScore = (score, cb) => { Caspi.request('submitScore', { score: score }, cb); };",
-          "VMs.onMessage((sender, msg) => {",
-          "  let m = jsonParse('' + msg);",
-          "  if (m == null) { return; }",
-          "  if (m.caspi == 'result') {",
-          "    let cb = __caspi.cbs['r' + m.id];",
-          "    if (cb != null) { __caspi.cbs['r' + m.id] = null; cb(m.payload); }",
-          "  }",
-          "});",
-        ].join("\n");
-        var game = shim + "\n"
-          + "function main() {\n"
-          + "  Caspi.submitScore(420, (res) => {\n"
-          + "    print('game: score ack ok=' + res.ok + ' best=' + res.best);\n"
-          + "  });\n"
-          + "}\n"
-          + "main();\n";
-        function main() {
-            let pod = GD.create('Node3D');
-            GD.mount(pod);
-            VMs.onMessage((sender, msg) => {
-                let m = jsonParse('' + msg);
-                if (m == null || m.caspi == null) { return; }
-                print('platform: ' + m.caspi + ' #' + m.id + ' score=' + m.payload.score);
-                // Reply via the sender id: the child boots (and may message)
-                // inside the spawn call, before any spawn return value could
-                // have been captured.
-                VMs.of(sender).send(jsonStringify({
-                    caspi: 'result', id: m.id,
-                    payload: { ok: true, best: m.payload.score },
-                }));
-            });
-            // vm_manage stays granted: the vm.* family carries the SDK's
-            // messaging channel and is tree-authorized anyway.
-            let child = VMs.spawn(game, pod, { label: 'game:test' });
-            if (child == null) { print('spawn FAILED'); }
-        }
-        main();
-    "#;
-    let (mut mgr, _mock) = boot_js("caspi-shim", src);
-    // Message delivery is settled across frames; drive a few.
-    for _ in 0..10 {
-        mgr.pump(16).expect("pump");
-    }
-    let log = mgr.take_log().join("\n");
-    assert!(
-        log.contains("platform: submitScore #1 score=420"),
-        "parent must receive the shim request — log was: {log}"
-    );
-    assert!(
-        log.contains("game: score ack ok=true best=420"),
-        "child callback must receive the platform reply — log was: {log}"
-    );
 }
 
 /// The WebSocket transport: `Caspar.connect({transport:'ws'})` rides a
