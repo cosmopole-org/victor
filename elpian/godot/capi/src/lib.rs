@@ -63,6 +63,14 @@ pub const GODOT_UI_KIT_JS: &str = include_str!("../../prelude/ui.js");
 /// source imports it (`import 'net.js';`); it depends only on `godot.js`.
 pub const GODOT_NET_JS: &str = include_str!("../../prelude/net.js");
 
+/// Caspar protocol client (`caspar.js`) — the Caspar-node signed binary action
+/// protocol over a `StreamPeerTCP` (framing, dev login, RSA request signing
+/// via Godot `Crypto`, creature signalling with correlation-id result routing)
+/// plus `CaspiNet`, the CaspiGames service-discovery layer. Composed ahead of
+/// a JS guest when its source imports it (`import 'caspar.js';`); it depends
+/// only on `godot.js`.
+pub const GODOT_CASPAR_JS: &str = include_str!("../../prelude/caspar.js");
+
 /// VReact (`react.js`) — a React-compatible runtime (element factory, the full
 /// hook surface, and a keyed reconciler that mutates retained Godot nodes)
 /// whose host config targets the VUI kit. Composed ahead of a JS guest when its
@@ -160,12 +168,18 @@ pub fn compose_godot_program_js(user_source: &str) -> String {
     // react.js is built on VUI, so it implies the UI kit.
     let wants_ui_kit = wants_react || imports("ui.js");
     let wants_net = imports("net.js");
+    let wants_caspar = imports("caspar.js");
 
     let mut parts: Vec<String> = vec![strip(GODOT_PRELUDE_JS)];
     if wants_net {
         // net.js depends only on godot.js; compose it before the UI layers so
         // widgets and components can reach the network from construction time.
         parts.push(strip(GODOT_NET_JS));
+    }
+    if wants_caspar {
+        // caspar.js depends only on godot.js; compose it before the UI layers
+        // so app scaffolding can open node connections from construction time.
+        parts.push(strip(GODOT_CASPAR_JS));
     }
     if wants_ui_kit {
         parts.push(strip(GODOT_UI_KIT_JS));

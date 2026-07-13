@@ -3393,6 +3393,14 @@ impl Executor {
         }
     }
     fn is_eq(&self, v: Val, v2: Val) -> bool {
+        // A real `Payload::Null` (typ 0 — what host replies and JSON `null`
+        // decode to) and the front-ends' compiled null (numeric 0 — see
+        // `is_nullish`) must compare equal in every combination, or
+        // `x == null` silently fails on any null that crossed the host seam
+        // (e.g. a Godot bridge call that returned nothing).
+        if v.typ == 0 || v2.typ == 0 {
+            return is_nullish(&v) && is_nullish(&v2);
+        }
         return match v.typ {
             1 | 2 | 3 => {
                 let v_val = match v.typ {
