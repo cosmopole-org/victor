@@ -1,12 +1,13 @@
-# CaspiGames on Victor — the gaming super-app client
+# CaspiGames on Victor — the Caspar protocol prelude
 
-`project/caspigames.tscn` + `scripts/caspigames.js` turn Victor into the
-client of **CaspiGames**, a gaming super-app whose backend is a mesh of WASM
-creatures on a [Caspar](https://github.com/cosmopole-org/caspar) node (see
-the [CaspiGames platform repo](https://github.com/cosmopole-org/CaspiGames)
-for the backend creatures, sample games and deploy tooling). Everything the
-player sees — connect form, 3D garage, HUD, game loading — is JavaScript on
-the Elpian root VM; every third-party game runs in a **sandboxed child VM**.
+Victor ships the protocol layer of **CaspiGames**, a gaming super-app whose
+backend is a mesh of WASM creatures on a
+[Caspar](https://github.com/cosmopole-org/caspar) node. The client scene
+itself (connect form, the 3D garage, the sandboxed game loader) lives in the
+[CaspiGames platform repo](https://github.com/cosmopole-org/CaspiGames) under
+`client/` — its e2e/Docker pipeline copies it into this Godot project and
+builds/export it (web export included). What lives HERE is the reusable
+piece: `prelude/caspar.js`.
 
 ## caspar.js — the Caspar protocol prelude
 
@@ -14,7 +15,10 @@ the Elpian root VM; every third-party game runs in a **sandboxed child VM**.
 the Caspar signed binary action protocol, in the guest-JS subset over the
 reflective bridge:
 
-* **Transport** — a `StreamPeerTCP` node pumped on a `GTimer` (33 ms), with a
+* **Transports** — `StreamPeerTCP` (default) or `WebSocketPeer`
+  (`transport: 'ws'`, auto-selected on web exports where raw TCP does not
+  exist; each WS Binary message carries one `u32be(len)||body` frame, matching
+  the node's client WS driver), both pumped on a `GTimer` (33 ms) into one
   resumable length-prefixed frame parser (requests carry *no* tag byte;
   responses `0x02` are ACKed with a `u32be(1)|0x01` frame so the server's
   send gate opens; updates `0x01` are fire-and-forget).
@@ -33,46 +37,34 @@ reflective bridge:
   platform manifest + service registry, and `call(service, action, payload,
   cb)` reaches any registered service by name.
 
-## The client flow (scripts/caspigames.js)
+## The client (in the CaspiGames repo)
 
-1. **Connect form** (VUI, portrait 720×1280, transparent shell): Caspar node
-   host/port, the main entry creature id + program id, player handle →
-   connect → login → `discover` → profile bootstrap.
-2. **The garage** — a gamified 3D lab built with `G3`: emissive floor grid,
-   holo-table with a spinning hologram, workbench + tool rack, server rack
-   with blinking LEDs, arcade cabinet, and a glowing cartridge pedestal per
-   discovered game, under a slow drifting camera. The HUD (games shelf,
-   profile, leaderboards, system panel) rides a bg-less VUI app so the 3D
-   world shows through.
-3. **Opening a game** — manifest + base64 source chunks are fetched from the
-   `games` creature, the **Caspi SDK shim** is prepended, and the game boots
-   in a child VM sandboxed to a fresh pod node with instruction/memory
-   budgets. The garage hides; the game's camera/UI owns the screen; EXIT (or
-   `Caspi.exit()`, or a budget trap) terminates the branch, frees the pod and
-   restores the garage + camera.
-4. **The platform proxy** — the root VM answers game messages
-   (`submitScore`, `grant`, `top`, `profile`, `info`, `ready`, `exit`) by
-   signalling the discovered backend creatures and replying to the child by
-   its **sender vm id** (a game may message during its boot turn, before the
-   spawn call has even returned). vm_manage stays granted to games — the
-   `vm.*` family carries the messaging channel and every verb is
-   tree-authorized anyway, so a game can only manage its own descendants.
+`CaspiGames/client/scripts/caspigames.js` + `client/caspigames.tscn` build on
+this prelude: connect form → login → discovery → the 3D garage lab → games
+loaded into sandboxed child VMs with the Caspi SDK shim. See
+`CaspiGames/README.md` and `CaspiGames/docs/GAME_DEV_GUIDE.md`.
 
 ## Running
 
+The CaspiGames e2e pipeline (or by hand):
+
 ```sh
+cp <CaspiGames>/client/caspigames.tscn project/
+cp <CaspiGames>/client/scripts/caspigames.js project/scripts/
 godot --path project caspigames.tscn
 ```
 
 with a deployed backend (CaspiGames repo: `./build-all.sh` then
 `python3 deploy/deploy_platform.py` against a running Caspar node — it prints
-the three connect-form values).
+the three connect-form values). The dockerized stack in the CaspiGames repo
+automates all of this, including the browser build served over HTTP.
 
 ## Tests
 
-`capi/tests/run_caspigames.rs` — the shipped client boots to the connect
-form on a real VM against a mock engine; the caspar.js length-prefixed
-framing round-trips byte-for-byte (incl. multi-byte UTF-8 and truncation
-safety); `Caspar.connect` opens and pumps a `StreamPeerTCP`; and the Caspi
-SDK message contract bridges a sandboxed child VM to the platform proxy and
-back.
+`capi/tests/run_caspigames.rs` — the caspar.js length-prefixed framing
+round-trips byte-for-byte (incl. multi-byte UTF-8 and truncation safety);
+`Caspar.connect` opens and pumps a `StreamPeerTCP` (and a `WebSocketPeer` in
+`transport: 'ws'` mode); the Caspi SDK message contract bridges a sandboxed
+child VM to the platform proxy and back; and — when `CASPIGAMES_CLIENT_JS`
+points at the CaspiGames client script — the full client boots to its
+connect form on a real VM.

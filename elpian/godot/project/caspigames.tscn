@@ -1,9 +1,0 @@
-[gd_scene format=3 uid="uid://caspigames001"]
-
-[node name="CaspiGames" type="Node3D"]
-
-[node name="ElpianVM" type="ElpianVM" parent="."]
-script_path = "res://scripts/caspigames.js"
-language = "js"
-autostart = true
-prepend_prelude = true

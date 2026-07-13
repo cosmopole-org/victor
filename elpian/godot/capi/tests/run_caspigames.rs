@@ -1,14 +1,13 @@
-//! CaspiGames client coverage: the gaming super-app scene
-//! (`project/scripts/caspigames.js`, composed with godot.js + ui.js +
-//! caspar.js) must compile and BOOT against a mock engine, and the pieces the
-//! platform stands on must hold:
+//! CaspiGames coverage: the caspar.js prelude and the super-app client
+//! contract. The client scene itself lives in the CaspiGames platform repo
+//! (`CaspiGames/client/`); its boot test runs when `CASPIGAMES_CLIENT_JS`
+//! points at the script (the CaspiGames e2e pipeline sets it). What this
+//! suite pins unconditionally:
 //!
-//!   * the connect form comes up first (fields for node URL + the main entry
-//!     creature/program ids, per the discovery flow);
 //!   * `import 'caspar.js'` composes, and the wire-framing helpers round-trip
 //!     the Caspar length-prefixed layout byte-for-byte;
-//!   * `Caspar.connect` opens a `StreamPeerTCP` and pumps it on the guest
-//!     timer loop;
+//!   * `Caspar.connect` opens and pumps a `StreamPeerTCP` (default) or a
+//!     `WebSocketPeer` (`transport: 'ws'` — the browser/web-export path);
 //!   * the Caspi SDK shim pattern (game -> parent JSON messages, parent ->
 //!     game replies) bridges a sandboxed child VM to the platform proxy.
 
@@ -95,13 +94,26 @@ fn boot_js(id: &str, source: &str) -> (VmManager, Rc<RefCell<Mock>>) {
     (mgr, mock)
 }
 
-/// The shipped CaspiGames client boots to the connect form: the VUI shell
+/// The CaspiGames client boots to the connect form: the VUI shell
 /// (transparent, CanvasLayer), five LineEdit form fields (host, port, main
 /// creature id, main program id, player handle) and the enter button.
+///
+/// The client script lives in the CaspiGames platform repo
+/// (`CaspiGames/client/scripts/caspigames.js`); point the
+/// `CASPIGAMES_CLIENT_JS` env var at it to run this test (the CaspiGames e2e
+/// pipeline does), otherwise the test is skipped.
 #[test]
 fn caspigames_client_boots_to_connect_form() {
-    let src = include_str!("../../project/scripts/caspigames.js");
-    let (mut mgr, mock) = boot_js("caspigames", src);
+    let path = match std::env::var("CASPIGAMES_CLIENT_JS") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("CASPIGAMES_CLIENT_JS not set — skipping the client boot test");
+            return;
+        }
+    };
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+    let (mut mgr, mock) = boot_js("caspigames", &src);
     {
         let m = mock.borrow();
         assert_eq!(m.created("CanvasLayer"), 1, "one VUI app shell layer");
@@ -268,4 +280,36 @@ fn caspi_shim_pattern_bridges_game_to_platform() {
         log.contains("game: score ack ok=true best=420"),
         "child callback must receive the platform reply — log was: {log}"
     );
+}
+
+/// The WebSocket transport: `Caspar.connect({transport:'ws'})` rides a
+/// `WebSocketPeer` (connect_to_url + poll) instead of a StreamPeerTCP —
+/// the path a browser-served web export takes, where raw TCP is unavailable.
+#[test]
+fn caspar_ws_transport_opens_a_websocket_peer() {
+    let src = r#"
+        import 'godot.js';
+        import 'caspar.js';
+        function main() {
+            let node = Caspar.connect({ host: 'game.example', port: 8076, transport: 'ws' });
+            print('ws handle: ' + node.transport() + ' ' + node.status());
+        }
+        main();
+    "#;
+    let (mut mgr, mock) = boot_js("caspar-ws", src);
+    for _ in 0..5 {
+        mgr.pump(33).expect("pump");
+    }
+    let log = mgr.take_log().join("\n");
+    assert!(log.contains("ws handle: ws connecting"), "log was: {log}");
+    {
+        let m = mock.borrow();
+        assert_eq!(m.created("WebSocketPeer"), 1, "ws transport rides WebSocketPeer");
+        assert_eq!(m.created("StreamPeerTCP"), 0, "no TCP peer in ws mode");
+        assert!(
+            m.methods.iter().any(|x| x == "connect_to_url"),
+            "connect_to_url must be issued"
+        );
+        assert!(m.methods.iter().any(|x| x == "poll"), "the pump must poll the peer");
+    }
 }

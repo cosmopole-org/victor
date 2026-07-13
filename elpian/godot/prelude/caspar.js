@@ -4,11 +4,18 @@
 //
 // Composed AFTER `godot.js` (import it with `import 'caspar.js';`). Everything
 // here is user-space Elpian-JS over the reflective Godot bridge — the client
-// speaks the Caspar signed binary action protocol over a `StreamPeerTCP`
-// node, polled on a guest timer (same pattern as WSocket in net.js).
+// speaks the Caspar signed binary action protocol over either transport:
+//
+//   * "tcp" — a `StreamPeerTCP`, polled on a guest timer (same pattern as
+//     WSocket in net.js). The default on desktop/mobile.
+//   * "ws"  — a `WebSocketPeer` against the node's CLIENT_WS_API_PORT. The
+//     default (and only option) on web exports, where raw TCP is unavailable.
+//     Each WS Binary message carries exactly one `u32be(len) || body` frame
+//     in both directions (matching caspar's client ws driver), so the same
+//     buffer parser serves both transports.
 //
 // Wire protocol (matches caspar/node/src/drivers/network/framing.rs and the
-// TCP client driver):
+// TCP/WS client drivers):
 //
 //   request  : u32be(len) | lp(signature) | lp(userId) | lp(path) | lp(pktId)
 //                         | payload_json           (NO tag byte on requests)
@@ -101,13 +108,24 @@ function __cspPktId() {
 
 var Caspar = {};
 
-// Caspar.connect({ host, port, timeoutMs?, onState?, onUpdate? }) -> handle
+// Caspar.connect({ host, port, transport?, tls?, timeoutMs?, onState? })
+//   -> handle
 //
+// transport: "tcp" | "ws" | "auto" (default auto: "ws" on web exports —
+// browsers have no raw TCP — "tcp" everywhere else). Point `port` at the
+// node's CLIENT_TCP_API_PORT or CLIENT_WS_API_PORT accordingly. tls: true
+// dials wss:// (ws) / is not supported by the tcp path here.
 // onState receives "connecting" | "connected" | "error" | "closed".
 Caspar.connect = (o) => {
   o = o ?? {};
+  let mode = "" + (o.transport ?? "auto");
+  if (mode != "tcp" && mode != "ws") {
+    let isWeb = GD.os().call("has_feature", ["web"]);
+    mode = isWeb == true ? "ws" : "tcp";
+  }
   let st = {
-    peer: GD.create("StreamPeerTCP"),
+    mode: mode,
+    peer: GD.create(mode == "ws" ? "WebSocketPeer" : "StreamPeerTCP"),
     crypto: GD.create("Crypto"),
     key: null,
     status: "connecting",
@@ -137,6 +155,19 @@ Caspar.connect = (o) => {
   };
 
   // ---- outbound -----------------------------------------------------------
+  // Both transports carry the same `u32be(len) || body` frame: TCP as a raw
+  // stream write, WS as one Binary message per frame.
+
+  let sendRaw = (bytes) => {
+    let packed = Packed.bytesBase64(base64Encode(bytes));
+    let r = null;
+    if (st.mode == "ws") {
+      r = st.peer.call("put_packet", [packed]);
+    } else {
+      r = st.peer.call("put_data", [packed]);
+    }
+    return !GD.isError(r);
+  };
 
   let sendFrame = (bodyBytes) => {
     let frame = [];
@@ -144,12 +175,11 @@ Caspar.connect = (o) => {
     for (let i = 0; i < bodyBytes.length; i++) {
       frame.push(bodyBytes[i]);
     }
-    let r = st.peer.call("put_data", [Packed.bytesBase64(base64Encode(frame))]);
-    return !GD.isError(r);
+    return sendRaw(frame);
   };
 
   let sendAck = () => {
-    st.peer.call("put_data", [Packed.bytesBase64(base64Encode([0, 0, 0, 1, 1]))]);
+    sendRaw([0, 0, 0, 1, 1]);
   };
 
   // Sign payload bytes with the login key (Godot Crypto -> PKCS#1 v1.5,
@@ -315,11 +345,32 @@ Caspar.connect = (o) => {
   if (__isType(o.port, "num") && o.port > 0) {
     port = o.port;
   }
-  let err = st.peer.call("connect_to_host", [host, GInt(port)]);
-  if (GD.isError(err)) {
-    setState("error");
+
+  if (st.mode == "ws") {
+    let scheme = o.tls == true ? "wss://" : "ws://";
+    let err = st.peer.call("connect_to_url", [scheme + host + ":" + port]);
+    if (GD.isError(err)) {
+      setState("error");
+    }
+  } else {
+    let err = st.peer.call("connect_to_host", [host, GInt(port)]);
+    if (GD.isError(err)) {
+      setState("error");
+    }
+    st.peer.call("set_no_delay", [true]);
   }
-  st.peer.call("set_no_delay", [true]);
+
+  // Append incoming bytes to the frame buffer.
+  let ingest = (packed) => {
+    if (!__isType(packed, "Packed")) {
+      return 0;
+    }
+    let bytes = base64Decode(packed.data);
+    for (let i = 0; i < bytes.length; i++) {
+      st.buf.push(bytes[i]);
+    }
+    return bytes.length;
+  };
 
   st.timer = GTimer.periodic(33, () => {
     if (st.status == "closed") {
@@ -327,36 +378,52 @@ Caspar.connect = (o) => {
     }
     st.clock = st.clock + 0.033;
     st.peer.call("poll");
-    let s = st.peer.call("get_status");
-    if (s == 2) {
-      if (st.status != "connected") {
-        setState("connected");
+
+    if (st.mode == "ws") {
+      // WebSocketPeer.State: 0 CONNECTING, 1 OPEN, 2 CLOSING, 3 CLOSED.
+      let s = st.peer.call("get_ready_state");
+      if (s == 1) {
+        if (st.status != "connected") {
+          setState("connected");
+        }
+        let n = st.peer.call("get_available_packet_count");
+        let guard = 0;
+        while (__isType(n, "num") && n > 0 && guard < 64) {
+          ingest(st.peer.call("get_packet"));
+          n = st.peer.call("get_available_packet_count");
+          guard = guard + 1;
+        }
+        parseFrames();
+      } else if (s == 3) {
+        setState(st.status == "connected" ? "closed" : "error");
       }
-      let avail = st.peer.call("get_available_bytes");
-      let drained = 0;
-      while (__isType(avail, "num") && avail > 0 && drained < 262144) {
-        let chunkLen = avail;
-        if (chunkLen > 32768) {
-          chunkLen = 32768;
+    } else {
+      // StreamPeerTCP.Status: 0 NONE, 1 CONNECTING, 2 CONNECTED, 3 ERROR.
+      let s = st.peer.call("get_status");
+      if (s == 2) {
+        if (st.status != "connected") {
+          setState("connected");
         }
-        let r = st.peer.call("get_partial_data", [GInt(chunkLen)]);
-        if (!__isType(r, "List") || r.length < 2) {
-          break;
-        }
-        if (__isType(r[1], "Packed")) {
-          let bytes = base64Decode(r[1].data);
-          for (let i = 0; i < bytes.length; i++) {
-            st.buf.push(bytes[i]);
+        let avail = st.peer.call("get_available_bytes");
+        let drained = 0;
+        while (__isType(avail, "num") && avail > 0 && drained < 262144) {
+          let chunkLen = avail;
+          if (chunkLen > 32768) {
+            chunkLen = 32768;
           }
-          drained = drained + bytes.length;
+          let r = st.peer.call("get_partial_data", [GInt(chunkLen)]);
+          if (!__isType(r, "List") || r.length < 2) {
+            break;
+          }
+          drained = drained + ingest(r[1]);
+          avail = st.peer.call("get_available_bytes");
         }
-        avail = st.peer.call("get_available_bytes");
+        parseFrames();
+      } else if (s == 3) {
+        setState("error");
+      } else if (s == 0 && st.status == "connected") {
+        setState("closed");
       }
-      parseFrames();
-    } else if (s == 3) {
-      setState("error");
-    } else if (s == 0 && st.status == "connected") {
-      setState("closed");
     }
     sweepTimeouts();
   });
@@ -493,6 +560,8 @@ Caspar.connect = (o) => {
     st.updates.push(cb);
   };
 
+  handle.transport = () => st.mode;
+
   handle.close = () => {
     if (st.status == "closed") {
       return;
@@ -501,7 +570,11 @@ Caspar.connect = (o) => {
     if (st.timer != null) {
       st.timer.cancel();
     }
-    st.peer.call("disconnect_from_host");
+    if (st.mode == "ws") {
+      st.peer.call("close", [GInt(1000), "bye"]);
+    } else {
+      st.peer.call("disconnect_from_host");
+    }
     if (o.onState != null) {
       o.onState("closed");
     }
