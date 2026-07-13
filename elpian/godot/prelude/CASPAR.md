@@ -7,8 +7,11 @@ action protocol, written in the guest-JS subset over the reflective bridge:
 * **Transports** — `StreamPeerTCP` (default) or `WebSocketPeer`
   (`transport: 'ws'`, auto-selected on web exports where raw TCP does not
   exist; each WS Binary message carries one `u32be(len)||body` frame, matching
-  the node's client WS driver), both pumped on a `GTimer` (33 ms) into one
-  resumable length-prefixed frame parser (requests carry *no* tag byte;
+  the node's client WS driver). In ws mode the endpoint is `url:` (verbatim —
+  how a browser-served client rides its own page origin through an HTTP
+  server's `/ws` tunnel, mandatory behind HTTPS single-port hosts) or
+  `tls`/`host`/`port` + optional `path`. Both transports pump on a `GTimer`
+  (33 ms) into one resumable length-prefixed frame parser (requests carry *no* tag byte;
   responses `0x02` are ACKed with a `u32be(1)|0x01` frame so the server's
   send gate opens; updates `0x01` are fire-and-forget).
 * **Auth** — dev `/creatures/login` returns `{user, privateKey}`; the PEM is
@@ -31,6 +34,8 @@ action protocol, written in the guest-JS subset over the reflective bridge:
 
 ```js
 let node = Caspar.connect({ host, port, transport: 'auto', tls: false,
+                            url: '',      // ws mode: 'wss://host/ws' wins
+                            path: '',     // ws mode: appended to host:port
                             timeoutMs: 15000, onState: (s) => {} });
 node.login('player_one', (res) => {});     // dev login + request signing
 node.request('/api/ping', {}, (res) => {});// raw signed action

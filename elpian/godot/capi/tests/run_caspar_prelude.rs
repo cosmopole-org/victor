@@ -178,6 +178,10 @@ fn caspar_ws_transport_opens_a_websocket_peer() {
         function main() {
             let node = Caspar.connect({ host: 'game.example', port: 8076, transport: 'ws' });
             print('ws handle: ' + node.transport() + ' ' + node.status());
+            // URL addressing: what a browser-served client uses to ride its
+            // own https page origin through an HTTP server's /ws tunnel.
+            let tunneled = Caspar.connect({ transport: 'ws', url: 'wss://game.example/ws' });
+            print('tunnel handle: ' + tunneled.transport() + ' ' + tunneled.status());
         }
         main();
     "#;
@@ -187,13 +191,35 @@ fn caspar_ws_transport_opens_a_websocket_peer() {
     }
     let log = mgr.take_log().join("\n");
     assert!(log.contains("ws handle: ws connecting"), "log was: {log}");
+    assert!(log.contains("tunnel handle: ws connecting"), "log was: {log}");
     {
         let m = mock.borrow();
-        assert_eq!(m.created("WebSocketPeer"), 1, "ws transport rides WebSocketPeer");
+        assert_eq!(m.created("WebSocketPeer"), 2, "each ws handle rides its own WebSocketPeer");
         assert_eq!(m.created("StreamPeerTCP"), 0, "no TCP peer in ws mode");
         assert!(
             m.methods.iter().any(|x| x == "connect_to_url"),
             "connect_to_url must be issued"
+        );
+        // The url option must reach the engine verbatim (host/port untouched).
+        let urls: Vec<String> = m
+            .ops
+            .iter()
+            .filter(|op| op.get("method").and_then(|v| v.as_str()) == Some("connect_to_url"))
+            .filter_map(|op| {
+                op.get("args")
+                    .and_then(|a| a.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        assert!(
+            urls.iter().any(|u| u == "wss://game.example/ws"),
+            "tunnel URL must pass through verbatim, saw: {urls:?}"
+        );
+        assert!(
+            urls.iter().any(|u| u == "ws://game.example:8076"),
+            "host:port URL must be built, saw: {urls:?}"
         );
         assert!(m.methods.iter().any(|x| x == "poll"), "the pump must poll the peer");
     }

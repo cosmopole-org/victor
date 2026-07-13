@@ -108,13 +108,19 @@ function __cspPktId() {
 
 var Caspar = {};
 
-// Caspar.connect({ host, port, transport?, tls?, timeoutMs?, onState? })
-//   -> handle
+// Caspar.connect({ host, port, transport?, tls?, url?, path?, timeoutMs?,
+//                  onState? }) -> handle
 //
 // transport: "tcp" | "ws" | "auto" (default auto: "ws" on web exports —
 // browsers have no raw TCP — "tcp" everywhere else). Point `port` at the
 // node's CLIENT_TCP_API_PORT or CLIENT_WS_API_PORT accordingly. tls: true
 // dials wss:// (ws) / is not supported by the tcp path here.
+//
+// ws-mode addressing: `url` ("ws://… " / "wss://…") wins outright — the form
+// a browser-served client uses to ride its own page origin through an HTTP
+// server's /ws tunnel (an https:// page may only open wss://, and single-port
+// hosts expose nothing else). Otherwise the URL is built from
+// tls/host/port + optional `path`.
 // onState receives "connecting" | "connected" | "error" | "closed".
 Caspar.connect = (o) => {
   o = o ?? {};
@@ -347,8 +353,17 @@ Caspar.connect = (o) => {
   }
 
   if (st.mode == "ws") {
-    let scheme = o.tls == true ? "wss://" : "ws://";
-    let err = st.peer.call("connect_to_url", [scheme + host + ":" + port]);
+    let wsUrl = "";
+    if (o.url != null && ("" + o.url) != "") {
+      wsUrl = "" + o.url;
+    } else {
+      let scheme = o.tls == true ? "wss://" : "ws://";
+      wsUrl = scheme + host + ":" + port;
+      if (o.path != null && ("" + o.path) != "") {
+        wsUrl = wsUrl + o.path;
+      }
+    }
+    let err = st.peer.call("connect_to_url", [wsUrl]);
     if (GD.isError(err)) {
       setState("error");
     }
