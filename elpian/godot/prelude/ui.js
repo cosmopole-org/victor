@@ -745,9 +745,13 @@ VUI.app = (o) => {
   let layer = GD.create("CanvasLayer");
   GD.mount(layer);
 
-  // The page root: a full-rect Control carrying the background.
+  // The page root: a full-rect Control carrying the background. PASS-through
+  // for input: sandboxed game VMs render on layers below the app shell, and
+  // taps that hit no actual widget must reach them — every interactive VUI
+  // control STOPs for itself.
   let root = GD.create("Control");
   root.set("name", "VuiRoot");
+  root.set("mouse_filter", GInt(2)); // MOUSE_FILTER_IGNORE
   __vuiFullRect(root);
   layer.call("add_child", [root]);
   if (o.bg != false) {
