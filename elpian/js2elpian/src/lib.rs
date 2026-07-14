@@ -193,7 +193,7 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
     // Longest punctuators first so the greedy scan never splits `===` into
     // `==` + `=`, `<=` into `<` + `=`, and so on.
     let puncts: &[&str] = &[
-        "...", "===", "!==", "**", "~/", "??", "==", "!=", "<=", ">=", "=>", "&&", "||", "++", "--",
+        "...", "===", "!==", "**", "??", "==", "!=", "<=", ">=", "=>", "&&", "||", "++", "--",
         "+=", "-=", "*=", "/=", "%=", "(", ")", "{", "}", "[", "]", ";", ",", ".", ":", "?", "<",
         ">", "=", "+", "-", "*", "/", "%", "!", "^", "&", "|",
     ];
@@ -353,6 +353,12 @@ fn js_num_literal(s: &str) -> Value {
 }
 fn js_int(n: i64) -> Value {
     json!({ "type": "i64", "data": { "value": n } })
+}
+/// The VM's first-class null literal — what JS `null` and `undefined` lower to,
+/// and the value of every "absent" position (an uninitialised `let`, a bare
+/// `return`, a class field with no initialiser).
+fn js_null() -> Value {
+    json!({ "type": "null" })
 }
 fn js_ident(name: &str) -> Value {
     json!({ "type": "identifier", "data": { "name": name } })
@@ -654,7 +660,8 @@ impl JsParser {
         if self.at_ident("return") {
             self.advance();
             let val = if self.at_punct(";") || self.at_punct("}") || self.at_eof() {
-                js_int(0)
+                // A bare `return` yields JS `undefined` — the VM's null.
+                js_null()
             } else {
                 self.parse_expr()
             };
@@ -793,8 +800,8 @@ impl JsParser {
                     methods.push((member, params, body));
                 }
             } else {
-                // Class field: `name = expr;` or bare `name;` (defaults to 0).
-                let val = if self.eat_punct("=") { self.parse_expr() } else { js_int(0) };
+                // Class field: `name = expr;` or bare `name;` (defaults to null).
+                let val = if self.eat_punct("=") { self.parse_expr() } else { js_null() };
                 self.eat_punct(";");
                 if is_static {
                     static_fields.push((member, val));
@@ -863,7 +870,7 @@ impl JsParser {
         if let Some(p) = &parent {
             proto_map.insert("__parent".to_string(), js_ident(&format!("__proto_{}", p)));
         } else {
-            proto_map.insert("__parent".to_string(), js_int(0));
+            proto_map.insert("__parent".to_string(), js_null());
         }
         for (mname, params, body) in methods.into_iter() {
             let fname = format!("__m_{}__{}", name, mname);
@@ -1138,7 +1145,9 @@ impl JsParser {
                 let val = if self.eat_punct("=") {
                     self.parse_expr()
                 } else {
-                    js_int(0)
+                    // An uninitialised declaration binds JS `undefined` — the
+                    // VM's null.
+                    js_null()
                 };
                 out.push(js_def(&name, val));
                 if !self.eat_punct(",") {
@@ -1254,9 +1263,6 @@ impl JsParser {
             "**" => Some((7, "^", true)),
             "*" => Some((6, "*", false)),
             "/" => Some((6, "/", false)),
-            // Dart truncating integer division. Shares the multiplicative
-            // precedence and lowers to the native `~/` VM opcode (via `js_arith`).
-            "~/" => Some((6, "~/", false)),
             "%" => Some((6, "%", false)),
             "+" => Some((5, "+", false)),
             "-" => Some((5, "-", false)),
@@ -1616,10 +1622,11 @@ impl JsParser {
                     self.advance();
                     json!({ "type": "bool", "data": { "value": false } })
                 }
-                // The bytecode has no null literal; model the empty value as 0.
+                // Both JS spellings of "no value" lower to the VM's single
+                // first-class null literal.
                 "null" | "undefined" => {
                     self.advance();
-                    js_int(0)
+                    js_null()
                 }
                 "function" => self.parse_function_expr(),
                 _ => {

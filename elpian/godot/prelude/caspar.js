@@ -146,7 +146,7 @@ Caspar.connect = (o) => {
     timeoutMs: 15000,
     clock: 0.0,
   };
-  if (__isType(o.timeoutMs, "num") && o.timeoutMs > 0) {
+  if (__isType(o.timeoutMs, "number") && o.timeoutMs > 0) {
     st.timeoutMs = o.timeoutMs;
   }
 
@@ -257,7 +257,7 @@ Caspar.connect = (o) => {
     }
 
     // Route creature signal results to their correlation waiters.
-    if (key == "creatures/signal/result" && __isType(data, "Map")) {
+    if (key == "creatures/signal/result" && __isType(data, "map")) {
       let corrId = data["correlationId"];
       if (corrId != null) {
         for (let i = 0; i < st.corr.length; i++) {
@@ -348,7 +348,7 @@ Caspar.connect = (o) => {
 
   let host = "" + (o.host ?? "127.0.0.1");
   let port = 8074;
-  if (__isType(o.port, "num") && o.port > 0) {
+  if (__isType(o.port, "number") && o.port > 0) {
     port = o.port;
   }
 
@@ -403,7 +403,7 @@ Caspar.connect = (o) => {
         }
         let n = st.peer.call("get_available_packet_count");
         let guard = 0;
-        while (__isType(n, "num") && n > 0 && guard < 64) {
+        while (__isType(n, "number") && n > 0 && guard < 64) {
           ingest(st.peer.call("get_packet"));
           n = st.peer.call("get_available_packet_count");
           guard = guard + 1;
@@ -421,13 +421,13 @@ Caspar.connect = (o) => {
         }
         let avail = st.peer.call("get_available_bytes");
         let drained = 0;
-        while (__isType(avail, "num") && avail > 0 && drained < 262144) {
+        while (__isType(avail, "number") && avail > 0 && drained < 262144) {
           let chunkLen = avail;
           if (chunkLen > 32768) {
             chunkLen = 32768;
           }
           let r = st.peer.call("get_partial_data", [GInt(chunkLen)]);
-          if (!__isType(r, "List") || r.length < 2) {
+          if (!__isType(r, "list") || r.length < 2) {
             break;
           }
           drained = drained + ingest(r[1]);
@@ -539,7 +539,7 @@ Caspar.connect = (o) => {
       payload: jsonStringify(inner),
     });
     let waitMs = st.timeoutMs;
-    if (__isType(s.timeoutMs, "num") && s.timeoutMs > 0) {
+    if (__isType(s.timeoutMs, "number") && s.timeoutMs > 0) {
       waitMs = s.timeoutMs;
     }
     st.corr.push({
@@ -643,12 +643,12 @@ CaspiNet.open = (o) => {
         action: "discover",
         payload: {},
       }, (res) => {
-        if (res != null && res.ok == true && __isType(res.services, "List")) {
+        if (res != null && res.ok == true && __isType(res.services, "list")) {
           st.platform = res.platform;
           let map = {};
           for (let i = 0; i < res.services.length; i++) {
             let svc = res.services[i];
-            if (__isType(svc, "Map") && svc.name != null) {
+            if (__isType(svc, "map") && svc.name != null) {
               map[svc.name] = svc;
             }
           }

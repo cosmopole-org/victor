@@ -37,12 +37,14 @@ use std::rc::Rc;
 use crate::sdk::data::{Payload, Val};
 
 /// The three short-circuiting binary operators the VM lowers through the single
-/// `0xef` opcode, distinguished by the opcode's flag byte. `And`/`Or` are the
-/// JavaScript logical operators; `NullCoalesce` is the Dart / JS `??` — it
-/// yields the left operand unless it is null, in which case it evaluates and
-/// yields the right operand. (Because the front-ends currently model an absent
-/// value as `0`, the executor's null test also treats a numeric zero as null;
-/// see `executor::is_nullish`.)
+/// `0xef` opcode, distinguished by the opcode's flag byte. All three are
+/// language-neutral value selectors: `And` yields the left operand when it is
+/// falsy (by the VM's truthiness rule, see [`crate::sdk::data::Val::truthy`])
+/// and otherwise evaluates and yields the right; `Or` is its dual;
+/// `NullCoalesce` yields the left operand unless it is the first-class null
+/// (type tag 0), in which case it evaluates and yields the right operand.
+/// Front-ends whose source language uses a different notion of truthiness
+/// coerce their operands at compile time (e.g. via the `bool` builtin).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LogicalKind {
     And,
@@ -100,7 +102,8 @@ pub enum UnitKind {
     Nop,
 
     // ---- value-producing units (what the old `extract_val` returned) --------
-    /// A scalar or string literal (`typ` 1..=7). Cloned to produce the value.
+    /// A null, scalar or string literal (`typ` 0..=7). Cloned to produce the
+    /// value.
     Lit(Val),
     /// An identifier reference (`0x0b`); resolved against the scope chain /
     /// builtins / the `askHost` seam at run time.
@@ -343,6 +346,11 @@ impl<'a> Decoder<'a> {
     fn decode_value(&mut self, pos: usize) -> usize {
         let tag = self.bytes[pos];
         match tag {
+            0 => {
+                // The first-class null literal.
+                self.emit(pos, UnitKind::Lit(Val::new(0, Payload::Null)));
+                pos + 1
+            }
             1 => {
                 self.emit(pos, UnitKind::Lit(Val::new(1, Payload::from(self.read_i16(pos + 1)))));
                 pos + 3
@@ -453,14 +461,6 @@ impl<'a> Decoder<'a> {
             }
             0xf0..=0xfb => {
                 self.emit(pos, UnitKind::Arith((tag - 0xf0 + 1) as i16));
-                let after_op1 = self.decode_value(pos + 1);
-                self.decode_value(after_op1)
-            }
-            0xfe => {
-                // Dart truncating integer division `~/` — arith op id 13. Kept out
-                // of the contiguous `0xf0..=0xfb` block (0xfc/0xfd are `not`/`cast`)
-                // so its id is assigned explicitly rather than by tag arithmetic.
-                self.emit(pos, UnitKind::Arith(13));
                 let after_op1 = self.decode_value(pos + 1);
                 self.decode_value(after_op1)
             }

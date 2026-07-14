@@ -15,10 +15,10 @@ use crate::parser::Parser;
 /// is read). They rely on `this.length`, `this[i]`, `out.add(...)`, and closure
 /// calls — all VM-supported.
 ///
-/// The Dart-specific operators `~/` (truncating integer division) and `??`
-/// (null-coalescing) are **not** in this prelude: they lower to native VM
-/// opcodes emitted directly by [`Emitter::emit_expr`], so no helper functions
-/// are needed.
+/// The Dart-specific operators are **not** in this prelude and never reach the
+/// VM as Dart: [`Emitter::emit_expr`] lowers `~/` (truncating integer division)
+/// to the universal `intDiv` builtin and `??` (null-coalescing) to the VM's
+/// neutral short-circuit operator, so no helper functions are needed.
 const PRELUDE: &str = concat!(
     "function __List_map(f){ var out = []; var i = 0; while (i < this.length) { out.push(f(this[i])); i = i + 1; } return out; }\n",
     "function __List_where(f){ var out = []; var i = 0; while (i < this.length) { if (f(this[i])) { out.push(this[i]); } i = i + 1; } return out; }\n",
@@ -96,6 +96,27 @@ fn universal_member(name: &str) -> Option<&'static str> {
         "containsKey" => "has",
         _ => return None,
     })
+}
+
+/// Compile-time resolution of a Dart *type name* to the VM's neutral type-tag
+/// vocabulary, used by the reified `is` / `as` lowering. The VM's type-test
+/// opcode understands only its own names (`int`, `float`, `number`, `string`,
+/// `list`, `map`, `function`, `bool`, `null`, `any`) — mapping Dart's spellings
+/// onto them is this front-end's job. Any other name is a class name and passes
+/// through unchanged (the VM matches it against the instance's prototype chain).
+fn universal_type_name(ty: &str) -> &str {
+    match ty {
+        "double" => "float",
+        "num" => "number",
+        "String" => "string",
+        // Set literals lower to lists; Iterable's one concrete backing is List.
+        "List" | "Set" | "Iterable" => "list",
+        "Map" => "map",
+        "Function" => "function",
+        "Null" => "null",
+        // `int` and `bool` are already the neutral spelling.
+        other => other,
+    }
 }
 
 /// Native member names the VM binds as properties (not zero-arg getters), which
@@ -588,10 +609,16 @@ impl Emitter {
                 }
             }
             Expr::Binary(op, a, b) => {
-                // `~/` and `??` are native VM operators (truncating division and
-                // null-coalescing); every operator, these included, emits as the
-                // shared parenthesised infix form the front-end shares with JS.
-                format!("({} {} {})", self.emit_expr(a), op, self.emit_expr(b))
+                // Dart's truncating integer division has no JS spelling and no VM
+                // opcode; it lowers here — in the language front-end — to the
+                // universal `intDiv` builtin. Every other operator (including
+                // `??`, which JS also spells natively) emits as the shared
+                // parenthesised infix form.
+                if op == "~/" {
+                    format!("intDiv({}, {})", self.emit_expr(a), self.emit_expr(b))
+                } else {
+                    format!("({} {} {})", self.emit_expr(a), op, self.emit_expr(b))
+                }
             }
             Expr::Ternary(c, t, e) => {
                 format!("({} ? {} : {})", self.emit_expr(c), self.emit_expr(t), self.emit_expr(e))
@@ -661,16 +688,25 @@ impl Emitter {
                     format!("{{{}}}", pairs.join(", "))
                 }
             }
-            // Reified `is` / `as` are native VM operations, reached through the
-            // `__isType` / `__asType` compiler intrinsics (which js2elpian lowers
-            // to the type-test opcode) rather than a host round-trip. The type is
-            // erased to its base name — the reified check is by base type / class.
-            Expr::Is(x, ty) => {
-                format!("__isType({}, {})", self.emit_expr(x), json_string(ty))
-            }
-            Expr::As(x, ty) => {
-                format!("__asType({}, {})", self.emit_expr(x), json_string(ty))
-            }
+            // Reified `is` / `as` are reached through the `__isType` / `__asType`
+            // compiler intrinsics (which js2elpian lowers to the type-test
+            // opcode) rather than a host round-trip. The type is erased to its
+            // base name, and — because the VM only knows its own *neutral*
+            // type-tag vocabulary — the Dart spelling is resolved here, in the
+            // language front-end, at compile time (`double`→`float`,
+            // `String`→`string`, …). `Object` and `dynamic` never reach the VM
+            // at all: their Dart semantics are pure compile-time lowering.
+            Expr::Is(x, ty) => match ty.as_str() {
+                // Dart: everything but null is an Object.
+                "Object" => format!("({} != null)", self.emit_expr(x)),
+                "dynamic" => format!("__isType({}, \"any\")", self.emit_expr(x)),
+                _ => format!("__isType({}, {})", self.emit_expr(x), json_string(universal_type_name(ty))),
+            },
+            Expr::As(x, ty) => match ty.as_str() {
+                // Upcasts to the top types always succeed: emit the value itself.
+                "Object" | "dynamic" => self.emit_expr(x),
+                _ => format!("__asType({}, {})", self.emit_expr(x), json_string(universal_type_name(ty))),
+            },
             Expr::Call(callee, pos, named) => {
                 if let Expr::Ident(name) = &**callee {
                     if name == "print" && pos.len() == 1 && named.is_empty() {

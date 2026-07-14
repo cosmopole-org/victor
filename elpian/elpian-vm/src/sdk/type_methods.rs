@@ -107,7 +107,7 @@ mod list {
     /// bound native methods delegating straight to the like-named builtin.
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
-            "first" | "last" | "reversed" => Dispatch::Getter,
+            "length" | "isEmpty" | "isNotEmpty" | "first" | "last" | "reversed" => Dispatch::Getter,
             "map" | "where" | "forEach" | "fold" | "any" | "every" | "reduce" => Dispatch::Prelude,
             "push" | "contains" | "indexOf" | "pop" | "slice" | "join" | "pushAll" | "removeAt"
             | "insert" | "clear" => Dispatch::Method,
@@ -118,9 +118,11 @@ mod list {
 
 mod string {
     use super::Dispatch;
-    /// Members of `String` — all bound native methods over the receiver string.
+    /// Members of `String` — size getters plus bound native methods over the
+    /// receiver string.
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
+            "length" | "isEmpty" | "isNotEmpty" => Dispatch::Getter,
             "substring" | "contains" | "indexOf" | "upper" | "lower" | "trim" | "trimStart"
             | "trimEnd" | "split" | "startsWith" | "endsWith" | "replace" | "replaceFirst"
             | "codeUnitAt" | "padStart" | "padEnd" | "charAt" | "repeat" | "ord" => {
@@ -149,7 +151,7 @@ mod map {
     /// Members of a plain `Map` (objects without a `__class` tag).
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
-            "keys" | "values" | "isEmpty" | "isNotEmpty" => Dispatch::Getter,
+            "length" | "keys" | "values" | "isEmpty" | "isNotEmpty" => Dispatch::Getter,
             "has" | "remove" | "putIfAbsent" => Dispatch::Method,
             _ => return None,
         })

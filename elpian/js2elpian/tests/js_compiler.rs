@@ -476,27 +476,33 @@ fn class_fields_and_independent_instances() {
     assert_eq!(run_js_and_call("js-class-fields", js, "f"), "311");
 }
 
-// ---- native Dart-flavoured operators lowered to VM opcodes ------------------
+// ---- universal builtins standing in for language-specific operators ---------
 
 #[test]
 fn truncating_integer_division() {
-    // `~/` is a native VM opcode (truncating toward zero, always an int), not a
-    // helper call. 7 ~/ 2 = 3; it composes with `%` at the same precedence.
-    assert_eq!(run_js_and_call("js-tdiv-1", "function f() { return 7 ~/ 2; }", "f"), "3");
-    assert_eq!(run_js_and_call("js-tdiv-2", "function f() { return -7 ~/ 2; }", "f"), "-3");
-    // (0xFF00FF ~/ 0x10000) % 256 — the colour-channel idiom from flutter.dart.
+    // Truncating integer division is the universal `intDiv` builtin (toward
+    // zero, always an int) — the primitive a front-end lowers an operator like
+    // Dart's `~/` to. The `~/` spelling itself is not JavaScript and is not
+    // accepted by this front-end.
+    assert_eq!(run_js_and_call("js-tdiv-1", "function f() { return intDiv(7, 2); }", "f"), "3");
+    assert_eq!(run_js_and_call("js-tdiv-2", "function f() { return intDiv(-7, 2); }", "f"), "-3");
+    // (0xFF00FF ~/ 0x10000) % 256 in Dart — the colour-channel idiom from
+    // flutter.dart, via the builtin.
     assert_eq!(
-        run_js_and_call("js-tdiv-3", "function f() { var v = 16711935; return (v ~/ 65536) % 256; }", "f"),
+        run_js_and_call("js-tdiv-3", "function f() { var v = 16711935; return intDiv(v, 65536) % 256; }", "f"),
         "255",
     );
 }
 
 #[test]
 fn null_coalescing_operator() {
-    // `??` is a native short-circuiting VM opcode. A null (modelled as 0 by the
-    // front-end) yields the right operand; a present value yields itself.
+    // `??` is a native short-circuiting VM opcode over the first-class null:
+    // null yields the right operand; any present value — including 0 and "" —
+    // yields itself (exact JS/Dart `??` semantics).
     assert_eq!(run_js_and_call("js-nc-1", "function f() { var a = null; return a ?? 5; }", "f"), "5");
     assert_eq!(run_js_and_call("js-nc-2", "function f() { var a = 9; return a ?? 5; }", "f"), "9");
+    assert_eq!(run_js_and_call("js-nc-0", "function f() { var a = 0; return a ?? 5; }", "f"), "0");
+    assert_eq!(run_js_and_call("js-nc-u", "function f() { var a; return a ?? 5; }", "f"), "5");
     // Short-circuit: the right operand is NOT evaluated when the left is present,
     // so the side effect on `hit` never runs.
     let js = "
@@ -510,11 +516,17 @@ fn null_coalescing_operator() {
 
 #[test]
 fn reified_is_on_primitives() {
+    // The VM's type-test opcode knows only the neutral type-tag names (`int`,
+    // `float`, `number`, `string`, `list`, `map`, `function`, `bool`, `null`,
+    // `any`); a front-end maps its language's spellings onto them at compile
+    // time. The intrinsic passes the neutral name straight through.
     assert_eq!(run_js_and_call("js-is-int", "function f() { return __isType(5, \"int\"); }", "f"), "true");
-    assert_eq!(run_js_and_call("js-is-str", "function f() { return __isType(5, \"String\"); }", "f"), "false");
-    assert_eq!(run_js_and_call("js-is-list", "function f() { return __isType([1], \"List\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-is-str", "function f() { return __isType(5, \"string\"); }", "f"), "false");
+    assert_eq!(run_js_and_call("js-is-list", "function f() { return __isType([1], \"list\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-is-null", "function f() { return __isType(null, \"null\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-is-any", "function f() { return __isType(null, \"any\"); }", "f"), "true");
     // `as` yields the value on a successful check.
-    assert_eq!(run_js_and_call("js-as-num", "function f() { return __asType(42, \"num\"); }", "f"), "42");
+    assert_eq!(run_js_and_call("js-as-num", "function f() { return __asType(42, \"number\"); }", "f"), "42");
 }
 
 #[test]

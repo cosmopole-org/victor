@@ -26,6 +26,12 @@ fn serialize_expr(val: serde_json::Value) -> Vec<u8> {
     // log(&val.to_string());
     let mut result: Vec<u8> = vec![];
     match val["type"].as_str().unwrap() {
+        // The first-class null literal (tag 0x00). Every front-end lowers its
+        // own "absent value" spelling (`null`, `undefined`, `nil`, `None`, …)
+        // to this one neutral literal at compile time.
+        "null" => {
+            result.push(0);
+        }
         "i16" => {
             result.push(1);
             result.append(
@@ -221,13 +227,6 @@ fn serialize_expr(val: serde_json::Value) -> Vec<u8> {
                 }
                 "^" => {
                     result.push(0xfb);
-                }
-                // Dart truncating integer division `~/`: `a ~/ b` computes the
-                // integer quotient truncated toward zero. A native VM opcode (0xfe)
-                // rather than a front-end helper call, so both compilers share the
-                // one implementation.
-                "~/" => {
-                    result.push(0xfe);
                 }
                 _ => {}
             };

@@ -460,11 +460,12 @@ impl Operation for CallFunction {
         }
         if self.func.is_some() {
             // Collect exactly as many argument values as the *call site* provided
-            // (`param_count`), not as many as the function declares. JavaScript
-            // calls are arity-flexible: extra arguments are ignored and missing
-            // ones bind to `undefined` (done when the frame is built). Gating on
-            // the declared param count desynced the arg stream whenever a function
-            // was called with fewer arguments than it declares.
+            // (`param_count`), not as many as the function declares. VM calls are
+            // arity-flexible: extra arguments are ignored and missing ones bind
+            // to null (done when the frame is built), so front-ends can express
+            // their language's arity rules on top. Gating on the declared param
+            // count desynced the arg stream whenever a function was called with
+            // fewer arguments than it declares.
             if self.params.len() >= self.param_count.max(0) as usize {
                 self.state = ExecStates::CallFuncFinished;
             }
@@ -1201,8 +1202,8 @@ impl Operation for DestructureOp {
 /// Compute the `(name, value)` bindings a destructuring statement produces, from
 /// its plan and the collected values (`values[0]` is the source; the remaining
 /// values are the defaults, in binding order). Pure — the executor performs the
-/// actual `define` for each returned pair. Missing / nullish members fall back
-/// to a declared default (consistent with the VM's `??` nullish test); a rest
+/// actual `define` for each returned pair. A missing / null member falls back
+/// to its declared default (consistent with the VM's `??` null test); a rest
 /// binding gathers whatever the earlier bindings did not consume.
 fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val)> {
     let null = Val { typ: 0, data: Payload::Null };
@@ -1237,7 +1238,7 @@ fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val
             if b.has_default {
                 let dv = values.get(default_idx).cloned().unwrap_or_else(|| null.clone());
                 default_idx += 1;
-                if is_nullish(&v) {
+                if is_null(&v) {
                     v = dv;
                 }
             }
@@ -1277,7 +1278,7 @@ fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val
             if b.has_default {
                 let dv = values.get(default_idx).cloned().unwrap_or_else(|| null.clone());
                 default_idx += 1;
-                if is_nullish(&v) {
+                if is_null(&v) {
                     v = dv;
                 }
             }
@@ -1434,28 +1435,28 @@ impl Operation for TypeTestOp {
     }
 }
 
-/// Reified type test: does `value` have (dynamic) type `type_name`? Primitive
-/// type names are matched against the value's type tag; a class name is matched
-/// by walking the instance's prototype chain (`__proto` → `__parent`), each
-/// prototype carrying its `__class_name`, so the class hierarchy embedded in the
-/// value answers the check with no external class table. This is the native
-/// replacement for the `dart:core/isType` host round-trip.
-///
-/// Because the front-ends model an absent value as `0` (no first-class null),
-/// the numeric checks accept that representation just as the previous host
-/// implementation did over the JSON bridge.
+/// Reified type test: does `value` have (dynamic) type `type_name`? The names
+/// the VM understands are its own **neutral** type-tag names — `null`, `bool`,
+/// `int`, `float`, `number`, `string`, `list`, `map`, `function`, and the
+/// universal `any` — never a source language's spellings. A front-end maps its
+/// language's type names onto these at compile time (dart2elpian lowers
+/// `double`→`float`, `String`→`string`, `List`→`list`, …; a JS front-end would
+/// map its `typeof` vocabulary the same way). Any other name is a class name,
+/// matched by walking the instance's prototype chain (`__proto` → `__parent`),
+/// each prototype carrying its `__class_name`, so the class hierarchy embedded
+/// in the value answers the check with no external class table.
 fn value_is_type(value: &Val, type_name: &str) -> bool {
     match type_name {
-        "dynamic" | "Object" => value.typ != 0,
+        "any" => true,
         "int" => matches!(value.typ, 1 | 2 | 3),
-        "double" => matches!(value.typ, 4 | 5),
-        "num" => matches!(value.typ, 1..=5),
-        "String" => value.typ == 7,
+        "float" => matches!(value.typ, 4 | 5),
+        "number" => matches!(value.typ, 1..=5),
+        "string" => value.typ == 7,
         "bool" => value.typ == 6,
-        "List" => value.typ == 9,
-        "Map" => value.typ == 8,
-        "Function" => value.typ == 10,
-        "Null" => value.typ == 0,
+        "list" => value.typ == 9,
+        "map" => value.typ == 8,
+        "function" => value.typ == 10,
+        "null" => value.typ == 0,
         class => {
             if value.typ != 8 {
                 return false;
@@ -1497,32 +1498,24 @@ fn value_is_type(value: &Val, type_name: &str) -> bool {
     }
 }
 
-/// Whether a value is "null" for the purposes of the null-coalescing `??`
-/// operator. The front-ends (js2elpian / dart2elpian) currently have **no
-/// distinct null literal** and model an absent value as the integer `0` (see
-/// js2elpian's `null`/`undefined` lowering), so the runtime notion of null is
-/// the real `Payload::Null` (type tag 0) *or* a numeric zero. This exactly
-/// reproduces the semantics of the front-end `__ifNull` helper this native
-/// operator replaced (`a != null ? a : b`, with `null` compiled to `0`). When
-/// the VM gains a first-class null value this predicate narrows to `typ == 0`.
-fn is_nullish(v: &Val) -> bool {
-    match v.typ {
-        0 => true,
-        1 => v.as_i16() == 0,
-        2 => v.as_i32() == 0,
-        3 => v.as_i64() == 0,
-        4 => v.as_f32() == 0.0,
-        5 => v.as_f64() == 0.0,
-        _ => false,
-    }
+/// Whether a value is the VM's first-class null (type tag 0) — the single,
+/// language-neutral "absent value". Every front-end lowers its own spelling
+/// (`null`, `undefined`, `nil`, …) to this literal at compile time, host
+/// replies decode JSON `null` to it, and every absent read (missing argument,
+/// absent member/key, out-of-range element) yields it. It is the value the
+/// null-coalescing operator and `x == null` comparisons test against; a
+/// numeric zero is an ordinary number, never null.
+fn is_null(v: &Val) -> bool {
+    v.typ == 0
 }
 
 /// Short-circuiting `&&` / `||` / `??`. The left operand is evaluated first; the
 /// right is only evaluated when the result is not already decided (`&&` with a
-/// truthy left, `||` with a falsy left, `??` with a non-null left). On
+/// truthy left, `||` with a falsy left, `??` with a non-null left — truthiness
+/// is the VM's own rule, see [`Val::truthy`]; null is the first-class null). On
 /// short-circuit the dispatch loop reuses the left value as the result and jumps
 /// the program counter to `op2_end`, skipping the right operand's units entirely.
-/// No double evaluation, exact JS / Dart semantics.
+/// No double evaluation.
 struct LogicalOp {
     typ: OperationTypes,
     state: ExecStates,
@@ -2055,14 +2048,16 @@ impl Executor {
         if id == "askHost" {
             return Val { typ: 255, data: Payload::Null };
         }
-        let bound = self.ctx.find_val_globally(id);
-        if !bound.is_empty() {
+        // A scope binding — even one currently holding null — shadows a builtin;
+        // only a name bound nowhere falls through to the builtin table, and an
+        // entirely unknown identifier reads as null.
+        if let Some(bound) = self.ctx.lookup_val_globally(id) {
             return bound;
         }
         if stdlib::is_builtin(id) {
             return Val { typ: 252, data: Payload::from(id.to_string()) };
         }
-        bound
+        Val { typ: 0, data: Payload::Null }
     }
     fn check_float_range(&self, num: f64) -> Val {
         if num < f32::MAX.into() {
@@ -2084,9 +2079,10 @@ impl Executor {
     fn deliver_type_member(&mut self, receiver: &Val, member: &type_methods::Member) -> Val {
         match member.dispatch {
             // A getter reads eagerly through stdlib — the member name is the
-            // universal builtin name, invoked directly.
+            // universal builtin name, invoked directly. A getter that errors
+            // reads as null, like any other absent member.
             Dispatch::Getter => stdlib::invoke(&member.name, &[receiver.clone()])
-                .unwrap_or_else(|_| self.check_int_range(0)),
+                .unwrap_or_else(|_| Val { typ: 0, data: Payload::Null }),
             // A method becomes a bound native (typ 253) carrying `[recv, name]`;
             // the call machinery appends the args and calls `stdlib::invoke`.
             Dispatch::Method => {
@@ -3251,29 +3247,6 @@ impl Executor {
             }
         }
     }
-    /// Dart truncating integer division `a ~/ b`: the quotient truncated toward
-    /// zero, always an `int`. Both operands are coerced to `f64` (so mixed
-    /// int/double operands work, matching Dart's `num ~/ num`), divided, and the
-    /// result is truncated and re-tagged as the compact integer for its
-    /// magnitude. Division by zero traps, as it does in Dart (`~/ 0` throws
-    /// `UnsupportedError`/`IntegerDivisionByZeroException`).
-    fn operate_trunc_division(&self, arg1: Val, arg2: Val) -> Val {
-        let coerce = |v: &Val| -> f64 {
-            match v.typ {
-                1 => v.as_i16() as f64,
-                2 => v.as_i32() as f64,
-                3 => v.as_i64() as f64,
-                4 => v.as_f32() as f64,
-                5 => v.as_f64(),
-                _ => panic!("elpian error: ~/ expects numeric operands"),
-            }
-        };
-        let divisor = coerce(&arg2);
-        if divisor == 0.0 {
-            panic!("elpian error: integer division by zero");
-        }
-        self.check_int_range((coerce(&arg1) / divisor).trunc() as i64)
-    }
     fn operate_modulo(&self, arg1: Val, arg2: Val) -> Val {
         match arg1.typ {
             // Integer dividend: keep an integer remainder for integer divisors,
@@ -3393,13 +3366,12 @@ impl Executor {
         }
     }
     fn is_eq(&self, v: Val, v2: Val) -> bool {
-        // A real `Payload::Null` (typ 0 — what host replies and JSON `null`
-        // decode to) and the front-ends' compiled null (numeric 0 — see
-        // `is_nullish`) must compare equal in every combination, or
-        // `x == null` silently fails on any null that crossed the host seam
-        // (e.g. a Godot bridge call that returned nothing).
+        // The first-class null (typ 0) is equal only to itself: guest `null`
+        // literals, host replies decoding JSON `null`, and every absent read
+        // all produce the same value, and a numeric zero is an ordinary
+        // number, distinct from null.
         if v.typ == 0 || v2.typ == 0 {
-            return is_nullish(&v) && is_nullish(&v2);
+            return is_null(&v) && is_null(&v2);
         }
         return match v.typ {
             1 | 2 | 3 => {
@@ -4778,7 +4750,7 @@ impl Executor {
                             let evaluate_right = match kind {
                                 LogicalKind::And => left.truthy(),
                                 LogicalKind::Or => !left.truthy(),
-                                LogicalKind::NullCoalesce => is_nullish(&left),
+                                LogicalKind::NullCoalesce => is_null(&left),
                             };
                             if evaluate_right {
                                 self.registers
@@ -4918,14 +4890,16 @@ impl Executor {
                                 args.insert("this".to_string(), receiver);
                             }
                             for (i, param_name) in expected_params.iter().enumerate() {
-                                // A parameter with no supplied argument binds to null
-                                // (integer 0), so Dart optional/named params default
-                                // correctly via `== null` rather than a typed-
-                                // undefined that breaks comparisons and arithmetic.
+                                // Calls are arity-flexible at the VM level: a
+                                // parameter with no supplied argument binds to the
+                                // first-class null, so a front-end can express its
+                                // language's defaulting (optional/named parameters,
+                                // `undefined`, …) with a compile-time `== null`
+                                // check.
                                 let arg = provided_args
                                     .get(i)
                                     .cloned()
-                                    .unwrap_or_else(|| Val::new(1, Payload::from(0i16)));
+                                    .unwrap_or_else(|| Val::new(0, Payload::Null));
                                 args.insert(param_name.clone(), arg);
                             }
                             self.ctx
@@ -5096,9 +5070,12 @@ impl Executor {
                                     let idx = sidx as usize;
                                     let arr = indexed.as_array();
                                     let mut b = arr.borrow_mut();
-                                    // JS semantics: assigning at or past the end grows
-                                    // the array, filling the gap with null (e.g.
-                                    // `var out = []; out[i] = v;`).
+                                    // The VM's list store semantics: assigning at or
+                                    // past the end grows the list, filling the gap
+                                    // with null (e.g. `var out = []; out[i] = v;`).
+                                    // A front-end for a bounds-strict language lowers
+                                    // an indexed store to the `setAt` builtin, which
+                                    // traps on an out-of-range index, instead.
                                     if idx >= b.data.len() {
                                         b.data.resize(idx + 1, Val { typ: 0, data: Payload::Null });
                                     }
@@ -5132,8 +5109,10 @@ impl Executor {
                         let branch_after_start = regs[5].as_i64() as usize;
                         let mut condition = false;
                         if has_condition {
-                            // JS truthiness — any non-falsy value (object, number,
-                            // non-empty string, …) takes the branch, not just `true`.
+                            // The VM's truthiness rule (see `Val::truthy`) — any
+                            // non-falsy value takes the branch, not just `true`. A
+                            // front-end whose language coerces differently wraps the
+                            // condition at compile time (e.g. the `bool` builtin).
                             condition = cond_val.truthy();
                         }
                         if !has_condition {
@@ -5182,7 +5161,8 @@ impl Executor {
                         // body_end, branch_after].
                         let regs = self.registers.last().unwrap().get_data();
                         let cond_val = regs[0].clone();
-                        // JS truthiness for the loop guard (see if-statement above).
+                        // The VM's truthiness rule for the loop guard (see the
+                        // if-statement above).
                         let condition = cond_val.truthy();
                         let branch_true_start = regs[1].as_i64() as usize;
                         let branch_true_end = regs[2].as_i64() as usize;
@@ -5340,9 +5320,6 @@ impl Executor {
                             12 => {
                                 main_reg = Some(self.operate_power(arg1, arg2));
                             }
-                            13 => {
-                                main_reg = Some(self.operate_trunc_division(arg1, arg2));
-                            }
                             _ => {}
                         }
                         is_reg_state_final = false;
@@ -5356,29 +5333,7 @@ impl Executor {
                         self.registers.pop();
                         if index.typ == 7 {
                             let __key = index.as_string();
-                            // Dart core-type members on built-in List (typ 9) and
-                            // String (typ 7). These are properties (no call), so
-                            // they resolve directly here; this path previously
-                            // errored to null for non-objects.
-                            if indexed.typ == 9
-                                && matches!(__key.as_str(), "length" | "isEmpty" | "isNotEmpty")
-                            {
-                                let len = indexed.as_array().borrow().data.len();
-                                main_reg = Some(match __key.as_str() {
-                                    "length" => self.check_int_range(len as i64),
-                                    "isEmpty" => Val { typ: 6, data: Payload::from(len == 0) },
-                                    _ => Val { typ: 6, data: Payload::from(len != 0) },
-                                });
-                            } else if indexed.typ == 7
-                                && matches!(__key.as_str(), "length" | "isEmpty" | "isNotEmpty")
-                            {
-                                let len = indexed.as_string().chars().count();
-                                main_reg = Some(match __key.as_str() {
-                                    "length" => self.check_int_range(len as i64),
-                                    "isEmpty" => Val { typ: 6, data: Payload::from(len == 0) },
-                                    _ => Val { typ: 6, data: Payload::from(len != 0) },
-                                });
-                            } else if let Some(member) = CoreType::of_tag(indexed.typ)
+                            if let Some(member) = CoreType::of_tag(indexed.typ)
                                 .filter(|t| *t != CoreType::Map)
                                 .and_then(|t| type_methods::resolve(t, &__key))
                             {
@@ -5415,18 +5370,15 @@ impl Executor {
                                     } else {
                                         None
                                     };
-                                    if is_plain_map && key == "length" {
-                                        let n = indexed.as_object().borrow().data.data.len();
-                                        main_reg = Some(self.check_int_range(n as i64));
-                                    } else if let Some(member) = map_member {
-                                        // A plain-Map member (`keys`/`values`/`isEmpty`/
-                                        // `containsKey`/…): delivered by the same
+                                    if let Some(member) = map_member {
+                                        // A plain-Map member (`length`/`keys`/`values`/
+                                        // `isEmpty`/`has`/…): delivered by the same
                                         // registry-driven path as List/String/num.
                                         main_reg = Some(self.deliver_type_member(&indexed, &member));
                                     } else {
-                                        // An absent key/field reads as null (integer 0),
-                                        // matching Dart's `map[absent] == null`.
-                                        main_reg = Some(self.check_int_range(0));
+                                        // An absent key/field reads as the first-class
+                                        // null — the VM's single "absent value".
+                                        main_reg = Some(Val { typ: 0, data: Payload::Null });
                                     }
                                 }
                             } else {
@@ -5501,8 +5453,8 @@ impl Executor {
                         let data = self.registers.last().unwrap().get_data();
                         let val = data[0].clone();
                         self.registers.pop();
-                        // `!x` is the boolean negation of JS truthiness, defined for
-                        // every value (not just booleans).
+                        // `!x` is the boolean negation of the VM's truthiness,
+                        // defined for every value (not just booleans).
                         main_reg = Some(Val {
                             typ: 6,
                             data: Payload::from(!val.truthy()),
@@ -5570,8 +5522,8 @@ impl Executor {
                         self.registers.pop();
                         let matches = value_is_type(&value, &type_name);
                         if cast {
-                            // `as`: yield the value on a match, trap on a mismatch —
-                            // Dart's checked-cast semantics.
+                            // Checked cast: yield the value on a match, trap on a
+                            // mismatch.
                             if matches {
                                 main_reg = Some(value);
                             } else {

@@ -146,7 +146,7 @@ function __netBodyText(body) {
   if (body == null) {
     return "";
   }
-  if (__isType(body, "String")) {
+  if (__isType(body, "string")) {
     return body;
   }
   if (__isType(body, "Packed")) {
@@ -227,7 +227,7 @@ Net.request = (o, cb) => {
     if (__isType(rawHeaders, "Packed")) {
       list = rawHeaders.data;
     }
-    if (__isType(list, "List")) {
+    if (__isType(list, "list")) {
       for (let i = 0; i < list.length; i++) {
         let line = "" + list[i];
         let colon = line.indexOf(":");

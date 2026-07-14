@@ -23,8 +23,9 @@
 //!   assignment + compound assignment (`+= -= *= /=`), `++`/`--`, ternary
 //!   `?:`, `|| && == != < <= > >= + - * / % ~/`, unary `! -`;
 //! * string interpolation (`"$x"`, `"${expr}"`) lowered to concatenation;
-//! * `print(x)` lowered to `askHost("log",[x])`; `~/` lowered to a trunc-div
-//!   helper. `main()` is auto-invoked if present.
+//! * `print(x)` lowered to `askHost("log",[x])`; `~/` lowered to the VM's
+//!   universal `intDiv` builtin (the operator itself never reaches the VM).
+//!   `main()` is auto-invoked if present.
 //!
 //! * **closures / function expressions**: `(a) => expr`, `(a) { body }`, and
 //!   arrow bodies for function/method declarations (`int f() => expr;`). These
@@ -45,8 +46,9 @@
 //!   fields/methods and named constructors (reached as `Class.member`, backed by
 //!   the VM's static-member support), **getters** (`T get x => …`, emitted as a
 //!   method and called when read as `obj.x`), and the `??` null-coalescing
-//!   operator (lowered to a helper). A `void` arrow body (`void f() => g();`) is
-//!   a statement, not a `return`.
+//!   operator (emitted onto the VM's neutral short-circuit opcode, which tests
+//!   the first-class null). A `void` arrow body (`void f() => g();`) is a
+//!   statement, not a `return`.
 //! * **`async`/`await`**: `async` functions are CPS-transformed to return a
 //!   `Future` built from `.then` continuations driven by the microtask loop;
 //!   `await` sequences them. Bounded: awaits are transformed only at statement
@@ -117,11 +119,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn erases_types_and_emits_native_trunc_div() {
-        // `~/` is a native VM operator now, not a helper call.
+    fn erases_types_and_lowers_trunc_div_to_int_div() {
+        // `~/` is a Dart-specific operator: it never reaches the VM. The
+        // front-end lowers it to the universal `intDiv` builtin at compile time.
         let js = transpile("int x = 7 ~/ 2;").unwrap();
-        assert!(js.contains("var x = (7 ~/ 2)"), "got: {js}");
-        assert!(!js.contains("__truncDiv"), "no helper lowering: {js}");
+        assert!(js.contains("var x = intDiv(7, 2)"), "got: {js}");
+        assert!(!js.contains("~/"), "no Dart operator in the emitted program: {js}");
     }
 
     #[test]
@@ -178,12 +181,30 @@ mod tests {
     fn is_and_as_emit_native_intrinsics_not_host_calls() {
         // Reified `is`/`as` lower to the `__isType`/`__asType` compiler intrinsics
         // (native VM opcode), not a `dart:core/isType` host round-trip. Generics
-        // are erased to the base type name.
-        let js = transpile("var a = x is List<int>; var b = y as Foo;").unwrap();
-        assert!(js.contains("__isType(x, \"List\")"), "is -> intrinsic: {js}");
-        assert!(js.contains("__asType(y, \"Foo\")"), "as -> intrinsic: {js}");
+        // are erased to the base type name, and Dart's type spellings are resolved
+        // to the VM's neutral names here, at compile time (`List`→`list`,
+        // `double`→`float`, …); a user class name passes through unchanged.
+        let js = transpile(
+            "var a = x is List<int>; var b = y as Foo; var c = z is double; var d = w is String;",
+        )
+        .unwrap();
+        assert!(js.contains("__isType(x, \"list\")"), "is -> neutral name: {js}");
+        assert!(js.contains("__asType(y, \"Foo\")"), "as -> class passthrough: {js}");
+        assert!(js.contains("__isType(z, \"float\")"), "double -> float: {js}");
+        assert!(js.contains("__isType(w, \"string\")"), "String -> string: {js}");
         assert!(!js.contains("isType\""), "no isType host round-trip: {js}");
         assert!(!js.contains("asType\""), "no asType host round-trip: {js}");
+    }
+
+    #[test]
+    fn is_object_and_dynamic_are_pure_compile_time_lowerings() {
+        // `Object` / `dynamic` never reach the VM's type-test opcode: their Dart
+        // semantics are decided here in the front-end.
+        let js = transpile("var a = x is Object; var b = y as Object; var c = z is dynamic;").unwrap();
+        assert!(js.contains("(x != null)"), "is Object -> null test: {js}");
+        assert!(!js.contains("__isType(x"), "no opcode for is Object: {js}");
+        assert!(js.contains("var b = y"), "as Object -> value: {js}");
+        assert!(js.contains("__isType(z, \"any\")"), "is dynamic -> any: {js}");
     }
 
     #[test]

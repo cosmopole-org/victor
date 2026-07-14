@@ -212,8 +212,10 @@ pub const BUILTINS: &[&str] = &[
     "asinh", "acosh", "atanh", "degrees", "radians", "isNaN", "isFinite", "factorial",
     // math — binary / variadic
     "pow", "log", "atan2", "hypot", "min", "max", "clamp", "gcd", "lcm", "sum", "mean",
+    "intDiv",
     // foundation — reflection / conversion + codecs
-    "typeOf", "len", "str", "num", "int", "bool", "isNull", "jsonParse", "jsonStringify",
+    "typeOf", "len", "length", "isEmpty", "isNotEmpty", "str", "num", "int", "bool", "isNull",
+    "jsonParse", "jsonStringify",
     "base64Encode", "base64Decode", "utf8Encode", "utf8Decode",
     // foundation — numeric members (universal names for the num core-type members)
     "toDouble", "isNegative", "toString", "toStringAsFixed",
@@ -223,7 +225,7 @@ pub const BUILTINS: &[&str] = &[
     // foundation — array
     "push", "emit", "pop", "shift", "unshift", "slice", "concat", "reverse", "reversed",
     "contains", "indexOf", "join", "range", "first", "last", "sort", "fill",
-    "pushAll", "removeAt", "insert", "clear",
+    "pushAll", "removeAt", "insert", "clear", "setAt",
     // foundation — string
     "upper", "lower", "trim", "trimStart", "trimEnd", "split", "substring", "charAt", "replace",
     "replaceFirst", "repeat", "startsWith", "endsWith", "padStart", "padEnd", "ord", "chr",
@@ -364,6 +366,31 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             let (x, lo, hi) = (as_num(&args[0])?, as_num(&args[1])?, as_num(&args[2])?);
             Ok(num_result(x.max(lo).min(hi)))
         }
+        // Truncating integer division: the quotient of `a / b` truncated toward
+        // zero, always an integer. The universal primitive a front-end lowers
+        // its language's integer-division operator to (Dart's `~/`, Python's
+        // `int(a / b)`, …). Division by zero is an error (a trap in the guest).
+        "intDiv" => {
+            arity(name, args, 2)?;
+            if matches!(args[0].typ, 1 | 2 | 3) && matches!(args[1].typ, 1 | 2 | 3) {
+                let a = as_int(&args[0])?;
+                let b = as_int(&args[1])?;
+                if b == 0 {
+                    return Err("integer division by zero".to_string());
+                }
+                // i64::MIN / -1 is the one overflowing case; fall through to the
+                // float path for it rather than aborting the process.
+                if let Some(q) = a.checked_div(b) {
+                    return Ok(vi64(q));
+                }
+            }
+            let a = as_num(&args[0])?;
+            let b = as_num(&args[1])?;
+            if b == 0.0 {
+                return Err("integer division by zero".to_string());
+            }
+            Ok(vi64((a / b).trunc() as i64))
+        }
         "gcd" => {
             arity(name, args, 2)?;
             Ok(vi64(gcd(as_int(&args[0])?.abs(), as_int(&args[1])?.abs())))
@@ -395,7 +422,7 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             arity(name, args, 1)?;
             Ok(vbool(args[0].typ == 0))
         }
-        "len" => {
+        "len" | "length" => {
             arity(name, args, 1)?;
             match args[0].typ {
                 7 => Ok(vi64(args[0].as_string().chars().count() as i64)),
@@ -403,6 +430,18 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
                 8 => Ok(vi64(args[0].as_object().borrow().data.data.len() as i64)),
                 _ => Err("len expects a string, array, or object".to_string()),
             }
+        }
+        // Emptiness of a string / list / map — the universal size getters behind
+        // the `isEmpty` / `isNotEmpty` members of every sized core type.
+        "isEmpty" | "isNotEmpty" => {
+            arity(name, args, 1)?;
+            let n = match args[0].typ {
+                7 => args[0].as_string().chars().count(),
+                9 => args[0].as_array().borrow().data.len(),
+                8 => args[0].as_object().borrow().data.data.len(),
+                _ => return Err(format!("{name} expects a string, array, or object")),
+            };
+            Ok(vbool(if name == "isEmpty" { n == 0 } else { n != 0 }))
         }
         "str" => {
             arity(name, args, 1)?;
@@ -597,6 +636,25 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             } else {
                 return Err(format!("{name}: cannot assign into {}", type_name(c)));
             }
+            Ok(args[2].clone())
+        }
+        // Bounds-checked indexed store: `setAt(list, i, v)` replaces an existing
+        // element and errors (a guest trap) on any out-of-range index. This is
+        // the strict counterpart of the assignment opcode's auto-growing store —
+        // a front-end for a bounds-strict language lowers `list[i] = v` to this
+        // builtin instead. Returns the assigned value.
+        "setAt" => {
+            arity(name, args, 3)?;
+            let a = expect_array(name, &args[0])?;
+            let idx = as_int(&args[1])?;
+            let mut b = a.borrow_mut();
+            if idx < 0 || idx as usize >= b.data.len() {
+                return Err(format!(
+                    "setAt: index {idx} out of range for length {}",
+                    b.data.len()
+                ));
+            }
+            b.data[idx as usize] = args[2].clone();
             Ok(args[2].clone())
         }
         "merge" => {

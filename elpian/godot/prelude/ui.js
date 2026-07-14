@@ -120,7 +120,7 @@ function __vuiNode(x) {
   if (__isType(x, "GObj")) {
     return x;
   }
-  if (__isType(x, "Map")) {
+  if (__isType(x, "map")) {
     if (x["node"] != null) {
       return x["node"];
     }
@@ -139,7 +139,7 @@ function __vuiNum(v, d) {
   if (v == null) {
     return d;
   }
-  if (__isType(v, "num")) {
+  if (__isType(v, "number")) {
     return v;
   }
   return d;
@@ -624,12 +624,12 @@ function __vuiDeviceScale() {
   let ds = GD.displayServer();
   let s = ds.call("screen_get_scale", []);
   let scale = 1.0;
-  if (!GD.isError(s) && __isType(s, "num") && s > 0.0) {
+  if (!GD.isError(s) && __isType(s, "number") && s > 0.0) {
     scale = s;
   }
   if (scale <= 1.01) {
     let dpi = ds.call("screen_get_dpi", []);
-    if (!GD.isError(dpi) && __isType(dpi, "num") && dpi >= 180) {
+    if (!GD.isError(dpi) && __isType(dpi, "number") && dpi >= 180) {
       scale = dpi / 160.0;
     }
   }
@@ -1261,7 +1261,7 @@ VUI.listTile = (o) => {
   __vuiExpandH(midCenter);
   items.push(midCenter);
   if (o.trailing != null) {
-    if (__isType(o.trailing, "String")) {
+    if (__isType(o.trailing, "string")) {
       let tr = VUI.text(o.trailing, { size: t.fontXS, faint: true });
       tr.set("vertical_alignment", GInt(1));
       items.push(tr);
@@ -2046,7 +2046,7 @@ VUI.dialog = (o) => {
     children.push(VUI.text(o.title, { size: 24, weight: "medium" }));
   }
   if (o.body != null) {
-    if (__isType(o.body, "String")) {
+    if (__isType(o.body, "string")) {
       children.push(VUI.text(o.body, { size: t.fontS, dim: true, wrap: true }));
     } else {
       children.push(__vuiNode(o.body));
