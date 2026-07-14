@@ -187,6 +187,17 @@ void ElpianVM::_process(double delta) {
 	if (rt == nullptr) {
 		return;
 	}
+	{
+		static uint64_t frames = 0;
+		static double acc = 0.0;
+		frames++;
+		acc += delta;
+		if (frames % 300 == 0) {
+			fprintf(stderr, "DBGCPP frames=%llu acc_s=%.2f last_delta_ms=%.3f pump_arg=%llu\n",
+					(unsigned long long)frames, acc, delta * 1000.0,
+					(unsigned long long)(uint64_t)(delta * 1000.0));
+		}
+	}
 	flush_callbacks(); /* bridged signals queued since last frame */
 	dispatch_event("_process", delta);
 	/* Advance the guest clock by the real frame delta so guest Timers / Future

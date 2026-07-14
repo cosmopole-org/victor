@@ -2114,8 +2114,10 @@ VUI.sheet = (o) => {
       return;
     }
     closed.done = true;
+    print("DBGJS sheet close: scheduling free");
     VUI.fade(holder, 0.0, 150);
     GTimer.after(170, () => {
+      print("DBGJS sheet holder freed");
       holder.queueFree();
     });
     __vuiOverlayOff();
