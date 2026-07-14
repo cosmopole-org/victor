@@ -105,6 +105,23 @@ bool GodotController::sandbox_allows(int64_t handle_id, Object *obj, String *r_e
 		if (node == root || root->is_ancestor_of(node)) {
 			return true;
 		}
+		/* A node this VM created but has not parented anywhere yet must stay
+		 * reachable, or it could never be mounted into the sandbox at all
+		 * (fresh nodes are outside every subtree by definition — the old
+		 * containment-only rule made a child VM's very first add_child fail
+		 * with a null argument). The attach target is containment-checked
+		 * independently, so a detached owned node can only ever be added
+		 * inside this VM's own subtree. */
+		if (node->get_parent() == nullptr) {
+			auto it = handles.find(handle_id);
+			if (it != handles.end()) {
+				for (int64_t o : it->second.owners) {
+					if (o == ctx_sbx) {
+						return true;
+					}
+				}
+			}
+		}
 		*r_err = "sandbox: node is outside this VM's subtree";
 		return false;
 	}
