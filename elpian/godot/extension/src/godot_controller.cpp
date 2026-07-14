@@ -189,7 +189,6 @@ void GodotController::drop_handle(int64_t handle_id) {
 }
 
 void GodotController::queue_callback(int64_t cb_id, const Array &args) {
-	fprintf(stderr, "DBGCPP queue_callback cb=%lld\n", (long long)cb_id);
 	QueuedCallback ev;
 	ev.cb_id = cb_id;
 	ev.args = args;
