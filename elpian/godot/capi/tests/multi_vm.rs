@@ -527,3 +527,65 @@ void report(a) {{
         vec![json!(true), json!(true), json!("meter"), json!(true)]
     );
 }
+
+#[test]
+fn free_ops_are_namespaced_like_their_defs() {
+    // queue_free must reach the engine under the SAME namespaced id the node
+    // was created with — for the root VM and for children alike. Before the
+    // `free` key joined rewrite_handles, the op carried the guest-LOCAL id,
+    // resolved to nothing, and the node silently lived forever (the immortal
+    // sheet-scrim bug: an invisible full-screen Button eating every tap).
+    use elpian_godot::GuestLang;
+    let child_src = "function main() { let n = GD.create('Node3D'); n.queueFree(); } main();";
+    let root_src = r#"
+        import 'godot.js';
+        function main() {
+          let junk = GD.create("Node3D");
+          junk.queueFree();
+          let pod = GD.create("Node3D");
+          let child = VMs.spawn(__CHILD__, pod, { lang: "js", label: "freer" });
+          print("spawned=" + (child != null));
+        }
+        main();
+    "#
+    .replace("__CHILD__", &format!("{:?}", child_src));
+    let mock = Rc::new(RefCell::new(MockEngine::default()));
+    let mut mgr = VmManager::new_root_lang(
+        "multi-vm-free-ns".into(),
+        &root_src,
+        GuestLang::Js,
+        true,
+        0,
+        0,
+    )
+    .expect("root program must compile");
+    install_bridge(&mut mgr, &mock);
+    mgr.run_root().expect("root main() runs");
+    for _ in 0..10 {
+        mgr.pump(16).expect("pump");
+    }
+    let log = mgr.take_log().join("\n");
+    assert!(log.contains("spawned=true"), "spawn failed: {log}");
+
+    let ops = mock.borrow().ops.clone();
+    let defs: HashSet<i64> = ops
+        .iter()
+        .filter(|o| o.get("new").is_some())
+        .filter_map(|o| o.get("def").and_then(|v| v.as_i64()))
+        .collect();
+    let frees: Vec<i64> = ops
+        .iter()
+        .filter_map(|o| o.get("free").and_then(|v| v.as_i64()))
+        .collect();
+    assert!(!frees.is_empty(), "no free ops reached the engine: {ops:?}");
+    for f in &frees {
+        assert!(
+            defs.contains(f),
+            "free op id {f} does not match any created def {defs:?} — the node it names can never be resolved"
+        );
+    }
+    assert!(
+        frees.iter().any(|f| (f >> 32) == 2),
+        "no free op from the child VM's id space arrived: {frees:?}"
+    );
+}

@@ -294,9 +294,9 @@ fn encode_handle(vm: u64, id: i64) -> i64 {
     }
 }
 
-/// Recursively rewrite guest handle ids (`def`/`ref`/`obj`/`chk` keys — the
-/// exact shapes the C++ controller resolves as handles, wherever they appear)
-/// into the calling VM's id space.
+/// Recursively rewrite guest handle ids (`def`/`ref`/`obj`/`chk`/`free`/
+/// `base`/`grant` keys — the exact shapes the C++ controller resolves as
+/// handles, wherever they appear) into the calling VM's id space.
 fn rewrite_handles(v: &mut Value, vm: u64) {
     match v {
         Value::Array(a) => {
@@ -305,7 +305,7 @@ fn rewrite_handles(v: &mut Value, vm: u64) {
             }
         }
         Value::Object(m) => {
-            for key in ["def", "ref", "obj", "chk"] {
+            for key in ["def", "ref", "obj", "chk", "free", "base", "grant"] {
                 if let Some(id) = m.get(key).and_then(|x| x.as_i64()) {
                     m.insert(key.into(), json!(encode_handle(vm, id)));
                 }
@@ -608,7 +608,7 @@ impl HookEnv {
                 if target_sbx == 0 {
                     return Value::Bool(true); // target is unrestricted already
                 }
-                let mut op = json!({ "grant": handle, "sbx": target_sbx });
+                let mut op = json!({ "grant": encode_handle(env.vm, handle), "sbx": target_sbx });
                 let caller_sbx = env.shared.sandbox_of(env.vm);
                 if caller_sbx != 0 {
                     op["__sbx"] = json!(caller_sbx);
