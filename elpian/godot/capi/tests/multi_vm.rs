@@ -104,6 +104,13 @@ fn emitted(mgr: &mut VmManager, vm: u64) -> Vec<Value> {
 
 /// Escape a (plain) Dart source string for embedding into a Dart string
 /// literal — apply once per nesting level.
+/// A guest handle id as it reaches the engine: namespaced into the owning
+/// VM's id space ((vm<<32)|local — see manager::encode_handle). Every VM's
+/// prelude counts from 1, so un-namespaced ids would collide across VMs.
+fn ns(vm: i64, id: i64) -> i64 {
+    (vm << 32) | id
+}
+
 fn dq(source: &str) -> String {
     source.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -134,12 +141,12 @@ void main() {{
         m.ops.iter().find(|op| op.get("new").and_then(|v| v.as_str()) == Some("Node3D")).unwrap();
     assert!(root_new.get("__sbx").is_none(), "root is unrestricted");
     // …the child's ops are stamped with its assigned node handle (the pod,
-    // guest handle 1 from the root's allocator).
+    // guest handle 1 from the root's allocator, namespaced into vm 1's space).
     let child_new =
         m.ops.iter().find(|op| op.get("new").and_then(|v| v.as_str()) == Some("Sprite2D")).unwrap();
-    assert_eq!(child_new.get("__sbx"), Some(&json!(1)), "child ops confined to its pod");
+    assert_eq!(child_new.get("__sbx"), Some(&json!(ns(1, 1))), "child ops confined to its pod");
     let child_set = m.ops.iter().find(|op| op.get("set").is_some()).unwrap();
-    assert_eq!(child_set.get("__sbx"), Some(&json!(1)));
+    assert_eq!(child_set.get("__sbx"), Some(&json!(ns(1, 1))));
     // The containment probe ran against the parent's (unrestricted) view.
     assert!(m.ops.iter().any(|op| op.get("chk").is_some()));
 }
@@ -159,9 +166,16 @@ void main() {{
         dq(child)
     ));
     let m = mock.borrow();
-    let forged =
-        m.ops.iter().find(|op| op.get("def").and_then(|v| v.as_i64()) == Some(50)).unwrap();
-    assert_eq!(forged.get("__sbx"), Some(&json!(1)), "forged tag replaced by the real sandbox");
+    let forged = m
+        .ops
+        .iter()
+        .find(|op| op.get("def").and_then(|v| v.as_i64()) == Some(ns(2, 50)))
+        .unwrap();
+    assert_eq!(
+        forged.get("__sbx"),
+        Some(&json!(ns(1, 1))),
+        "forged tag replaced by the real sandbox"
+    );
 }
 
 #[test]
@@ -405,7 +419,7 @@ fn spawn_is_rejected_when_the_node_is_outside_the_parent_sandbox() {
     // The containment probe (the `chk` op the manager issues before adopting
     // the child) is primed to reject the root's first guest handle.
     let mock = Rc::new(RefCell::new(MockEngine::default()));
-    mock.borrow_mut().chk_reject.insert(1);
+    mock.borrow_mut().chk_reject.insert(ns(1, 1));
     let mut mgr = VmManager::new_root(
         "multi-vm-reject".to_string(),
         &format!(
@@ -474,7 +488,7 @@ void dropSandbox(a) {{ child.setPermission("scene", false); }}
             .map(|op| op.get("__sbx").cloned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(tags(&mock), vec![Some(json!(1))], "sandboxed at boot");
+    assert_eq!(tags(&mock), vec![Some(json!(ns(1, 1)))], "sandboxed at boot");
 
     mgr.invoke("liftSandbox", Value::Null);
     mgr.runtime_mut(2).unwrap().deliver_event("makeMore", Value::Null);
@@ -482,7 +496,7 @@ void dropSandbox(a) {{ child.setPermission("scene", false); }}
 
     mgr.invoke("dropSandbox", Value::Null);
     mgr.runtime_mut(2).unwrap().deliver_event("makeMore", Value::Null);
-    assert_eq!(tags(&mock)[2], Some(json!(1)), "revocation restores the sandbox");
+    assert_eq!(tags(&mock)[2], Some(json!(ns(1, 1))), "revocation restores the sandbox");
 }
 
 #[test]
