@@ -8,6 +8,7 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/expression.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/main_loop.hpp>
 #include <godot_cpp/classes/marshalls.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
@@ -188,6 +189,7 @@ void GodotController::drop_handle(int64_t handle_id) {
 }
 
 void GodotController::queue_callback(int64_t cb_id, const Array &args) {
+	fprintf(stderr, "DBGCPP queue_callback cb=%lld\n", (long long)cb_id);
 	QueuedCallback ev;
 	ev.cb_id = cb_id;
 	ev.args = args;
@@ -1032,6 +1034,15 @@ Variant GodotController::exec_op_inner(const Dictionary &op) {
 			 * frees it.) */
 			return dart_error("sandbox: Script types cannot be instantiated");
 		}
+		if (ctx_sbx != 0) {
+			/* A sandboxed VM's canvas layers are pinned below the platform
+			 * shell (layer >= 1): a game must never draw over — or steal
+			 * input from — the host app's chrome (HUD, exit button). */
+			CanvasLayer *cl = Object::cast_to<CanvasLayer>(obj);
+			if (cl != nullptr) {
+				cl->set_layer(0);
+			}
+		}
 		const int64_t def = op.has("def") ? (int64_t)op["def"] : 0;
 		if (def != 0) {
 			Handle h;
@@ -1234,6 +1245,13 @@ Variant GodotController::exec_op_inner(const Dictionary &op) {
 		const String prop = op["set"];
 		if (ctx_sbx != 0 && prop == "script") {
 			return dart_error("sandbox: the script property is not writable");
+		}
+		if (ctx_sbx != 0 && prop == "layer" && Object::cast_to<CanvasLayer>(obj) != nullptr) {
+			/* Keep sandboxed canvas layers below the platform shell (>= 1):
+			 * a game must never draw over or steal input from host chrome. */
+			const int64_t requested = (int64_t)to_variant(op["value"]);
+			obj->set(StringName(prop), Variant(requested > 0 ? (int64_t)0 : requested));
+			return Variant();
 		}
 		obj->set(StringName(prop), to_variant(op["value"]));
 		return Variant();
