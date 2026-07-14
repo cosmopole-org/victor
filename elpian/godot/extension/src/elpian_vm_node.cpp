@@ -2,12 +2,9 @@
 
 #include "elpian_vm_node.h"
 
-#include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
-#include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/json.hpp>
-#include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
@@ -187,17 +184,6 @@ void ElpianVM::_process(double delta) {
 	if (rt == nullptr) {
 		return;
 	}
-	{
-		static uint64_t frames = 0;
-		static double acc = 0.0;
-		frames++;
-		acc += delta;
-		if (frames % 300 == 0) {
-			fprintf(stderr, "DBGCPP frames=%llu acc_s=%.2f last_delta_ms=%.3f pump_arg=%llu\n",
-					(unsigned long long)frames, acc, delta * 1000.0,
-					(unsigned long long)(uint64_t)(delta * 1000.0));
-		}
-	}
 	flush_callbacks(); /* bridged signals queued since last frame */
 	dispatch_event("_process", delta);
 	/* Advance the guest clock by the real frame delta so guest Timers / Future
@@ -217,16 +203,6 @@ void ElpianVM::_physics_process(double delta) {
 void ElpianVM::_input(const Ref<InputEvent> &event) {
 	if (rt == nullptr || event.is_null() || controller == nullptr) {
 		return;
-	}
-	{
-		Ref<InputEventMouseButton> mb = event;
-		if (mb.is_valid() && mb->is_pressed()) {
-			Control *hover = get_viewport() != nullptr ? get_viewport()->gui_get_hovered_control() : nullptr;
-			String hp = hover != nullptr ? String(hover->get_path()) : String("<none>");
-			fprintf(stderr, "DBGCPP click pos=(%.0f,%.0f) hover=%s filter=%d\n",
-					mb->get_position().x, mb->get_position().y, hp.utf8().get_data(),
-					hover != nullptr ? (int)hover->get_mouse_filter() : -1);
-		}
 	}
 	dispatch_event("_input", controller->to_wire(Variant(event)));
 	flush_callbacks();
