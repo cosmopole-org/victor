@@ -279,10 +279,51 @@ fn vm_error(msg: &str) -> Value {
     json!({ "__dart_error__": msg })
 }
 
-/// Strip any guest-forged sandbox tag from an op, namespace its callback ids
-/// into the calling VM's id space, and stamp the caller's real sandbox root.
+/// Namespace a guest-allocated engine handle id into the calling VM's id
+/// space. Every VM's prelude counts handles from 1, and the C++ controller
+/// keys all of them in ONE map — without this, a child VM's node ids collide
+/// with (and silently shadow) its parent's, so the child's scene ops resolve
+/// to the wrong nodes or to nothing (Godot: 'Parameter "p_child" is null').
+/// Host-assigned handles are negative and pass through. Same (vm<<32)|local
+/// scheme as callbacks; idempotent for ids already in the caller's space.
+fn encode_handle(vm: u64, id: i64) -> i64 {
+    if id > 0 {
+        encode_cb(vm, id)
+    } else {
+        id
+    }
+}
+
+/// Recursively rewrite guest handle ids (`def`/`ref`/`obj`/`chk` keys — the
+/// exact shapes the C++ controller resolves as handles, wherever they appear)
+/// into the calling VM's id space.
+fn rewrite_handles(v: &mut Value, vm: u64) {
+    match v {
+        Value::Array(a) => {
+            for e in a {
+                rewrite_handles(e, vm);
+            }
+        }
+        Value::Object(m) => {
+            for key in ["def", "ref", "obj", "chk"] {
+                if let Some(id) = m.get(key).and_then(|x| x.as_i64()) {
+                    m.insert(key.into(), json!(encode_handle(vm, id)));
+                }
+            }
+            for (_k, e) in m.iter_mut() {
+                rewrite_handles(e, vm);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip any guest-forged sandbox tag from an op, namespace its callback and
+/// handle ids into the calling VM's id space, and stamp the caller's real
+/// sandbox root.
 fn sanitize_op(op: &mut Value, vm: u64, sandbox: i64) {
     rewrite_callables(op, vm);
+    rewrite_handles(op, vm);
     if let Value::Object(m) = op {
         m.remove("__sbx");
         if (m.contains_key("connect") || m.contains_key("disconnect")) && m.contains_key("cb") {
@@ -667,6 +708,11 @@ impl HookEnv {
         if node == 0 {
             return vm_error("vm.spawn: a sandbox node must be assigned (options.node)");
         }
+        // The handle arrives in the parent's local id space — namespace it the
+        // same way sanitize_op does for the parent's own engine ops, so the
+        // containment check and the child's sandbox stamp match the
+        // controller's handle map.
+        let node = encode_handle(self.vm, node);
         // Containment: the assigned node must lie inside the parent's own
         // sandbox — verified by the engine bridge, which knows the real tree.
         let mut chk = json!({ "chk": node });
