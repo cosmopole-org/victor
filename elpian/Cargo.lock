@@ -29,6 +29,8 @@ dependencies = [
 name = "dart2elpian"
 version = "0.1.0"
 dependencies = [
+ "elpian-vm",
+ "js2elpian",
  "serde_json",
 ]
 

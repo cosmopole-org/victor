@@ -43,6 +43,13 @@ pub const INSTANCE_TYPE: i64 = -101;
 /// Object `typ` tag for a closure cell produced by `cell`.
 pub const CELL_TYPE: i64 = -102;
 
+thread_local! {
+    /// State of the deterministic `random` builtin (xorshift64*). Per-thread —
+    /// the VM system is single-threaded per instance — and reseedable via
+    /// `seedRandom`.
+    static RNG_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0x9E3779B97F4A7C15) };
+}
+
 // ----------------------------------------------------------------------------
 // Value constructors (kept terse so the builtin bodies read like math).
 // ----------------------------------------------------------------------------
@@ -212,7 +219,11 @@ pub const BUILTINS: &[&str] = &[
     "asinh", "acosh", "atanh", "degrees", "radians", "isNaN", "isFinite", "factorial",
     // math — binary / variadic
     "pow", "log", "atan2", "hypot", "min", "max", "clamp", "gcd", "lcm", "sum", "mean",
-    "intDiv",
+    "intDiv", "remainder", "isEven", "isOdd", "random", "seedRandom",
+    // integer bit operations + 32-bit wrap conversions
+    "bitAnd", "bitOr", "bitXor", "bitNot", "shl", "shr", "ushr", "toInt32", "toUint32",
+    // radix / lenient numeric parsing
+    "toRadix", "parseRadix", "tryNum", "compareTo",
     // foundation — reflection / conversion + codecs
     "typeOf", "len", "length", "isEmpty", "isNotEmpty", "str", "num", "int", "bool", "isNull",
     "jsonParse", "jsonStringify",
@@ -221,15 +232,16 @@ pub const BUILTINS: &[&str] = &[
     "toDouble", "isNegative", "toString", "toStringAsFixed",
     // foundation — object / map
     "keys", "values", "entries", "has", "get", "setKey", "delKey", "merge", "__setIndex",
-    "remove", "putIfAbsent",
+    "remove", "putIfAbsent", "hasValue",
     // foundation — array
     "push", "emit", "pop", "shift", "unshift", "slice", "concat", "reverse", "reversed",
     "contains", "indexOf", "join", "range", "first", "last", "sort", "fill",
-    "pushAll", "removeAt", "insert", "clear", "setAt",
+    "pushAll", "removeAt", "insert", "clear", "setAt", "at", "lastIndexOf", "splice",
+    "flatten", "take", "skip", "toSet", "shuffle",
     // foundation — string
     "upper", "lower", "trim", "trimStart", "trimEnd", "split", "substring", "charAt", "replace",
     "replaceFirst", "repeat", "startsWith", "endsWith", "padStart", "padEnd", "ord", "chr",
-    "codeUnitAt",
+    "codeUnitAt", "codeUnits",
     // oop
     "class", "extend", "new", "method", "field", "setField", "isInstance", "className",
     "parentMethod", "classOf", "superMethod",
@@ -391,6 +403,139 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             }
             Ok(vi64((a / b).trunc() as i64))
         }
+        // ---- integer bit operations (64-bit, like wasm's i64 op set) --------
+        // Language front-ends lower their bitwise operators here; a language
+        // with 32-bit bitwise semantics (JS) composes these with `toInt32` /
+        // `toUint32` at compile time.
+        "bitAnd" | "bitOr" | "bitXor" => {
+            arity(name, args, 2)?;
+            let (a, b) = (as_int(&args[0])?, as_int(&args[1])?);
+            Ok(vi64(match name {
+                "bitAnd" => a & b,
+                "bitOr" => a | b,
+                _ => a ^ b,
+            }))
+        }
+        "bitNot" => {
+            arity(name, args, 1)?;
+            Ok(vi64(!as_int(&args[0])?))
+        }
+        // Shifts: `shl`/`shr` are arithmetic (sign-preserving); `ushr` shifts in
+        // zeros. Shift counts are masked to 0..=63.
+        "shl" | "shr" | "ushr" => {
+            arity(name, args, 2)?;
+            let a = as_int(&args[0])?;
+            let b = (as_int(&args[1])? & 63) as u32;
+            Ok(vi64(match name {
+                "shl" => a.wrapping_shl(b),
+                "shr" => a.wrapping_shr(b),
+                _ => ((a as u64).wrapping_shr(b)) as i64,
+            }))
+        }
+        // 32-bit wrap conversions (the ToInt32/ToUint32 of JS-like languages).
+        "toInt32" => {
+            arity(name, args, 1)?;
+            Ok(vi64(as_num(&args[0])? as i64 as i32 as i64))
+        }
+        "toUint32" => {
+            arity(name, args, 1)?;
+            Ok(vi64(as_num(&args[0])? as i64 as u32 as i64))
+        }
+        // Truncating remainder (same sign as the dividend), the `remainder`
+        // member of numbers.
+        "remainder" => {
+            arity(name, args, 2)?;
+            if matches!(args[0].typ, 1 | 2 | 3) && matches!(args[1].typ, 1 | 2 | 3) {
+                let b = as_int(&args[1])?;
+                if b == 0 {
+                    return Err("remainder by zero".to_string());
+                }
+                return Ok(vi64(as_int(&args[0])?.wrapping_rem(b)));
+            }
+            Ok(vf64(as_num(&args[0])? % as_num(&args[1])?))
+        }
+        "isEven" => {
+            arity(name, args, 1)?;
+            Ok(vbool(as_int(&args[0])? % 2 == 0))
+        }
+        "isOdd" => {
+            arity(name, args, 1)?;
+            Ok(vbool(as_int(&args[0])? % 2 != 0))
+        }
+        // Integer to text in a radix 2..=36 and back. `parseRadix` errors (a
+        // guest trap / catchable throw) on malformed input; `tryNum` is the
+        // non-trapping numeric parse that yields null instead.
+        "toRadix" => {
+            arity(name, args, 2)?;
+            let mut n = as_int(&args[0])?;
+            let radix = as_int(&args[1])?;
+            if !(2..=36).contains(&radix) {
+                return Err("toRadix: radix must be in 2..=36".to_string());
+            }
+            let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+            let neg = n < 0;
+            let mut out = Vec::new();
+            loop {
+                let d = (n % radix).unsigned_abs() as usize;
+                out.push(digits[d]);
+                n /= radix;
+                if n == 0 {
+                    break;
+                }
+            }
+            if neg {
+                out.push(b'-');
+            }
+            out.reverse();
+            Ok(vstr(String::from_utf8(out).unwrap()))
+        }
+        "parseRadix" => {
+            arity(name, args, 2)?;
+            let s = expect_string(name, &args[0])?;
+            let radix = as_int(&args[1])?;
+            if !(2..=36).contains(&radix) {
+                return Err("parseRadix: radix must be in 2..=36".to_string());
+            }
+            i64::from_str_radix(s.trim(), radix as u32)
+                .map(vi64)
+                .map_err(|_| format!("parseRadix: not a base-{radix} integer"))
+        }
+        "tryNum" => {
+            arity(name, args, 1)?;
+            match args[0].typ {
+                1..=5 => Ok(args[0].clone()),
+                7 => Ok(args[0]
+                    .as_string()
+                    .trim()
+                    .parse::<f64>()
+                    .map(num_result)
+                    .unwrap_or_else(|_| vnull())),
+                _ => Ok(vnull()),
+            }
+        }
+        // Deterministic pseudo-random stream (xorshift64*), seedable via
+        // `seedRandom`. Deliberately *not* a source of real entropy — the same
+        // seed always yields the same sequence, keeping guest execution
+        // reproducible; a host that wants real randomness seeds it through the
+        // capability-gated `askHost` seam.
+        "random" => {
+            arity(name, args, 0)?;
+            let x = RNG_STATE.with(|s| {
+                let mut x = s.get();
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
+                s.set(x);
+                x.wrapping_mul(0x2545F4914F6CDD1D)
+            });
+            Ok(vf64((x >> 11) as f64 / (1u64 << 53) as f64))
+        }
+        "seedRandom" => {
+            arity(name, args, 1)?;
+            let seed = as_int(&args[0])? as u64;
+            RNG_STATE.with(|s| s.set(if seed == 0 { 0x9E3779B97F4A7C15 } else { seed }));
+            Ok(vnull())
+        }
         "gcd" => {
             arity(name, args, 2)?;
             Ok(vi64(gcd(as_int(&args[0])?.abs(), as_int(&args[1])?.abs())))
@@ -494,9 +639,13 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             arity(name, args, 1)?;
             if matches!(args[0].typ, 1 | 2 | 3) {
                 Ok(vstr(as_int(&args[0])?.to_string()))
-            } else {
+            } else if matches!(args[0].typ, 4 | 5) {
                 let d = as_num(&args[0])?;
                 Ok(vstr(if d.fract() == 0.0 { format!("{d:.1}") } else { format!("{d}") }))
+            } else {
+                // Any other value stringifies via the VM's display coercion, so
+                // `x.toString()` is total.
+                Ok(vstr(args[0].to_display()))
             }
         }
         "toStringAsFixed" => {
@@ -667,10 +816,21 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             }
             Ok(vobj(-2, m))
         }
-        // Delete a key and return the value that was removed (or null) — the map
-        // `remove` member. Distinct from `delKey`, which returns the map.
+        // Remove from a collection — the `remove` member. Map receiver: delete a
+        // key and return the value that was removed (or null); distinct from
+        // `delKey`, which returns the map. List receiver: remove the first
+        // element equal to the argument and return whether one was removed.
         "remove" => {
             arity(name, args, 2)?;
+            if args[0].typ == 9 {
+                let a = args[0].as_array();
+                let mut b = a.borrow_mut();
+                let pos = b.data.iter().position(|v| values_equal(v, &args[1]));
+                if let Some(i) = pos {
+                    b.data.remove(i);
+                }
+                return Ok(vbool(pos.is_some()));
+            }
             let o = expect_object(name, &args[0])?;
             let removed = o.borrow_mut().data.data.remove(&expect_string(name, &args[1])?);
             Ok(removed.unwrap_or_else(vnull))
@@ -809,11 +969,29 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             v.reverse();
             Ok(varr(v))
         }
-        // Append every element of another array in place, returning null (the list
-        // `addAll` member). Distinct from `concat`, which builds a new array, and
-        // from `push`, which appends its arguments as individual elements.
+        // Bulk add-into: for a list receiver, append every element of another
+        // list in place (the list `addAll` member); for a map receiver, insert
+        // every entry of another map in place, later entries winning (the map
+        // `addAll` member). Distinct from `concat`/`merge`, which build a new
+        // collection. Returns null.
         "pushAll" => {
             arity(name, args, 2)?;
+            if args[0].typ == 8 {
+                let o = expect_object(name, &args[0])?;
+                let other = expect_object(name, &args[1])?;
+                let entries: Vec<(String, Val)> = other
+                    .borrow()
+                    .data
+                    .data
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let mut b = o.borrow_mut();
+                for (k, v) in entries {
+                    b.data.data.insert(k, v);
+                }
+                return Ok(vnull());
+            }
             let a = expect_array(name, &args[0])?;
             let other = expect_array(name, &args[1])?.borrow().data.clone();
             a.borrow_mut().data.extend(other);
@@ -856,22 +1034,160 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
             }
         }
         "indexOf" => {
-            arity(name, args, 2)?;
+            at_least(name, args, 2)?;
+            // Optional third argument: the index to start searching from
+            // (clamped; a negative value counts from the end).
+            let from = args.get(2).map(as_int).transpose()?.unwrap_or(0);
             match args[0].typ {
                 9 => {
                     let a = args[0].as_array();
-                    let idx = a.borrow().data.iter().position(|v| values_equal(v, &args[1]));
-                    Ok(vi64(idx.map(|i| i as i64).unwrap_or(-1)))
+                    let b = a.borrow();
+                    let (s, _) = clamp_range(from, None, b.data.len());
+                    let idx = b.data[s..].iter().position(|v| values_equal(v, &args[1]));
+                    Ok(vi64(idx.map(|i| (i + s) as i64).unwrap_or(-1)))
+                }
+                7 => {
+                    let hay = args[0].as_string();
+                    let needle = str_of(&args[1]);
+                    let chars: Vec<char> = hay.chars().collect();
+                    let (s, _) = clamp_range(from, None, chars.len());
+                    let tail: String = chars[s..].iter().collect();
+                    Ok(vi64(
+                        tail.find(&needle)
+                            .map(|b| (tail[..b].chars().count() + s) as i64)
+                            .unwrap_or(-1),
+                    ))
+                }
+                _ => Err("indexOf expects a string or array".to_string()),
+            }
+        }
+        // Search from the end: the index of the last occurrence of the needle in
+        // a list or string, or -1. An optional third argument bounds the search
+        // to indices at or below it.
+        "lastIndexOf" => {
+            at_least(name, args, 2)?;
+            match args[0].typ {
+                9 => {
+                    let a = args[0].as_array();
+                    let b = a.borrow();
+                    let upper = args
+                        .get(2)
+                        .map(as_int)
+                        .transpose()?
+                        .map(|i| if i < 0 { (b.data.len() as i64 + i).max(-1) } else { i })
+                        .unwrap_or(b.data.len() as i64 - 1);
+                    let mut found = -1i64;
+                    for (i, v) in b.data.iter().enumerate() {
+                        if i as i64 <= upper && values_equal(v, &args[1]) {
+                            found = i as i64;
+                        }
+                    }
+                    Ok(vi64(found))
                 }
                 7 => {
                     let hay = args[0].as_string();
                     let needle = str_of(&args[1]);
                     Ok(vi64(
-                        hay.find(&needle).map(|b| hay[..b].chars().count() as i64).unwrap_or(-1),
+                        hay.rfind(&needle).map(|b| hay[..b].chars().count() as i64).unwrap_or(-1),
                     ))
                 }
-                _ => Err("indexOf expects a string or array".to_string()),
+                _ => Err("lastIndexOf expects a string or array".to_string()),
             }
+        }
+        // Read one element with negative-from-the-end indexing; out of range
+        // reads as null. Works on lists and strings.
+        "at" => {
+            arity(name, args, 2)?;
+            let i = as_int(&args[1])?;
+            match args[0].typ {
+                9 => {
+                    let a = args[0].as_array();
+                    let b = a.borrow();
+                    let idx = if i < 0 { b.data.len() as i64 + i } else { i };
+                    if idx < 0 || idx as usize >= b.data.len() {
+                        Ok(vnull())
+                    } else {
+                        Ok(b.data[idx as usize].clone())
+                    }
+                }
+                7 => {
+                    let chars: Vec<char> = args[0].as_string().chars().collect();
+                    let idx = if i < 0 { chars.len() as i64 + i } else { i };
+                    if idx < 0 || idx as usize >= chars.len() {
+                        Ok(vnull())
+                    } else {
+                        Ok(vstr(chars[idx as usize].to_string()))
+                    }
+                }
+                _ => Err("at expects a string or array".to_string()),
+            }
+        }
+        // In-place remove-and-insert: `splice(list, start[, deleteCount,
+        // items...])` removes `deleteCount` elements at `start` (negative counts
+        // from the end; the count defaults to "to the end"), inserts the trailing
+        // arguments in their place, and returns the removed elements as a new
+        // list.
+        "splice" => {
+            at_least(name, args, 2)?;
+            let a = expect_array(name, &args[0])?;
+            let mut b = a.borrow_mut();
+            let len = b.data.len();
+            let (start, _) = clamp_range(as_int(&args[1])?, None, len);
+            let del = match args.get(2) {
+                Some(v) => (as_int(v)?.max(0) as usize).min(len - start),
+                None => len - start,
+            };
+            let removed: Vec<Val> = b.data.splice(start..start + del, args[3..].iter().cloned()).collect();
+            Ok(varr(removed))
+        }
+        // A new list with nested lists expanded in place, `depth` levels deep
+        // (default 1; pass a large depth for a full flatten).
+        "flatten" => {
+            at_least(name, args, 1)?;
+            let depth = args.get(1).map(as_int).transpose()?.unwrap_or(1);
+            fn flat_into(src: &[Val], depth: i64, out: &mut Vec<Val>) {
+                for v in src {
+                    if v.typ == 9 && depth > 0 {
+                        flat_into(&v.as_array().borrow().data, depth - 1, out);
+                    } else {
+                        out.push(v.clone());
+                    }
+                }
+            }
+            let a = expect_array(name, &args[0])?;
+            let mut out = Vec::new();
+            flat_into(&a.borrow().data, depth, &mut out);
+            Ok(varr(out))
+        }
+        // Whether any value in the map equals the argument (the map
+        // `containsValue` member).
+        "hasValue" => {
+            arity(name, args, 2)?;
+            let o = expect_object(name, &args[0])?;
+            let found = o.borrow().data.data.values().any(|v| values_equal(v, &args[1]));
+            Ok(vbool(found))
+        }
+        // The string's UTF-16-ish code units as a list of ints (chars here — the
+        // VM's strings are unicode scalar sequences).
+        "codeUnits" => {
+            arity(name, args, 1)?;
+            let s = expect_string(name, &args[0])?;
+            Ok(varr(s.chars().map(|c| vi64(c as i64)).collect()))
+        }
+        // Three-way comparison for numbers and strings: -1, 0, or 1. The
+        // primitive behind `compareTo` / `localeCompare`-style members.
+        "compareTo" => {
+            arity(name, args, 2)?;
+            if args[0].typ == 7 && args[1].typ == 7 {
+                let (a, b) = (args[0].as_string(), args[1].as_string());
+                return Ok(vi64(match a.cmp(&b) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                }));
+            }
+            let (a, b) = (as_num(&args[0])?, as_num(&args[1])?);
+            Ok(vi64(if a < b { -1 } else if a > b { 1 } else { 0 }))
         }
         "join" => {
             at_least(name, args, 1)?;
@@ -941,6 +1257,55 @@ pub fn invoke(name: &str, args: &[Val]) -> Result<Val, String> {
                 return Err("fill count too large".to_string());
             }
             Ok(varr(vec![args[1].clone(); n]))
+        }
+        // The first / last `n` elements as a new list (the `take` / `skip`
+        // members; negative or over-length counts clamp). No callback, so native.
+        "take" => {
+            arity(name, args, 2)?;
+            let a = expect_array(name, &args[0])?;
+            let b = a.borrow();
+            let n = (as_int(&args[1])?.max(0) as usize).min(b.data.len());
+            Ok(varr(b.data[..n].to_vec()))
+        }
+        "skip" => {
+            arity(name, args, 2)?;
+            let a = expect_array(name, &args[0])?;
+            let b = a.borrow();
+            let n = (as_int(&args[1])?.max(0) as usize).min(b.data.len());
+            Ok(varr(b.data[n..].to_vec()))
+        }
+        // A new list with duplicate values removed, first occurrence kept (the
+        // `toSet`/dedupe member — a set is modelled as a list here).
+        "toSet" => {
+            arity(name, args, 1)?;
+            let a = expect_array(name, &args[0])?;
+            let mut out: Vec<Val> = Vec::new();
+            for v in a.borrow().data.iter() {
+                if !out.iter().any(|u| values_equal(u, v)) {
+                    out.push(v.clone());
+                }
+            }
+            Ok(varr(out))
+        }
+        // In-place Fisher–Yates shuffle using the deterministic `random` stream.
+        "shuffle" => {
+            arity(name, args, 1)?;
+            let a = expect_array(name, &args[0])?;
+            let mut b = a.borrow_mut();
+            let len = b.data.len();
+            for i in (1..len).rev() {
+                let r = RNG_STATE.with(|s| {
+                    let mut x = s.get();
+                    x ^= x >> 12;
+                    x ^= x << 25;
+                    x ^= x >> 27;
+                    s.set(x);
+                    x.wrapping_mul(0x2545F4914F6CDD1D)
+                });
+                let j = (r >> 11) as usize % (i + 1);
+                b.data.swap(i, j);
+            }
+            Ok(args[0].clone())
         }
 
         // ---- foundation: string --------------------------------------------

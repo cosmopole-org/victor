@@ -21,6 +21,7 @@ pub enum OperationTypes {
     AssignVar,
     CallFunc,
     ReturnVal,
+    ThrowVal,
     IfStmt,
     LoopStmt,
     SwitchStmt,
@@ -59,6 +60,8 @@ pub enum ExecStates {
     CallFuncFinished,
     ReturnValStarted,
     ReturnValFinished,
+    ThrowValStarted,
+    ThrowValFinished,
     IfStmtIsConditioned,
     IfStmtFinished,
     LoopStmtStarted,
@@ -534,6 +537,58 @@ impl Operation for ReturnValue {
     fn get_data(&self) -> Vec<Val> {
         vec![self.value.clone().unwrap()]
     }
+}
+
+/// The `throw` statement's value collector — the throwing twin of
+/// [`ReturnValue`]: the value expression that follows the `Throw` unit lands
+/// here, and the dispatch loop then raises it through the try stack.
+struct ThrowValue {
+    typ: OperationTypes,
+    state: ExecStates,
+    pub value: Option<Val>,
+}
+
+impl ThrowValue {
+    pub fn new() -> Self {
+        ThrowValue {
+            typ: OperationTypes::ThrowVal,
+            state: ExecStates::ThrowValStarted,
+            value: None,
+        }
+    }
+}
+
+impl Operation for ThrowValue {
+    fn get_state(&self) -> ExecStates {
+        self.state
+    }
+
+    fn get_type(&self) -> OperationTypes {
+        self.typ
+    }
+
+    fn set_state(&mut self, state: ExecStates, data: StateData) {
+        self.state = state;
+        if state == ExecStates::ThrowValFinished {
+            self.value = Some(data.val());
+        }
+    }
+
+    fn get_data(&self) -> Vec<Val> {
+        vec![self.value.clone().unwrap()]
+    }
+}
+
+/// One live `try` region: everything needed to transfer control to its catch
+/// body when a value is thrown while the region is active — the handler's unit
+/// range, the name the thrown value binds to, and the scope/register depths to
+/// unwind back to (recorded *before* the try body's scope was pushed).
+struct TryFrame {
+    catch_start: usize,
+    catch_end: usize,
+    err_name: Rc<str>,
+    scope_depth: usize,
+    register_depth: usize,
 }
 
 struct IfStmt {
@@ -1675,9 +1730,13 @@ pub struct Executor {
     /// Set when `run_from` suspended this turn because of a host pause request,
     /// so `single_thread_operation` reports the instance as paused (not done).
     paused_out: bool,
-    /// A fatal trap (limit overrun or builtin error) that ended the instance.
+    /// A fatal trap (limit overrun or uncaught error) that ended the instance.
     /// Once set, the instance is terminated and reports this reason to the host.
     trap: Option<String>,
+    /// The live `try` regions, innermost last. A thrown value transfers control
+    /// to the innermost frame's catch body (unwinding scopes and registers back
+    /// to the depths recorded at `try` entry); with no frame the throw is a trap.
+    try_stack: Vec<TryFrame>,
 }
 
 impl Executor {
@@ -1713,6 +1772,7 @@ impl Executor {
             control: ExecControl::new(),
             paused_out: false,
             trap: None,
+            try_stack: Vec::new(),
         }
     }
 
@@ -4191,6 +4251,65 @@ impl Executor {
             }
         }
         self.ctx.pop_scope();
+        // A try frame dies with the scope its `tryBody` lives at — whether it
+        // ends normally, is unwound by `return`/`break`/`continue`, or is torn
+        // down by an outer throw. Every scope pop funnels through here, so this
+        // is the single place frames are retired.
+        while self
+            .try_stack
+            .last()
+            .map_or(false, |f| f.scope_depth >= self.ctx.memory.len())
+        {
+            self.try_stack.pop();
+        }
+    }
+    /// Raise `err`: transfer control to the innermost live `try` frame's catch
+    /// body — unwinding scopes (across function frames if needed) and pending
+    /// operation registers back to the depths recorded at `try` entry, and
+    /// binding the thrown value under the frame's error name — or, with no
+    /// live frame, trap the instance with the value's display text. Returns
+    /// whether the throw was caught. Callers must reset their local
+    /// `main_reg` / `is_reg_state_final` and `continue` the dispatch loop.
+    fn begin_catch(&mut self, err: Val) -> bool {
+        match self.try_stack.pop() {
+            Some(frame) => {
+                while self.ctx.memory.len() > frame.scope_depth {
+                    self.pop_scope_governed();
+                }
+                self.registers.truncate(frame.register_depth);
+                // Any return value mid-propagation died with the frames it was
+                // travelling through.
+                self.pending_func_result_value = Val { typ: 254, data: Payload::Null };
+                let mut args = ValMap::default();
+                args.insert(frame.err_name.to_string(), err);
+                self.ctx.push_scope_with_args(
+                    "catchBody".to_string(),
+                    frame.catch_start,
+                    frame.catch_start,
+                    frame.catch_end,
+                    args,
+                );
+                self.pointer = frame.catch_start;
+                self.end_at = frame.catch_end;
+                true
+            }
+            None => {
+                self.trap = Some(format!("uncaught error: {}", err.to_display()));
+                false
+            }
+        }
+    }
+    /// The error value a *native* failure (a stdlib builtin error, a failed
+    /// checked cast) throws: a plain object `{ name, message }`, so guest
+    /// handlers can read `e.message` in any source language.
+    fn native_error(&self, message: String) -> Val {
+        let mut m = ValMap::default();
+        m.insert("name".to_string(), Val { typ: 7, data: Payload::from("Error".to_string()) });
+        m.insert("message".to_string(), Val { typ: 7, data: Payload::from(message) });
+        Val {
+            typ: 8,
+            data: Payload::from(Rc::new(RefCell::new(Object::new(-2, ValGroup::new(m))))),
+        }
     }
     /// Snapshot the enclosing (non-global) locals as a closure's captured
     /// environment. Returns `None` at top level (nothing to close over), so
@@ -4429,6 +4548,18 @@ impl Executor {
                             is_reg_state_final =
                                 self.registers.last().unwrap().get_state()
                                     == ExecStates::ReturnValFinished;
+                            continue;
+                        }
+                    } else if op_type == OperationTypes::ThrowVal {
+                        if self.registers.last().unwrap().get_state()
+                            == ExecStates::ThrowValStarted
+                        {
+                            self.registers.last_mut().unwrap().set_state(
+                                ExecStates::ThrowValFinished,
+                                StateData::Val(main_reg.take().unwrap()),
+                            );
+                            main_reg = None;
+                            is_reg_state_final = true;
                             continue;
                         }
                     } else if op_type
@@ -4959,7 +5090,18 @@ impl Executor {
                                         continue;
                                     }
                                     Err(e) => {
-                                        self.trap = Some(format!("{}: {e}", func_ref.name));
+                                        // A builtin error is a *thrown* error: a
+                                        // guest `try` anywhere up the call chain
+                                        // catches it as `{ name, message }`;
+                                        // uncaught it traps the instance as
+                                        // before.
+                                        let msg = format!("{}: {e}", func_ref.name);
+                                        drop(arg_ref);
+                                        drop(func_ref);
+                                        let err = self.native_error(msg);
+                                        self.begin_catch(err);
+                                        main_reg = None;
+                                        is_reg_state_final = false;
                                         continue;
                                     }
                                 }
@@ -5024,6 +5166,18 @@ impl Executor {
                         self.pointer = func_end;
                         self.end_at = func_end;
                         self.pending_func_result_value = returned_val;
+                        is_reg_state_final = false;
+                        continue;
+                    } else if self.registers.last().unwrap().get_state()
+                        == ExecStates::ThrowValFinished
+                    {
+                        // The thrown value is collected; raise it through the try
+                        // stack (or trap when uncaught).
+                        let data = self.registers.last().unwrap().get_data();
+                        let err = data[0].clone();
+                        self.registers.pop();
+                        self.begin_catch(err);
+                        main_reg = None;
                         is_reg_state_final = false;
                         continue;
                     } else if self.registers.last().unwrap().get_state()
@@ -5522,12 +5676,18 @@ impl Executor {
                         self.registers.pop();
                         let matches = value_is_type(&value, &type_name);
                         if cast {
-                            // Checked cast: yield the value on a match, trap on a
-                            // mismatch.
+                            // Checked cast: yield the value on a match; a
+                            // mismatch throws (catchable by a guest `try`,
+                            // trapping the instance when uncaught).
                             if matches {
                                 main_reg = Some(value);
                             } else {
-                                panic!("elpian error: TypeError: value is not a {type_name}");
+                                let err = self
+                                    .native_error(format!("TypeError: value is not a {type_name}"));
+                                self.begin_catch(err);
+                                main_reg = None;
+                                is_reg_state_final = false;
+                                continue;
                             }
                         } else {
                             // `is`: the boolean result of the type test.
@@ -6128,6 +6288,39 @@ impl Executor {
                 // return command
                 UnitKind::Return => {
                     self.registers.push(Box::new(ReturnValue::new()));
+                }
+                // throw command (value expression follows)
+                UnitKind::Throw => {
+                    self.registers.push(Box::new(ThrowValue::new()));
+                }
+                // try/catch: record a try frame (scope/register depths as they
+                // are *now*, before the body scope), park the resume point past
+                // the catch body, and enter the protected body. Normal completion
+                // tears the body scope down like any block and resumes at
+                // `catch_end`; a throw anywhere inside (any call depth) unwinds
+                // back here and enters the catch body instead.
+                UnitKind::TryHead { body_start, body_end, catch_start, catch_end, err_name } => {
+                    self.ctx
+                        .memory
+                        .last()
+                        .unwrap()
+                        .borrow_mut()
+                        .update_frozen_pointer(catch_end);
+                    self.try_stack.push(TryFrame {
+                        catch_start,
+                        catch_end,
+                        err_name,
+                        scope_depth: self.ctx.memory.len(),
+                        register_depth: self.registers.len(),
+                    });
+                    self.ctx.push_scope(
+                        "tryBody".to_string(),
+                        body_start,
+                        body_start,
+                        body_end,
+                    );
+                    self.pointer = body_start;
+                    self.end_at = body_end;
                 }
                 // jump command
                 UnitKind::Jump(dest) => {

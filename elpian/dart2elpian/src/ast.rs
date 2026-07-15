@@ -43,6 +43,25 @@ pub(crate) enum Expr {
     /// A map literal `{k: v, ...}` (entries with values) or a set literal
     /// `{a, b, ...}` (entries without values, lowered to a list).
     MapOrSet(Vec<(Expr, Option<Expr>)>),
+    /// `throw expr` — Dart's throw is an expression.
+    Throw(Box<Expr>),
+    /// Null-aware member access `obj?.name` (short-circuits to null on a null
+    /// receiver).
+    NullMember(Box<Expr>, String),
+    /// A cascade `target..a()..b = c` — a sequence of operations on one target,
+    /// evaluating to the target. Each element is applied to the (shared) target.
+    Cascade(Box<Expr>, Vec<CascadeOp>),
+}
+
+/// One section of a cascade (`..member`, `..method(args)`, `..[i] = v`, …),
+/// applied to the cascade's shared target.
+#[derive(Debug, Clone)]
+pub(crate) enum CascadeOp {
+    /// `..name` / `..name = value` (when `assign` is set) / `..name(args)`
+    /// (when `call` is set).
+    Member(String, Option<Box<Expr>>, Option<(Vec<Expr>, Vec<(String, Expr)>)>),
+    /// `..[index] = value`.
+    IndexSet(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +71,18 @@ pub(crate) enum Stmt {
     Return(Option<Expr>),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
+    /// `do { body } while (cond);`.
+    DoWhile(Vec<Stmt>, Expr),
     Block(Vec<Stmt>),
+    Break,
+    Continue,
+    /// `switch (value) { case v: … default: … }`. Each arm is (case-value
+    /// expressions, body); the optional trailing body is the `default` arm.
+    Switch(Expr, Vec<(Vec<Expr>, Vec<Stmt>)>, Option<Vec<Stmt>>),
+    /// `try { body } on T catch (e) { … } finally { … }`. The catch binding and
+    /// body are present when a `catch`/`on` clause exists; `finally` when a
+    /// `finally` clause exists.
+    Try(Vec<Stmt>, Option<(String, Vec<Stmt>)>, Option<Vec<Stmt>>),
 }
 
 /// A single formal parameter.

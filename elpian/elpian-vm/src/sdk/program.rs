@@ -193,6 +193,19 @@ pub enum UnitKind {
     /// expression per binding that declares a default (in binding order); the
     /// plan describes how to bind names from the source's members / positions.
     Destructure { plan: Rc<DestructurePlan> },
+    /// `0x1d` — try/catch. The protected body runs first; a value thrown inside
+    /// it (dynamically, at any call depth) unwinds to the catch body with the
+    /// value bound under `err_name`. Normal completion of the body skips the
+    /// catch entirely. All four positions are unit indices after decode.
+    TryHead {
+        body_start: usize,
+        body_end: usize,
+        catch_start: usize,
+        catch_end: usize,
+        err_name: Rc<str>,
+    },
+    /// `0x1e` — `throw` (value expression follows).
+    Throw,
     /// `0x13` — function definition (hoisted; body follows). `start`/`end` are
     /// unit indices.
     FuncDef {
@@ -300,6 +313,15 @@ impl<'a> Decoder<'a> {
                     start: self.target_unit(*start),
                     end: self.target_unit(*end),
                 },
+                UnitKind::TryHead { body_start, body_end, catch_start, catch_end, err_name } => {
+                    UnitKind::TryHead {
+                        body_start: self.target_unit(*body_start),
+                        body_end: self.target_unit(*body_end),
+                        catch_start: self.target_unit(*catch_start),
+                        catch_end: self.target_unit(*catch_end),
+                        err_name: err_name.clone(),
+                    }
+                }
                 UnitKind::FuncLit { start, end, params } => UnitKind::FuncLit {
                     start: self.target_unit(*start),
                     end: self.target_unit(*end),
@@ -595,6 +617,48 @@ impl<'a> Decoder<'a> {
             }
             0x12 => self.decode_switch(pos),
             0x1c => self.decode_destructure(pos),
+            0x1d => {
+                // try/catch: opcode, errName, body_start, body_end, catch_start,
+                // catch_end, body, catch body.
+                let (err_name, consumed) = self.read_str(pos + 1);
+                let idx = self.emit(
+                    pos,
+                    UnitKind::TryHead {
+                        body_start: 0,
+                        body_end: 0,
+                        catch_start: 0,
+                        catch_end: 0,
+                        err_name: Rc::from(err_name.as_str()),
+                    },
+                );
+                let mut p = pos + 1 + consumed;
+                let body_start = self.read_i64(p) as usize;
+                p += 8;
+                let body_end = self.read_i64(p) as usize;
+                p += 8;
+                let catch_start = self.read_i64(p) as usize;
+                p += 8;
+                let catch_end = self.read_i64(p) as usize;
+                p += 8;
+                debug_assert_eq!(p, body_start);
+                if let UnitKind::TryHead { err_name, .. } = &self.units[idx] {
+                    let err_name = err_name.clone();
+                    self.units[idx] = UnitKind::TryHead {
+                        body_start,
+                        body_end,
+                        catch_start,
+                        catch_end,
+                        err_name,
+                    };
+                }
+                self.decode_stmt_seq(body_start, body_end);
+                self.decode_stmt_seq(catch_start, catch_end);
+                catch_end
+            }
+            0x1e => {
+                self.emit(pos, UnitKind::Throw);
+                self.decode_value(pos + 1)
+            }
             0x13 => self.decode_funcdef(pos),
             0x0e => {
                 // definition: 0x0e, 0x0b discriminator, name, value expression.

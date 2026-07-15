@@ -612,7 +612,27 @@ impl Parser {
             }
             Tok::Kw(k) if k == "if" => self.parse_if(),
             Tok::Kw(k) if k == "while" => self.parse_while(),
+            Tok::Kw(k) if k == "do" => self.parse_do_while(),
             Tok::Kw(k) if k == "for" => self.parse_for(),
+            Tok::Kw(k) if k == "switch" => self.parse_switch(),
+            Tok::Kw(k) if k == "try" => self.parse_try(),
+            Tok::Kw(k) if k == "break" => {
+                self.bump();
+                self.eat(&Tok::Semi)?;
+                Ok(Stmt::Break)
+            }
+            Tok::Kw(k) if k == "continue" => {
+                self.bump();
+                self.eat(&Tok::Semi)?;
+                Ok(Stmt::Continue)
+            }
+            // `rethrow` re-raises the current catch's error; the emitter maps it to
+            // throwing the bound error variable.
+            Tok::Kw(k) if k == "rethrow" => {
+                self.bump();
+                self.eat(&Tok::Semi)?;
+                Ok(Stmt::Expr(Expr::Throw(Box::new(Expr::Ident("__rethrow".into())))))
+            }
             Tok::Kw(k) if k == "return" => {
                 self.bump();
                 if *self.peek() == Tok::Semi {
@@ -671,6 +691,120 @@ impl Parser {
         self.eat(&Tok::RParen)?;
         let body = self.stmt_as_block()?;
         Ok(Stmt::While(cond, body))
+    }
+
+    fn parse_do_while(&mut self) -> Result<Stmt, String> {
+        self.bump(); // 'do'
+        let body = self.stmt_as_block()?;
+        self.eat(&Tok::Kw("while".into()))?;
+        self.eat(&Tok::LParen)?;
+        let cond = self.parse_expr()?;
+        self.eat(&Tok::RParen)?;
+        self.eat(&Tok::Semi)?;
+        Ok(Stmt::DoWhile(body, cond))
+    }
+
+    /// `switch (v) { case a: … case b: … default: … }`. Consecutive `case`
+    /// labels with no body between them share the following body (fall-through of
+    /// empty cases only, matching the common Dart form).
+    fn parse_switch(&mut self) -> Result<Stmt, String> {
+        self.bump(); // 'switch'
+        self.eat(&Tok::LParen)?;
+        let value = self.parse_expr()?;
+        self.eat(&Tok::RParen)?;
+        self.eat(&Tok::LBrace)?;
+        let mut arms: Vec<(Vec<Expr>, Vec<Stmt>)> = Vec::new();
+        let mut default: Option<Vec<Stmt>> = None;
+        while *self.peek() != Tok::RBrace && *self.peek() != Tok::Eof {
+            let mut labels: Vec<Expr> = Vec::new();
+            loop {
+                if *self.peek() == Tok::Kw("case".into()) {
+                    self.bump();
+                    labels.push(self.parse_expr()?);
+                    self.eat(&Tok::Colon)?;
+                    // An empty case (label immediately followed by another label)
+                    // shares the next non-empty case's body.
+                    if *self.peek() == Tok::Kw("case".into())
+                        || *self.peek() == Tok::Kw("default".into())
+                    {
+                        continue;
+                    }
+                    break;
+                } else {
+                    break;
+                }
+            }
+            if *self.peek() == Tok::Kw("default".into()) {
+                self.bump();
+                self.eat(&Tok::Colon)?;
+                default = Some(self.parse_case_body()?);
+                continue;
+            }
+            let body = self.parse_case_body()?;
+            arms.push((labels, body));
+        }
+        self.eat(&Tok::RBrace)?;
+        Ok(Stmt::Switch(value, arms, default))
+    }
+
+    /// Statements of a switch case up to the next `case`/`default`/`}`. A trailing
+    /// `break;` (which the VM's switch does not model) is accepted and dropped.
+    fn parse_case_body(&mut self) -> Result<Vec<Stmt>, String> {
+        let mut body = Vec::new();
+        while *self.peek() != Tok::Kw("case".into())
+            && *self.peek() != Tok::Kw("default".into())
+            && *self.peek() != Tok::RBrace
+            && *self.peek() != Tok::Eof
+        {
+            if *self.peek() == Tok::Kw("break".into()) {
+                self.bump();
+                self.eat(&Tok::Semi)?;
+                break;
+            }
+            body.push(self.parse_stmt()?);
+        }
+        Ok(body)
+    }
+
+    /// `try { … } on Type catch (e) { … } catch (e) { … } finally { … }`. The
+    /// `on Type` filters are erased (a single catch handles all); multiple catch
+    /// clauses collapse to the first (bounded).
+    fn parse_try(&mut self) -> Result<Stmt, String> {
+        self.bump(); // 'try'
+        let body = self.parse_block()?;
+        let mut catch: Option<(String, Vec<Stmt>)> = None;
+        // Zero or more `on T` / `catch (e)` clauses; keep the first binding.
+        while *self.peek() == Tok::Kw("catch".into())
+            || matches!(self.peek(), Tok::Ident(s) if s == "on")
+        {
+            let mut err_name = "__e".to_string();
+            if matches!(self.peek(), Tok::Ident(s) if s == "on") {
+                self.bump(); // 'on'
+                let _ = self.parse_type_name()?; // erase the exception type
+            }
+            if *self.peek() == Tok::Kw("catch".into()) {
+                self.bump();
+                self.eat(&Tok::LParen)?;
+                err_name = self.ident()?;
+                // Optional stack-trace binding `catch (e, st)` — erased.
+                if *self.peek() == Tok::Comma {
+                    self.bump();
+                    let _ = self.ident()?;
+                }
+                self.eat(&Tok::RParen)?;
+            }
+            let cbody = self.parse_block()?;
+            if catch.is_none() {
+                catch = Some((err_name, cbody));
+            }
+        }
+        let finally = if *self.peek() == Tok::Kw("finally".into()) {
+            self.bump();
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Ok(Stmt::Try(body, catch, finally))
     }
 
     /// C-style `for (init; cond; update) body` lowered to `{ init; while (cond) { body; update; } }`.
@@ -813,6 +947,12 @@ impl Parser {
     }
 
     fn parse_assign(&mut self) -> Result<Expr, String> {
+        // `throw expr` is an expression in Dart (usable in `x ?? throw …`).
+        if *self.peek() == Tok::Kw("throw".into()) {
+            self.bump();
+            let e = self.parse_assign()?;
+            return Ok(Expr::Throw(Box::new(e)));
+        }
         let lhs = self.parse_ternary()?;
         if *self.peek() == Tok::Op("=".into()) {
             self.bump();
@@ -820,11 +960,20 @@ impl Parser {
             return Ok(Expr::Assign(Box::new(lhs), Box::new(rhs)));
         }
         if let Tok::Op(o) = self.peek() {
-            if matches!(o.as_str(), "+=" | "-=" | "*=" | "/=") {
+            if matches!(
+                o.as_str(),
+                "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | ">>>="
+            ) {
                 let op = o.clone();
                 self.bump();
                 let rhs = self.parse_assign()?;
                 return Ok(Expr::AssignOp(op, Box::new(lhs), Box::new(rhs)));
+            }
+            if o == "??=" {
+                // `a ??= b` — assign only when `a` is null.
+                self.bump();
+                let rhs = self.parse_assign()?;
+                return Ok(Expr::AssignOp("??=".into(), Box::new(lhs), Box::new(rhs)));
             }
         }
         Ok(lhs)
@@ -958,7 +1107,7 @@ impl Parser {
             return Ok(Expr::Await(Box::new(e)));
         }
         if let Tok::Op(o) = self.peek() {
-            if o == "!" || o == "-" {
+            if o == "!" || o == "-" || o == "~" {
                 let op = o.clone();
                 self.bump();
                 let e = self.parse_unary()?;
@@ -1000,6 +1149,21 @@ impl Parser {
                     let name = self.ident()?;
                     e = Expr::Member(Box::new(e), name);
                 }
+                Tok::Op(o) if o == "?." => {
+                    // Null-aware access `obj?.name` (and `obj?.method(args)`).
+                    self.bump();
+                    let name = self.ident()?;
+                    e = Expr::NullMember(Box::new(e), name);
+                }
+                Tok::Op(o) if o == ".." => {
+                    // Cascade: one or more `..` sections applied to `e`.
+                    e = self.parse_cascade(e)?;
+                }
+                Tok::Op(o) if o == "!" => {
+                    // The null-assertion operator `x!` — erased (the value passes
+                    // through; the VM has no static nullability to assert).
+                    self.bump();
+                }
                 Tok::Op(o) if o == "++" || o == "--" => {
                     let op = o.clone();
                     self.bump();
@@ -1009,6 +1173,37 @@ impl Parser {
             }
         }
         Ok(e)
+    }
+
+    /// Parse a cascade `target..a()..b = c` into an `Expr::Cascade`. Supported
+    /// sections (bounded): `..name`, `..name(args)`, `..name = value`, and
+    /// `..[index] = value`. Section values are parsed at ternary precedence.
+    fn parse_cascade(&mut self, target: Expr) -> Result<Expr, String> {
+        let mut ops = Vec::new();
+        while matches!(self.peek(), Tok::Op(o) if o == "..") {
+            self.bump(); // '..'
+            if *self.peek() == Tok::LBracket {
+                self.bump();
+                let idx = self.parse_expr()?;
+                self.eat(&Tok::RBracket)?;
+                self.eat(&Tok::Op("=".into()))?;
+                let val = self.parse_ternary()?;
+                ops.push(CascadeOp::IndexSet(Box::new(idx), Box::new(val)));
+                continue;
+            }
+            let name = self.ident()?;
+            if *self.peek() == Tok::LParen {
+                let (pos, named) = self.parse_args()?;
+                ops.push(CascadeOp::Member(name, None, Some((pos, named))));
+            } else if *self.peek() == Tok::Op("=".into()) {
+                self.bump();
+                let val = self.parse_ternary()?;
+                ops.push(CascadeOp::Member(name, Some(Box::new(val)), None));
+            } else {
+                ops.push(CascadeOp::Member(name, None, None));
+            }
+        }
+        Ok(Expr::Cascade(Box::new(target), ops))
     }
 
     fn parse_primary(&mut self) -> Result<Expr, String> {
@@ -1067,14 +1262,20 @@ impl Parser {
 }
 
 fn binding_power(op: &str) -> Option<u8> {
+    // Dart's binary tower (loosest first): `??`, `||`, `&&`, `|`, `^`, `&`,
+    // equality, relational, shift, additive, multiplicative.
     Some(match op {
         "??" => 0,
         "||" => 1,
         "&&" => 2,
-        "==" | "!=" => 3,
-        "<" | "<=" | ">" | ">=" => 4,
-        "+" | "-" => 5,
-        "*" | "/" | "%" | "~/" => 6,
+        "|" => 3,
+        "^" => 4,
+        "&" => 5,
+        "==" | "!=" => 6,
+        "<" | "<=" | ">" | ">=" => 7,
+        "<<" | ">>" | ">>>" => 8,
+        "+" | "-" => 9,
+        "*" | "/" | "%" | "~/" => 10,
         _ => return None,
     })
 }

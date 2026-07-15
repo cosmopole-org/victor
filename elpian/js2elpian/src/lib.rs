@@ -7,6 +7,30 @@
 //! language front-end (tokenizer + recursive-descent / precedence-climbing
 //! parser + closure/class desugaring); the VM owns execution.
 //!
+//! ## Supported surface
+//!
+//! * **operators**: the full binary tower `?? || && | ^ & == === != !== < <= >
+//!   >= << >> >>> + - * / % **`, unary `! - + ~ typeof void delete`, `instanceof`
+//!   / `in`, optional chaining `?.` (member / index / call), and every
+//!   assignment form (`= += … **= &= |= ^= <<= >>= >>>= &&= ||= ??=`, `++`/`--`).
+//!   Bitwise & shift operators lower to universal builtins with JS 32-bit
+//!   semantics; `??`/`&&`/`||` are the VM's short-circuit opcodes.
+//! * **statements**: `let`/`const`/`var` (incl. destructuring), `function`,
+//!   `class` (fields, methods, `extends`/`super`, statics), `if`/`else`,
+//!   `while`, `do`/`while`, C-style `for`, `for-of`, `for-in`, `switch`/`case`/
+//!   `default` (default desugars to an if-chain), `break`/`continue`, `return`,
+//!   `throw`, and `try`/`catch`/`finally` (over the VM's neutral exception
+//!   opcode).
+//! * **closures capture by reference**: a post-parse transform boxes locals a
+//!   nested closure mutates into one-element arrays, so `arr.forEach(x => sum +=
+//!   x)` propagates (see [`transforms`]).
+//! * **methods & statics**: JS core-member spellings map to the VM's universal
+//!   stdlib names at compile time (`includes`→`contains`, `filter`→`where`,
+//!   `some`→`any`, `replace`→`replaceFirst`, …), and the static namespaces
+//!   `Math` / `JSON` / `Object` / `Number` / `Array` / `console` plus the
+//!   `parseInt`/`parseFloat` globals resolve to builtins / intrinsics. The
+//!   higher-order Array/Map methods run as guest prelude functions.
+//!
 //! ```text
 //!   JS source ──parse_js──▶ Elpian AST JSON ──compile_ast (elpian-vm)──▶ bytecode
 //! ```
@@ -18,6 +42,8 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
+
+mod transforms;
 
 /// Front-end debug logging (compiled out in practice; kept for parity with the
 /// original in-VM front-end).
@@ -97,6 +123,22 @@ enum JsTok {
 enum TplPart {
     Lit(String),
     Expr(String),
+}
+
+/// A binary operator's lowering: either a native arithmetic/comparison operator
+/// (emitted as an `arithmetic` node) or a call to a universal builtin / prelude
+/// helper (bitwise & shift operators, which have no VM opcode).
+#[derive(Clone, Copy)]
+enum JsBinOp {
+    Arith(&'static str),
+    Call(&'static str),
+}
+
+/// The JavaScript static namespaces whose `Namespace.member` accesses are
+/// resolved to universal builtins / intrinsics at compile time (see
+/// [`JsParser::resolve_namespace`]).
+fn is_js_namespace(name: &str) -> bool {
+    matches!(name, "Math" | "JSON" | "Object" | "Number" | "Array" | "console")
 }
 
 /// Decode one backslash escape starting at `chars[i]` (the backslash) inside a
@@ -191,11 +233,12 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
     let mut i = 0usize;
     let mut toks: Vec<JsTok> = vec![];
     // Longest punctuators first so the greedy scan never splits `===` into
-    // `==` + `=`, `<=` into `<` + `=`, and so on.
+    // `==` + `=`, `>>>` into `>>` + `>`, and so on.
     let puncts: &[&str] = &[
-        "...", "===", "!==", "**", "??", "==", "!=", "<=", ">=", "=>", "&&", "||", "++", "--",
-        "+=", "-=", "*=", "/=", "%=", "(", ")", "{", "}", "[", "]", ";", ",", ".", ":", "?", "<",
-        ">", "=", "+", "-", "*", "/", "%", "!", "^", "&", "|",
+        ">>>=", "...", "===", "!==", "**=", "<<=", ">>=", ">>>", "&&=", "||=", "??=", "**",
+        "??", "==", "!=", "<=", ">=", "=>", "&&", "||", "++", "--", "+=", "-=", "*=", "/=",
+        "%=", "&=", "|=", "^=", "?.", "<<", ">>", "(", ")", "{", "}", "[", "]", ";", ",", ".",
+        ":", "?", "<", ">", "=", "+", "-", "*", "/", "%", "!", "^", "&", "|", "~",
     ];
     while i < n {
         let c = chars[i];
@@ -283,8 +326,27 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
             toks.push(JsTok::Template(parts));
             continue;
         }
-        // Numeric literals (integer, fractional, exponent).
+        // Numeric literals (integer, fractional, exponent, and the 0x / 0b / 0o
+        // radix forms — normalised to their decimal value at lex time).
         if c.is_ascii_digit() {
+            if c == '0' && i + 1 < n && matches!(chars[i + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
+                let radix = match chars[i + 1] {
+                    'x' | 'X' => 16,
+                    'b' | 'B' => 2,
+                    _ => 8,
+                };
+                let start = i + 2;
+                let mut j = start;
+                while j < n && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                let digits: String = chars[start..j].iter().filter(|c| **c != '_').collect();
+                if let Ok(v) = i64::from_str_radix(&digits, radix) {
+                    toks.push(JsTok::Num(v.to_string()));
+                    i = j;
+                    continue;
+                }
+            }
             let start = i;
             while i < n && chars[i].is_ascii_digit() {
                 i += 1;
@@ -467,31 +529,91 @@ struct JsParser {
 /// `join`, `keys`, `values`, …) need no entry. Returns `None` when unchanged.
 fn js_universal_member(name: &str) -> Option<&'static str> {
     Some(match name {
+        // Array / iterable
         "includes" => "contains",
+        "filter" => "where",
+        "some" => "any",
+        "flat" => "flatten",
+        // String
         "toUpperCase" => "upper",
         "toLowerCase" => "lower",
         "charCodeAt" => "codeUnitAt",
-        "filter" => "where",
+        "codePointAt" => "codeUnitAt",
+        // JS `replace(str, str)` replaces the *first* occurrence; `replaceAll`
+        // replaces every one. The VM's `replace` is replace-all and
+        // `replaceFirst` is first-only, so the mapping is crossed.
+        "replace" => "replaceFirst",
+        "replaceAll" => "replace",
+        // Number
+        "toFixed" => "toStringAsFixed",
+        // Map
+        "containsKey" => "has",
+        "containsValue" => "hasValue",
+        "delete" => "remove",
+        "set" => "setKey",
         _ => return None,
     })
 }
 
 /// Runtime prelude prepended to every JS program — the js2elpian counterpart
-/// of the Dart emitter's PRELUDE. The `__List_*` functions implement the
-/// higher-order list methods in the language itself: the VM's indexer binds a
-/// `list.map` / `.where` / `.forEach` / `.fold` / `.any` / `.every` /
-/// `.reduce` member read to the matching helper with the receiver as `this`
-/// (see `elpian-vm/src/sdk/type_methods.rs`, `Dispatch::Prelude`). Without
-/// these, calling `.map` in a JS guest hits "data is not runnable".
-/// The callback also receives the element index, matching JS conventions.
-const JS_LIST_PRELUDE: &str = concat!(
+/// of the Dart emitter's PRELUDE. Three groups of helpers, all written in the
+/// supported JS subset and lowered through the same pipeline:
+///
+/// * **operator helpers** the parser lowers to (bitwise/shift with JS's 32-bit
+///   semantics, `typeof`/`void`/`delete`, optional-chaining short-circuits);
+/// * **`__List_*` / `__Map_*` higher-order methods** — the VM's member dispatch
+///   binds a `list.map` / `.find` / `.sort` / `map.forEach` read to the matching
+///   helper with the receiver as `this` (see `type_methods.rs`,
+///   `Dispatch::Prelude`), so the callback runs as guest bytecode. Callbacks get
+///   `(element, index)` for lists and `(value, key)` for maps, matching JS.
+const JS_PRELUDE: &str = concat!(
+    // ---- bitwise / shift operators (JS ToInt32/ToUint32 semantics) ----------
+    "function __band(a, b){ return bitAnd(toInt32(a), toInt32(b)); }\n",
+    "function __bor(a, b){ return bitOr(toInt32(a), toInt32(b)); }\n",
+    "function __bxor(a, b){ return bitXor(toInt32(a), toInt32(b)); }\n",
+    "function __bnot(a){ return bitNot(toInt32(a)); }\n",
+    "function __shl(a, b){ return toInt32(shl(toInt32(a), __band(b, 31))); }\n",
+    "function __shr(a, b){ return shr(toInt32(a), __band(b, 31)); }\n",
+    "function __ushr(a, b){ return ushr(toUint32(a), __band(b, 31)); }\n",
+    // ---- typeof / void / delete ---------------------------------------------
+    "function __typeof(x){ if (x == null) { return \"undefined\"; } if (__isType(x, \"bool\")) { return \"boolean\"; } if (__isType(x, \"number\")) { return \"number\"; } if (__isType(x, \"string\")) { return \"string\"; } if (__isType(x, \"function\")) { return \"function\"; } return \"object\"; }\n",
+    "function __void(x){ return null; }\n",
+    "function __delete(o, k){ delKey(o, k); return true; }\n",
+    // ---- optional chaining ---------------------------------------------------
+    "function __optGet(o, k){ if (o == null) { return null; } return o[k]; }\n",
+    "function __optCall(o, m, a){ if (o == null) { return null; } return o[m](...a); }\n",
+    "function __optCallFn(f, a){ if (f == null) { return null; } return f(...a); }\n",
+    // ---- higher-order list methods (callback gets (element, index)) ---------
     "function __List_map(f){ var out = []; var i = 0; while (i < this.length) { out.push(f(this[i], i)); i = i + 1; } return out; }\n",
     "function __List_where(f){ var out = []; var i = 0; while (i < this.length) { if (f(this[i], i)) { out.push(this[i]); } i = i + 1; } return out; }\n",
     "function __List_forEach(f){ var i = 0; while (i < this.length) { f(this[i], i); i = i + 1; } return null; }\n",
     "function __List_fold(init, f){ var acc = init; var i = 0; while (i < this.length) { acc = f(acc, this[i]); i = i + 1; } return acc; }\n",
     "function __List_any(f){ var i = 0; while (i < this.length) { if (f(this[i], i)) { return true; } i = i + 1; } return false; }\n",
     "function __List_every(f){ var i = 0; while (i < this.length) { if (!f(this[i], i)) { return false; } i = i + 1; } return true; }\n",
-    "function __List_reduce(f){ var acc = this[0]; var i = 1; while (i < this.length) { acc = f(acc, this[i]); i = i + 1; } return acc; }\n",
+    // JS reduce: an explicit initial value starts at index 0; without one the
+    // seed is this[0] and iteration starts at index 1.
+    "function __List_reduce(f, init){ var acc; var i; if (init == null) { acc = this[0]; i = 1; } else { acc = init; i = 0; } while (i < this.length) { acc = f(acc, this[i], i); i = i + 1; } return acc; }\n",
+    "function __List_reduceRight(f, init){ var acc; var i; if (init == null) { acc = this[this.length - 1]; i = this.length - 2; } else { acc = init; i = this.length - 1; } while (i >= 0) { acc = f(acc, this[i], i); i = i - 1; } return acc; }\n",
+    "function __List_find(f){ var i = 0; while (i < this.length) { if (f(this[i], i)) { return this[i]; } i = i + 1; } return null; }\n",
+    "function __List_findIndex(f){ var i = 0; while (i < this.length) { if (f(this[i], i)) { return i; } i = i + 1; } return -1; }\n",
+    "function __List_findLast(f){ var i = this.length - 1; while (i >= 0) { if (f(this[i], i)) { return this[i]; } i = i - 1; } return null; }\n",
+    "function __List_findLastIndex(f){ var i = this.length - 1; while (i >= 0) { if (f(this[i], i)) { return i; } i = i - 1; } return -1; }\n",
+    "function __List_flatMap(f){ var out = []; var i = 0; while (i < this.length) { var r = f(this[i], i); if (__isType(r, \"list\")) { var j = 0; while (j < r.length) { out.push(r[j]); j = j + 1; } } else { out.push(r); } i = i + 1; } return out; }\n",
+    "function __List_takeWhile(f){ var out = []; var i = 0; while (i < this.length) { if (!f(this[i], i)) { return out; } out.push(this[i]); i = i + 1; } return out; }\n",
+    "function __List_skipWhile(f){ var i = 0; while (i < this.length) { if (!f(this[i], i)) { break; } i = i + 1; } var out = []; while (i < this.length) { out.push(this[i]); i = i + 1; } return out; }\n",
+    "function __List_removeWhere(f){ var i = 0; while (i < this.length) { if (f(this[i], i)) { splice(this, i, 1); } else { i = i + 1; } } return null; }\n",
+    // Insertion sort with an optional comparator (JS/Dart `(a,b)=>number`);
+    // without one, delegate to the native lexicographic/numeric sort.
+    "function __List_sort(cmp){ if (cmp == null) { sort(this); return this; } var i = 1; while (i < this.length) { var x = this[i]; var j = i - 1; while (j >= 0 && cmp(this[j], x) > 0) { this[j + 1] = this[j]; j = j - 1; } this[j + 1] = x; i = i + 1; } return this; }\n",
+    // ---- higher-order map methods (callback gets (value, key), JS Map order) -
+    "function __Map_forEach(f){ var ks = keys(this); var i = 0; while (i < ks.length) { f(this[ks[i]], ks[i]); i = i + 1; } return null; }\n",
+    "function __Map_removeWhere(f){ var ks = keys(this); var i = 0; while (i < ks.length) { if (f(this[ks[i]], ks[i])) { delKey(this, ks[i]); } i = i + 1; } return null; }\n",
+    // ---- misc globals --------------------------------------------------------
+    "function __identity(x){ return x; }\n",
+    // `parseInt` / `parseFloat` — lenient numeric parses that yield null (JS
+    // `NaN`) on failure rather than throwing.
+    "function parseFloat(s){ return tryNum(s); }\n",
+    "function parseInt(s){ var n = tryNum(s); if (n == null) { return null; } return floor(n); }\n",
 );
 
 /// Scan the token stream for class method declarations — an identifier at
@@ -655,7 +777,19 @@ impl JsParser {
             return self.parse_for();
         }
         if self.at_ident("switch") {
-            return vec![self.parse_switch()];
+            return self.parse_switch();
+        }
+        if self.at_ident("do") {
+            return vec![self.parse_do_while()];
+        }
+        if self.at_ident("try") {
+            return self.parse_try();
+        }
+        if self.at_ident("throw") {
+            self.advance();
+            let val = self.parse_expr();
+            self.eat_punct(";");
+            return vec![json!({ "type": "throwOperation", "data": { "value": val } })];
         }
         if self.at_ident("return") {
             self.advance();
@@ -988,11 +1122,93 @@ impl JsParser {
         json!({ "type": "loopStmt", "data": { "condition": cond, "body": body } })
     }
 
+    /// `do body while (cond);` — the body runs at least once. Desugared to a
+    /// `loopStmt` whose guard is `first || cond`: the first iteration is
+    /// unconditional (and clears `first`), so a `continue` correctly re-tests the
+    /// condition at the loop head.
+    fn parse_do_while(&mut self) -> Value {
+        self.expect_ident("do");
+        let mut body = self.parse_block_or_single();
+        self.expect_ident("while");
+        self.expect_punct("(");
+        let cond = self.parse_expr();
+        self.expect_punct(")");
+        self.eat_punct(";");
+        self.anon_counter += 1;
+        let first = format!("__do_first_{}", self.anon_counter);
+        let guard = js_logical("||", js_ident(&first), cond);
+        let mut loop_body: Vec<Value> = vec![
+            js_assign(js_ident(&first), json!({ "type": "bool", "data": { "value": false } })).unwrap(),
+        ];
+        loop_body.append(&mut body);
+        // Emit the `first` declaration then the loop, wrapped so the pair reads
+        // as one statement via a bare block (inlined by the VM's flat scope).
+        json!({ "type": "ifStmt", "data": {
+            "condition": json!({ "type": "bool", "data": { "value": true } }),
+            "body": [
+                js_def(&first, json!({ "type": "bool", "data": { "value": true } })),
+                json!({ "type": "loopStmt", "data": { "condition": guard, "body": loop_body } }),
+            ]
+        } })
+    }
+
+    /// `try { … } catch (e) { … } finally { … }`. Try/catch lowers to the VM's
+    /// native `tryStmt`; `finally` is desugared by wrapping so its cleanup runs on
+    /// both the normal and the exceptional path (including a re-throwing catch).
+    fn parse_try(&mut self) -> Vec<Value> {
+        self.expect_ident("try");
+        let body = self.parse_block();
+        let mut err_name = "__e".to_string();
+        let mut catch_body: Option<Vec<Value>> = None;
+        if self.eat_ident("catch") {
+            if self.eat_punct("(") {
+                if !self.at_punct(")") {
+                    err_name = self.expect_ident_name();
+                }
+                self.expect_punct(")");
+            }
+            catch_body = Some(self.parse_block());
+        }
+        let finally_body = if self.eat_ident("finally") {
+            Some(self.parse_block())
+        } else {
+            None
+        };
+
+        // The inner try/catch (or the bare body when there is no catch clause).
+        let inner: Vec<Value> = match catch_body {
+            Some(cb) => vec![json!({ "type": "tryStmt", "data": {
+                "errName": err_name, "body": body, "catchBody": cb } })],
+            None => body,
+        };
+
+        match finally_body {
+            None => inner,
+            Some(fin) => {
+                // Wrap: a catch around `inner` runs the cleanup and re-throws, and
+                // the cleanup also runs after normal completion.
+                self.anon_counter += 1;
+                let fe = format!("__fe_{}", self.anon_counter);
+                let mut catch_fin = fin.clone();
+                catch_fin.push(json!({ "type": "throwOperation", "data": { "value": js_ident(&fe) } }));
+                let mut out = vec![json!({ "type": "tryStmt", "data": {
+                    "errName": fe, "body": inner, "catchBody": catch_fin } })];
+                out.extend(fin);
+                out
+            }
+        }
+    }
+
     /// Desugar `for (init; cond; update) body` into the init statement(s)
     /// followed by a `loopStmt` whose body ends with the update step.
     fn parse_for(&mut self) -> Vec<Value> {
         self.expect_ident("for");
         self.expect_punct("(");
+        // A `for-of` / `for-in` header has an `of` / `in` keyword at the top
+        // level and no `;`.
+        if let Some(kind) = self.for_header_kind() {
+            return self.parse_for_of_in(kind);
+        }
         let mut out: Vec<Value> = vec![];
         if !self.at_punct(";") {
             out.extend(self.parse_simple());
@@ -1051,6 +1267,78 @@ impl JsParser {
         out
     }
 
+    /// With the cursor just past `for (`, report whether this is a `for-of`
+    /// (`Some("of")`) or `for-in` (`Some("in")`) header — an `of`/`in` keyword
+    /// at paren depth 0 with no intervening top-level `;` — or `None` for the
+    /// C-style form.
+    fn for_header_kind(&self) -> Option<&'static str> {
+        let mut i = self.pos;
+        let mut depth = 0i32;
+        loop {
+            match &self.toks[i] {
+                JsTok::Punct(p) if p == "(" || p == "[" || p == "{" => depth += 1,
+                JsTok::Punct(p) if p == ")" || p == "]" || p == "}" => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    depth -= 1;
+                }
+                JsTok::Punct(p) if p == ";" && depth == 0 => return None,
+                JsTok::Ident(k) if depth == 0 && k == "of" => return Some("of"),
+                JsTok::Ident(k) if depth == 0 && k == "in" => return Some("in"),
+                JsTok::Eof => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    /// Parse and desugar `for (x of iterable)` / `for (x in obj)` (the `(` is
+    /// already consumed). `for-of` walks an iterable's elements by index;
+    /// `for-in` walks an object's keys. Both re-declare the loop variable each
+    /// iteration (per-iteration binding), matching `let`-scoped JS loops.
+    fn parse_for_of_in(&mut self, kind: &str) -> Vec<Value> {
+        // Optional `let` / `const` / `var`.
+        if self.at_ident("let") || self.at_ident("const") || self.at_ident("var") {
+            self.advance();
+        }
+        let name = self.expect_ident_name();
+        self.advance(); // `of` / `in`
+        let iter = self.parse_expr();
+        self.expect_punct(")");
+        let body = self.parse_block_or_single();
+
+        self.anon_counter += 1;
+        let seq = self.anon_counter;
+        let src = format!("__iter_src_{seq}");
+        let idx = format!("__iter_i_{seq}");
+        // for-in walks the source's keys; for-of walks the source itself.
+        let src_init = if kind == "in" {
+            json!({ "type": "functionCall", "data": { "callee": js_ident("keys"), "args": [iter] } })
+        } else {
+            iter
+        };
+        let elem = json!({ "type": "indexer", "data": {
+            "target": js_ident(&src), "index": js_ident(&idx) } });
+        // Bind the element, then advance the index *before* the body — so a
+        // `continue` (which jumps to the loop head) still makes progress.
+        let mut loop_body: Vec<Value> = vec![
+            js_def(&name, elem),
+            js_assign(js_ident(&idx), js_arith("+", js_ident(&idx), js_int(1))).unwrap(),
+        ];
+        loop_body.extend(body);
+        let cond = js_arith(
+            "<",
+            js_ident(&idx),
+            json!({ "type": "indexer", "data": { "target": js_ident(&src), "index": js_string("length") } }),
+        );
+        vec![
+            js_def(&src, src_init),
+            js_def(&idx, js_int(0)),
+            json!({ "type": "loopStmt", "data": { "condition": cond, "body": loop_body } }),
+        ]
+    }
+
     /// Whether a (already-lowered) statement list contains a `continue` that
     /// targets *this* loop — i.e. one not nested inside another loop (which owns
     /// its own `continue`) or a function body.
@@ -1087,13 +1375,20 @@ impl JsParser {
         }
     }
 
-    fn parse_switch(&mut self) -> Value {
+    /// Parse a `switch`. With no `default` clause it lowers to the VM's native
+    /// `switchStmt` (matched case runs, then the switch exits). A `default`
+    /// clause has no native opcode, so the whole switch is instead desugared to
+    /// an `if / else if / … / else` chain over the switch value (evaluated once
+    /// into a temp), with the default as the final `else` — no fall-through,
+    /// matching Dart and the common `break`-terminated JS style.
+    fn parse_switch(&mut self) -> Vec<Value> {
         self.expect_ident("switch");
         self.expect_punct("(");
         let val = self.parse_expr();
         self.expect_punct(")");
         self.expect_punct("{");
         let mut cases: Vec<Value> = vec![];
+        let mut default_body: Option<Vec<Value>> = None;
         while !self.at_punct("}") && !self.at_eof() {
             if self.eat_ident("case") {
                 let cv = self.parse_expr();
@@ -1101,15 +1396,58 @@ impl JsParser {
                 let body = self.parse_case_body();
                 cases.push(json!({ "value": cv, "body": { "body": body } }));
             } else if self.eat_ident("default") {
-                // No default opcode in the bytecode; parse and drop it.
                 self.expect_punct(":");
-                let _ = self.parse_case_body();
+                default_body = Some(Self::strip_trailing_break(self.parse_case_body()));
             } else {
                 break;
             }
         }
         self.expect_punct("}");
-        json!({ "type": "switchStmt", "data": { "value": val, "cases": cases } })
+
+        if default_body.is_none() {
+            return vec![json!({ "type": "switchStmt", "data": { "value": val, "cases": cases } })];
+        }
+
+        // Desugar to a temp + if/else-if chain.
+        self.anon_counter += 1;
+        let temp = format!("__sw_{}", self.anon_counter);
+        let mut out = vec![js_def(&temp, val)];
+        // Build the chain from the last arm up.
+        let mut else_branch: Option<Value> = default_body.map(|b| json!({ "data": { "body": b } }));
+        let mut chain: Option<Value> = None;
+        for case in cases.into_iter().rev() {
+            let cv = case["value"].clone();
+            let body = Self::strip_trailing_break(
+                case["body"]["body"].as_array().cloned().unwrap_or_default(),
+            );
+            let mut data = json!({
+                "condition": js_arith("==", js_ident(&temp), cv),
+                "body": body,
+            });
+            if let Some(next) = chain.take() {
+                data["elseifStmt"] = next;
+            } else if let Some(e) = else_branch.take() {
+                data["elseStmt"] = e;
+            }
+            chain = Some(json!({ "type": "ifStmt", "data": data }));
+        }
+        if let Some(c) = chain {
+            out.push(c);
+        } else if let Some(e) = else_branch {
+            // Only a default clause: run it unconditionally.
+            if let Some(b) = e["data"]["body"].as_array() {
+                out.extend(b.iter().cloned());
+            }
+        }
+        out
+    }
+    /// Drop a single trailing `break` statement (which merely terminates a case)
+    /// from a desugared case body.
+    fn strip_trailing_break(mut body: Vec<Value>) -> Vec<Value> {
+        if body.last().map(|s| s["type"] == "breakStmt").unwrap_or(false) {
+            body.pop();
+        }
+        body
     }
     fn parse_case_body(&mut self) -> Vec<Value> {
         let mut body: Vec<Value> = vec![];
@@ -1185,12 +1523,35 @@ impl JsParser {
             let rhs = self.parse_expr();
             return js_assign(target, rhs).into_iter().collect();
         }
-        for (pp, op) in [("+=", "+"), ("-=", "-"), ("*=", "*"), ("/=", "/"), ("%=", "%")] {
+        // Arithmetic compound assignment (native arithmetic operators).
+        for (pp, op) in [("+=", "+"), ("-=", "-"), ("*=", "*"), ("/=", "/"), ("%=", "%"), ("**=", "^")] {
             if self.eat_punct(pp) {
                 let rhs = self.parse_expr();
                 return js_assign(target.clone(), js_arith(op, target, rhs))
                     .into_iter()
                     .collect();
+            }
+        }
+        // Bitwise / shift compound assignment (prelude-helper operators).
+        for (pp, helper) in [
+            ("&=", "__band"), ("|=", "__bor"), ("^=", "__bxor"),
+            ("<<=", "__shl"), (">>=", "__shr"), (">>>=", "__ushr"),
+        ] {
+            if self.eat_punct(pp) {
+                let rhs = self.parse_expr();
+                let combined = json!({ "type": "functionCall", "data": {
+                    "callee": js_ident(helper), "args": [target.clone(), rhs] } });
+                return js_assign(target, combined).into_iter().collect();
+            }
+        }
+        // Logical compound assignment: `x &&= y`, `x ||= y`, `x ??= y` — assign
+        // only when the short-circuit says to (so `y`'s side effects are
+        // conditional), matching JS.
+        for (pp, op) in [("&&=", "&&"), ("||=", "||"), ("??=", "??")] {
+            if self.eat_punct(pp) {
+                let rhs = self.parse_expr();
+                let combined = js_logical(op, target.clone(), rhs);
+                return js_assign(target, combined).into_iter().collect();
             }
         }
         // A bare expression carries meaning to the bytecode when it can have a
@@ -1257,28 +1618,59 @@ impl JsParser {
         left
     }
 
-    /// Map a punctuator to `(precedence, elpian operator, right-associative)`.
-    fn binop(p: &str) -> Option<(u8, &'static str, bool)> {
-        match p {
-            "**" => Some((7, "^", true)),
-            "*" => Some((6, "*", false)),
-            "/" => Some((6, "/", false)),
-            "%" => Some((6, "%", false)),
-            "+" => Some((5, "+", false)),
-            "-" => Some((5, "-", false)),
-            "<" => Some((4, "<", false)),
-            "<=" => Some((4, "<=", false)),
-            ">" => Some((4, ">", false)),
-            ">=" => Some((4, ">=", false)),
-            "==" | "===" => Some((3, "==", false)),
-            "!=" | "!==" => Some((3, "!=", false)),
-            _ => None,
-        }
+    /// Map a punctuator to `(precedence, operator kind, right-associative)`.
+    /// Precedences follow JavaScript's binary tower (loosest first): bitwise
+    /// `|`^`&`, equality, relational, shift, additive, multiplicative, `**`.
+    /// `&&`/`||`/`??` sit above this (handled by their own parse levels), which
+    /// all call `parse_binary(0)`.
+    fn binop(p: &str) -> Option<(u8, JsBinOp, bool)> {
+        use JsBinOp::*;
+        Some(match p {
+            "|" => (1, Call("__bor"), false),
+            "^" => (2, Call("__bxor"), false),
+            "&" => (3, Call("__band"), false),
+            "==" | "===" => (4, Arith("=="), false),
+            "!=" | "!==" => (4, Arith("!="), false),
+            "<" => (5, Arith("<"), false),
+            "<=" => (5, Arith("<="), false),
+            ">" => (5, Arith(">"), false),
+            ">=" => (5, Arith(">="), false),
+            "<<" => (6, Call("__shl"), false),
+            ">>" => (6, Call("__shr"), false),
+            ">>>" => (6, Call("__ushr"), false),
+            "+" => (7, Arith("+"), false),
+            "-" => (7, Arith("-"), false),
+            "*" => (8, Arith("*"), false),
+            "/" => (8, Arith("/"), false),
+            "%" => (8, Arith("%"), false),
+            "**" => (9, Arith("^"), true),
+            _ => return None,
+        })
     }
 
     fn parse_binary(&mut self, min_prec: u8) -> Value {
         let mut left = self.parse_unary();
         loop {
+            // `instanceof` and `in` are relational-precedence keyword operators.
+            if let JsTok::Ident(kw) = self.peek() {
+                let kw = kw.clone();
+                if (kw == "instanceof" || kw == "in") && min_prec <= 5 {
+                    self.advance();
+                    let right = self.parse_binary(6);
+                    left = if kw == "instanceof" {
+                        // `x instanceof C` walks the prototype chain — exactly the
+                        // reified class type-test, with the constructor's name.
+                        let cname = right["data"]["name"].as_str().unwrap_or("").to_string();
+                        json!({ "type": "typeTest", "data": {
+                            "value": left, "typeName": cname, "cast": false } })
+                    } else {
+                        // `k in obj` — key membership.
+                        json!({ "type": "functionCall", "data": {
+                            "callee": js_ident("has"), "args": [right, left] } })
+                    };
+                    continue;
+                }
+            }
             let op_punct = match self.peek() {
                 JsTok::Punct(p) => p.clone(),
                 _ => break,
@@ -1293,7 +1685,11 @@ impl JsParser {
             self.advance();
             let next_min = if right_assoc { prec } else { prec + 1 };
             let right = self.parse_binary(next_min);
-            left = js_arith(op, left, right);
+            left = match op {
+                JsBinOp::Arith(o) => js_arith(o, left, right),
+                JsBinOp::Call(fname) => json!({ "type": "functionCall", "data": {
+                    "callee": js_ident(fname), "args": [left, right] } }),
+            };
         }
         left
     }
@@ -1319,8 +1715,42 @@ impl JsParser {
             return js_negate(v);
         }
         if self.at_punct("+") {
+            // Unary plus coerces to a number.
             self.advance();
-            return self.parse_unary();
+            let v = self.parse_unary();
+            return json!({ "type": "functionCall", "data": { "callee": js_ident("num"), "args": [v] } });
+        }
+        if self.at_punct("~") {
+            // Bitwise NOT — the 32-bit complement, via the prelude helper.
+            self.advance();
+            let v = self.parse_unary();
+            return json!({ "type": "functionCall", "data": { "callee": js_ident("__bnot"), "args": [v] } });
+        }
+        // Prefix keyword operators (`typeof`, `void`, `delete`) — identifiers in
+        // our tokenizer.
+        if self.at_ident("typeof") {
+            self.advance();
+            let v = self.parse_unary();
+            return json!({ "type": "functionCall", "data": { "callee": js_ident("__typeof"), "args": [v] } });
+        }
+        if self.at_ident("void") {
+            self.advance();
+            let v = self.parse_unary();
+            // Evaluate the operand (for side effects), then yield null.
+            return json!({ "type": "functionCall", "data": { "callee": js_ident("__void"), "args": [v] } });
+        }
+        if self.at_ident("delete") {
+            self.advance();
+            let v = self.parse_unary();
+            // `delete a.b` / `delete a[k]` removes the member; anything else is a
+            // no-op that yields true (JS's non-reference delete).
+            if v["type"] == "indexer" {
+                let base = v["data"]["target"].clone();
+                let key = v["data"]["index"].clone();
+                return json!({ "type": "functionCall", "data": {
+                    "callee": js_ident("__delete"), "args": [base, key] } });
+            }
+            return json!({ "type": "bool", "data": { "value": true } });
         }
         self.parse_postfix()
     }
@@ -1328,8 +1758,57 @@ impl JsParser {
     fn parse_postfix(&mut self) -> Value {
         let mut e = self.parse_primary();
         loop {
+            // Optional chaining `?.` — `a?.b`, `a?.[i]`, `a?.b(args)`, `f?.(args)`.
+            // Each short-circuits to null when the base is null, evaluated once.
+            if self.at_punct("?.") {
+                self.advance();
+                if self.at_punct("(") {
+                    // Optional function call `f?.(args)`.
+                    let args = self.parse_args();
+                    e = json!({ "type": "functionCall", "data": {
+                        "callee": js_ident("__optCallFn"),
+                        "args": [e, json!({ "type": "array", "data": { "value": args } })] } });
+                } else if self.at_punct("[") {
+                    self.advance();
+                    let idx = self.parse_expr();
+                    self.expect_punct("]");
+                    e = json!({ "type": "functionCall", "data": {
+                        "callee": js_ident("__optGet"), "args": [e, idx] } });
+                } else {
+                    let name = self.expect_ident_name();
+                    let resolved = self.resolve_member(&name);
+                    if self.at_punct("(") {
+                        // Optional method call `a?.b(args)` — guards the call too.
+                        let args = self.parse_args();
+                        e = json!({ "type": "functionCall", "data": {
+                            "callee": js_ident("__optCall"),
+                            "args": [e, js_string(&resolved),
+                                json!({ "type": "array", "data": { "value": args } })] } });
+                    } else {
+                        e = json!({ "type": "functionCall", "data": {
+                            "callee": js_ident("__optGet"), "args": [e, js_string(&resolved)] } });
+                    }
+                }
+                continue;
+            }
             if self.eat_punct(".") {
                 let name = self.expect_ident_name();
+                // Static namespaces (`Math.floor`, `JSON.parse`, `Object.keys`,
+                // `console.log`, …) are resolved to universal builtins /
+                // intrinsics at compile time, unless a user class of that name
+                // owns statics (then it is an ordinary static read below).
+                if e["type"] == "identifier"
+                    && !self.class_statics.contains(e["data"]["name"].as_str().unwrap_or(""))
+                {
+                    if let Some(ns) = e["data"]["name"].as_str() {
+                        if is_js_namespace(ns) {
+                            if let Some(rewritten) = self.resolve_namespace(ns, &name) {
+                                e = rewritten;
+                                continue;
+                            }
+                        }
+                    }
+                }
                 // `super.m` — resolve `m` on the parent prototype and bind it to the
                 // current `this`, so `super.m(args)` dispatches to the overridden
                 // base method with the right receiver.
@@ -1380,6 +1859,86 @@ impl JsParser {
             }
         }
         e
+    }
+
+    /// Resolve a static-namespace member (`Math.floor`, `JSON.stringify`,
+    /// `console.log`, …) to the universal builtin / intrinsic it maps to. Members
+    /// that are plain builtins return a bare identifier (so a following call
+    /// applies normally); constants return a builtin call; the few that need
+    /// argument shaping (`console.log`, `Array.isArray`, `Array.of`) consume the
+    /// argument list here. Returns `None` for an unknown member (left as an
+    /// ordinary field read).
+    fn resolve_namespace(&mut self, ns: &str, member: &str) -> Option<Value> {
+        // A member that is exactly a universal builtin of another name.
+        let as_builtin = |b: &str| Some(js_ident(b));
+        // A numeric constant read (`Math.PI`), realised as a builtin call.
+        let as_const = |b: &str| Some(json!({ "type": "functionCall", "data": {
+            "callee": js_ident(b), "args": [] } }));
+        match ns {
+            "Math" => match member {
+                "PI" => as_const("PI"),
+                "E" => as_const("E"),
+                "floor" | "ceil" | "round" | "trunc" | "abs" | "sqrt" | "cbrt" | "sign" | "exp"
+                | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh"
+                | "tanh" | "pow" | "log" | "log2" | "log10" | "min" | "max" | "hypot"
+                | "random" => as_builtin(member),
+                _ => None,
+            },
+            "JSON" => match member {
+                "stringify" => as_builtin("jsonStringify"),
+                "parse" => as_builtin("jsonParse"),
+                _ => None,
+            },
+            "Object" => match member {
+                "keys" => as_builtin("keys"),
+                "values" => as_builtin("values"),
+                "entries" => as_builtin("entries"),
+                "assign" | "merge" => as_builtin("merge"),
+                "freeze" | "from" => as_builtin("__identity"),
+                _ => None,
+            },
+            "Number" => match member {
+                "parseInt" => as_builtin("int"),
+                "parseFloat" => as_builtin("num"),
+                "isNaN" => as_builtin("isNaN"),
+                "isFinite" | "isInteger" => as_builtin("isFinite"),
+                _ => None,
+            },
+            "console" => {
+                // `console.log(a, b, …)` / warn / error / info → a host log call
+                // over the whole argument list.
+                if matches!(member, "log" | "warn" | "error" | "info" | "debug") {
+                    let args = if self.at_punct("(") { self.parse_args() } else { vec![] };
+                    return Some(json!({ "type": "functionCall", "data": {
+                        "callee": js_ident("askHost"),
+                        "args": [js_string("log"), json!({ "type": "array", "data": { "value": args } })] } }));
+                }
+                None
+            }
+            "Array" => match member {
+                "isArray" => {
+                    // `Array.isArray(x)` → the reified list type test.
+                    if self.at_punct("(") {
+                        let args = self.parse_args();
+                        let x = args.into_iter().next().unwrap_or_else(js_null);
+                        return Some(json!({ "type": "typeTest", "data": {
+                            "value": x, "typeName": "list", "cast": false } }));
+                    }
+                    None
+                }
+                "of" => {
+                    // `Array.of(a, b, …)` → a list literal.
+                    if self.at_punct("(") {
+                        let args = self.parse_args();
+                        return Some(json!({ "type": "array", "data": { "value": args } }));
+                    }
+                    None
+                }
+                "from" => as_builtin("__identity"),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Recognise the `__isType` / `__asType` intrinsics and lower them to a
@@ -1725,8 +2284,12 @@ impl JsParser {
 /// syntax error in the supported subset; use [`try_parse_js`] for a fallible
 /// variant.
 pub fn parse_js(src: &str) -> serde_json::Value {
-    let full = format!("{JS_LIST_PRELUDE}\n{src}");
-    JsParser::new(tokenize_js(&full)).parse_program()
+    let full = format!("{JS_PRELUDE}\n{src}");
+    let mut program = JsParser::new(tokenize_js(&full)).parse_program();
+    // Recover JavaScript's by-reference closure capture: box locals that a
+    // nested closure captures and mutates into one-element arrays.
+    transforms::box_captured_program(&mut program);
+    program
 }
 
 /// Parse JavaScript source into Elpian AST JSON, returning an error instead of

@@ -33,16 +33,29 @@ targets the Dart VM cannot serve dynamically.
     truthiness rule; a front-end whose language coerces differently wraps the
     condition (e.g. the `bool` builtin) at compile time, and a bounds-strict
     language can lower indexed stores to the checking `setAt` builtin instead
-    of the VM's auto-growing list store.
+    of the VM's auto-growing list store;
+  - **exceptions** are a neutral VM opcode: `throw` raises any value, `try` /
+    `catch` catches it (unwinding across call frames), and a native builtin
+    error surfaces as a catchable `{ name, message }`. Each front-end maps its
+    own syntax onto it — JS `try`/`catch`/`finally`, Dart `try`/`on`/`catch`/
+    `finally` + `rethrow`;
+  - **bitwise & shift** operators have no VM opcode: they lower to universal
+    integer builtins (`bitAnd`/`shl`/`ushr`/…), so a front-end layers its own
+    width semantics (js2elpian composes JS's 32-bit `ToInt32`/`ToUint32`) at
+    compile time.
 
   Standard-library **API names are universal**: the VM exposes one flat, neutral
-  stdlib surface (`push`, `upper`, `has`, `reversed`, `length`, …), and each
-  front-end resolves *its* language's spelling (`List.add`, `toUpperCase`,
-  `Array.push`, `includes`, …) onto that universal name **at compile time**. The
-  VM carries no Dart- or JS-specific method names and does no name translation
-  (no proxying) at runtime — so a new front-end for any language can target the
-  same AST/bytecode with full coverage and zero conflicts with the existing
-  compilers.
+  stdlib surface (`push`, `upper`, `has`, `reversed`, `length`, `splice`, `at`,
+  `find`, `sort`, `intDiv`, `random`, …), and each front-end resolves *its*
+  language's spelling (`List.add`, `toUpperCase`, `Array.push`, `includes`,
+  `firstWhere`, …) onto that universal name **at compile time**. The VM carries
+  no Dart- or JS-specific method names and does no name translation (no proxying)
+  at runtime. Both front-ends are matured to broad coverage of their language —
+  the full operator tower, control flow (`switch`/`do-while`/`for-of`/`for-in`),
+  exceptions, closures with by-reference capture, and the core-library
+  collection/string/number methods — so idiomatic source in either language
+  compiles to the same AST/bytecode, and a new front-end for any language can
+  target it with full coverage and zero conflicts with the existing compilers.
 - **`dart/`** — the *optional* Dart/Flutter host surface: it drives an Elpian VM
   and services the `dart:*` **foundational ("group 3") libraries** — the native
   surfaces the Flutter framework depends on (`dart:ui`, `dart:typed_data`,

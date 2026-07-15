@@ -16,25 +16,33 @@
 //!   (`ClassName(args)`), member access, and `this`. Bare field/method
 //!   references inside methods resolve to `this.member` (including inherited
 //!   members), so idiomatic Dart lowers to valid JS classes;
-//! * `if`/`else`, `while`, C-style `for` and **`for-in`** (both lowered to
-//!   `while`), `return`, blocks;
+//! * **control flow**: `if`/`else`, `while`, `do`/`while`, C-style `for` and
+//!   **`for-in`** (lowered to `while`), `switch`/`case`/`default` (with the
+//!   `default` arm), `break`/`continue`, `return`, and blocks;
+//! * **exceptions**: `throw` / `rethrow` and `try` / `on T` / `catch (e[, st])`
+//!   / `finally`, lowered to the VM's neutral try-catch opcode (the `on Type`
+//!   filter and stack-trace binding are erased; a native builtin error is a
+//!   catchable `{ name, message }`);
 //! * expressions: literals (incl. **hex integers** `0xFF2196F3` for colours),
 //!   identifiers, calls, list literals, indexing,
-//!   assignment + compound assignment (`+= -= *= /=`), `++`/`--`, ternary
-//!   `?:`, `|| && == != < <= > >= + - * / % ~/`, unary `! -`;
+//!   assignment + compound assignment (`+= -= *= /= %= &= |= ^= <<= >>= >>>=`
+//!   and `??=`), `++`/`--`, ternary `?:`, the full binary tower
+//!   `?? || && | ^ & == != < <= > >= << >> >>> + - * / % ~/`, unary `! - ~`,
+//!   the null-assertion `x!` (erased), null-aware `obj?.member`, and **cascades**
+//!   `target..a()..b = c`;
 //! * string interpolation (`"$x"`, `"${expr}"`) lowered to concatenation;
-//! * `print(x)` lowered to `askHost("log",[x])`; `~/` lowered to the VM's
-//!   universal `intDiv` builtin (the operator itself never reaches the VM).
-//!   `main()` is auto-invoked if present.
+//! * `print(x)` lowered to `askHost("log",[x])`; `~/` and the bitwise/shift
+//!   operators lower to the VM's universal builtins (the operators themselves
+//!   never reach the VM). `main()` is auto-invoked if present.
 //!
 //! * **closures / function expressions**: `(a) => expr`, `(a) { body }`, and
 //!   arrow bodies for function/method declarations (`int f() => expr;`). These
 //!   plus the VM's higher-order Iterable methods (`map`/`where`/`fold`/`reduce`/
-//!   `any`/`every`, bound in the VM to prelude functions) run real functional
-//!   Dart. Closures capture **by reference** for mutated captured locals: a
-//!   source transform boxes such a local into a one-element list (a VM reference
-//!   type), so `forEach((e) => acc += e)` and closure counters propagate
-//!   correctly.
+//!   `any`/`every`/`firstWhere`/`expand`/`takeWhile`/`sort`/…, bound in the VM
+//!   to prelude functions) run real functional Dart. Closures capture **by
+//!   reference** for mutated captured locals — the boxing transform is applied by
+//!   the downstream JS layer (js2elpian), so `forEach((e) => acc += e)` and
+//!   closure counters propagate correctly.
 //!
 //! * **named & optional parameters** (`{this.width}`, `[int x = 0]`, `required`)
 //!   with defaults, lowered to a trailing options object; named arguments at
@@ -66,14 +74,12 @@ pub mod emitter;
 pub mod lexer;
 pub mod parser;
 pub mod token;
-pub mod transforms;
 
 use crate::token::Tok;
 use crate::ast::Item;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::emitter::Emitter;
-use crate::transforms::box_captured_program;
 
 /// Transpile Dart-subset source to the JS subset the Elpian VM ingests.
 pub fn transpile(dart: &str) -> Result<String, String> {
@@ -100,8 +106,10 @@ pub fn transpile_program(dart: &str) -> Result<(String, Vec<ClassInfo>), String>
         }
         set
     };
-    let mut items = Parser::new(toks).parse_program()?;
-    box_captured_program(&mut items);
+    let items = Parser::new(toks).parse_program()?;
+    // By-reference closure capture (boxing captured, mutated locals) is applied
+    // downstream by js2elpian on the emitted JS, so it is intentionally *not*
+    // done here — doing it in both layers would double-box.
     let classes: Vec<ClassInfo> = items
         .iter()
         .filter_map(|it| match it {
