@@ -332,7 +332,7 @@ function buildSystem() {
 
   let me = VMs.info();
   let idLine = "vm";
-  if (__isType(me, "Map")) {
+  if (__isType(me, "map")) {
     idLine = "vm " + me["id"] + " · " + me["label"] + (me["scene"] == true ? " · whole-scene" : "");
   }
 
@@ -387,12 +387,12 @@ function buildSystem() {
 
 function refreshVmCard() {
   let me = VMs.info();
-  if (!__isType(me, "Map")) {
+  if (!__isType(me, "map")) {
     return;
   }
   let mine = VMs.of(me["id"]);
   let u = mine.usage();
-  if (__isType(u, "Map")) {
+  if (__isType(u, "map")) {
     S.vmLabel.set(
       "text",
       "instructions " + u["instructions"] + "\nheap " + u["memoryBytes"] + " B (peak " + u["peakMemoryBytes"] + " B)"

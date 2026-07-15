@@ -42,9 +42,12 @@
 // The entire Dart/Flutter host surface is gated behind the `dart` feature — the
 // `--include-dart` switch. With the feature off (`--no-default-features`) the
 // crate compiles to nothing, so a VM build that does not want the Dart extras
-// pays for none of them. Language semantics themselves (numbers, `~/`, `??`,
-// reified `is`/`as`, JSON/UTF-8/Base64 codecs) are native to the VM and are
-// always available regardless of this feature.
+// pays for none of them. The VM itself carries no Dart language semantics:
+// Dart-specific surface (`~/`, `??`, `is`/`as` type names, member spellings)
+// is lowered by dart2elpian at compile time onto the VM's universal primitives
+// (the `intDiv` builtin, the neutral null-coalescing opcode, neutral type-tag
+// names, universal stdlib names), which are always available regardless of
+// this feature.
 
 #[cfg(feature = "dart")]
 pub mod async_loop;

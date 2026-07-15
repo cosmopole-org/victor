@@ -87,7 +87,7 @@ function __gdRegisterCb(cb) {
 // Run one op: immediately (one `godot.op` host call), or queue it when a
 // batch is open. Batched ops return null — read results after endBatch().
 function __gdRun(op) {
-  if (__gdBatch != null && __isType(__gdBatch, "List")) {
+  if (__gdBatch != null && __isType(__gdBatch, "list")) {
     __gdBatch.push(op);
     return null;
   }
@@ -105,10 +105,10 @@ function __gdMarshal(v) {
   // Scalars first: null is represented as 0 in the VM, so the numeric /
   // string / bool checks must run before the null check or `0` would marshal
   // as null.
-  if (__isType(v, "num")) {
+  if (__isType(v, "number")) {
     return v;
   }
-  if (__isType(v, "String")) {
+  if (__isType(v, "string")) {
     return v;
   }
   if (__isType(v, "bool")) {
@@ -201,20 +201,20 @@ function __gdMarshal(v) {
     out[v.tag] = v.data;
     return out;
   }
-  if (__isType(v, "Function")) {
+  if (__isType(v, "function")) {
     // A bare JS closure handed to any Godot API becomes a Callable bound to
     // the native SignalRelay; invocations are queued and dispatched back into
     // the VM (fire-and-forget — see the README's reentrancy note).
     return { callable: __gdRegisterCb(v) };
   }
-  if (__isType(v, "List")) {
+  if (__isType(v, "list")) {
     let out = [];
     for (let i = 0; i < v.length; i++) {
       out.push(__gdMarshal(v[i]));
     }
     return out;
   }
-  if (__isType(v, "Map")) {
+  if (__isType(v, "map")) {
     // A plain JS object becomes a Godot Dictionary (values marshal recursively).
     let out = {};
     let ks = v.keys;
@@ -242,10 +242,10 @@ function __gdMarshalList(args) {
 // value-types, {"obj": id, "class": c} becomes a GObj proxy, containers
 // convert recursively, scalars pass through.
 function __gdUnmarshal(v) {
-  if (__isType(v, "num")) {
+  if (__isType(v, "number")) {
     return v;
   }
-  if (__isType(v, "String")) {
+  if (__isType(v, "string")) {
     return v;
   }
   if (__isType(v, "bool")) {
@@ -254,14 +254,14 @@ function __gdUnmarshal(v) {
   if (v == null) {
     return null;
   }
-  if (__isType(v, "List")) {
+  if (__isType(v, "list")) {
     let out = [];
     for (let i = 0; i < v.length; i++) {
       out.push(__gdUnmarshal(v[i]));
     }
     return out;
   }
-  if (__isType(v, "Map")) {
+  if (__isType(v, "map")) {
     if (v["__dart_error__"] != null) {
       return v; // the bridge-wide failure shape; check GD.isError(r)
     }
@@ -443,7 +443,7 @@ class GD {
   // Whether a bridge reply is the protocol's failure shape (JS has no
   // exceptions in the subset, so failed ops surface as this map).
   static isError(r) {
-    if (__isType(r, "Map")) {
+    if (__isType(r, "map")) {
       return r["__dart_error__"] != null;
     }
     return false;
@@ -817,9 +817,9 @@ class Color {
   }
   // From a 0xAARRGGBB int (Flutter-style), e.g. Color.hex(0xFF2196F3 as dec).
   static hex(argb) {
-    let aa = ((argb ~/ 16777216) % 256) / 255.0;
-    let rr = ((argb ~/ 65536) % 256) / 255.0;
-    let gg = ((argb ~/ 256) % 256) / 255.0;
+    let aa = (intDiv(argb, 16777216) % 256) / 255.0;
+    let rr = (intDiv(argb, 65536) % 256) / 255.0;
+    let gg = (intDiv(argb, 256) % 256) / 255.0;
     let bb = (argb % 256) / 255.0;
     return new Color(rr, gg, bb, aa);
   }
@@ -1059,10 +1059,10 @@ function __vmSpawnRaw(source, node, options) {
   }
   opts["node"] = node.id;
   let r = askHost("vm.spawn", [source, opts]);
-  if (__isType(r, "num")) {
+  if (__isType(r, "number")) {
     return r; // the child's vm id
   }
-  if (__isType(r, "Map")) {
+  if (__isType(r, "map")) {
     return r; // an {__dart_error__: ...} failure
   }
   // A capability-denied call short-circuits to the VM's typed null; normalize
@@ -1149,7 +1149,7 @@ class VMs {
   // Returns a VmController, or null when denied/failed.
   static spawn(source, node, options) {
     let r = __vmSpawnRaw(source, node, options);
-    if (__isType(r, "num")) {
+    if (__isType(r, "number")) {
       return new VmController(r);
     }
     return null;
@@ -1163,7 +1163,7 @@ class VMs {
 
   // Whether a vm.* reply is an error map.
   static isError(r) {
-    if (__isType(r, "Map")) {
+    if (__isType(r, "map")) {
       return r["__dart_error__"] != null;
     }
     return false;
@@ -1260,7 +1260,7 @@ function __g3num(v, d) {
   if (v == null) {
     return d;
   }
-  if (__isType(v, "num")) {
+  if (__isType(v, "number")) {
     return v;
   }
   return d;
@@ -1275,10 +1275,10 @@ function __g3vec(v, dx, dy, dz) {
   if (__isType(v, "Vector3")) {
     return v;
   }
-  if (__isType(v, "num")) {
+  if (__isType(v, "number")) {
     return new Vector3(v, v, v);
   }
-  if (__isType(v, "List")) {
+  if (__isType(v, "list")) {
     let x = v.length > 0 ? v[0] : dx;
     let y = v.length > 1 ? v[1] : dy;
     let z = v.length > 2 ? v[2] : dz;
@@ -1520,7 +1520,7 @@ G3.instanceScene = (path) => {
 G3.gltf = (src, o) => {
   o = o ?? {};
   let root = null;
-  if (__isType(src, "Map")) {
+  if (__isType(src, "map")) {
     if (src.base64 != null) {
       let doc = GD.create("GLTFDocument");
       let state = GD.create("GLTFState");

@@ -39,6 +39,7 @@ pub(crate) enum StrPart {
 pub(crate) const KEYWORDS: &[&str] = &[
     "var", "final", "if", "else", "while", "for", "return", "void", "int", "double", "num",
     "String", "bool", "dynamic", "class", "extends", "this", "new", "super", "is", "as", "async",
-    "await",
+    "await", "do", "switch", "case", "default", "break", "continue", "try", "catch", "finally",
+    "throw", "rethrow",
 ];
 

@@ -476,27 +476,33 @@ fn class_fields_and_independent_instances() {
     assert_eq!(run_js_and_call("js-class-fields", js, "f"), "311");
 }
 
-// ---- native Dart-flavoured operators lowered to VM opcodes ------------------
+// ---- universal builtins standing in for language-specific operators ---------
 
 #[test]
 fn truncating_integer_division() {
-    // `~/` is a native VM opcode (truncating toward zero, always an int), not a
-    // helper call. 7 ~/ 2 = 3; it composes with `%` at the same precedence.
-    assert_eq!(run_js_and_call("js-tdiv-1", "function f() { return 7 ~/ 2; }", "f"), "3");
-    assert_eq!(run_js_and_call("js-tdiv-2", "function f() { return -7 ~/ 2; }", "f"), "-3");
-    // (0xFF00FF ~/ 0x10000) % 256 — the colour-channel idiom from flutter.dart.
+    // Truncating integer division is the universal `intDiv` builtin (toward
+    // zero, always an int) — the primitive a front-end lowers an operator like
+    // Dart's `~/` to. The `~/` spelling itself is not JavaScript and is not
+    // accepted by this front-end.
+    assert_eq!(run_js_and_call("js-tdiv-1", "function f() { return intDiv(7, 2); }", "f"), "3");
+    assert_eq!(run_js_and_call("js-tdiv-2", "function f() { return intDiv(-7, 2); }", "f"), "-3");
+    // (0xFF00FF ~/ 0x10000) % 256 in Dart — the colour-channel idiom from
+    // flutter.dart, via the builtin.
     assert_eq!(
-        run_js_and_call("js-tdiv-3", "function f() { var v = 16711935; return (v ~/ 65536) % 256; }", "f"),
+        run_js_and_call("js-tdiv-3", "function f() { var v = 16711935; return intDiv(v, 65536) % 256; }", "f"),
         "255",
     );
 }
 
 #[test]
 fn null_coalescing_operator() {
-    // `??` is a native short-circuiting VM opcode. A null (modelled as 0 by the
-    // front-end) yields the right operand; a present value yields itself.
+    // `??` is a native short-circuiting VM opcode over the first-class null:
+    // null yields the right operand; any present value — including 0 and "" —
+    // yields itself (exact JS/Dart `??` semantics).
     assert_eq!(run_js_and_call("js-nc-1", "function f() { var a = null; return a ?? 5; }", "f"), "5");
     assert_eq!(run_js_and_call("js-nc-2", "function f() { var a = 9; return a ?? 5; }", "f"), "9");
+    assert_eq!(run_js_and_call("js-nc-0", "function f() { var a = 0; return a ?? 5; }", "f"), "0");
+    assert_eq!(run_js_and_call("js-nc-u", "function f() { var a; return a ?? 5; }", "f"), "5");
     // Short-circuit: the right operand is NOT evaluated when the left is present,
     // so the side effect on `hit` never runs.
     let js = "
@@ -510,11 +516,17 @@ fn null_coalescing_operator() {
 
 #[test]
 fn reified_is_on_primitives() {
+    // The VM's type-test opcode knows only the neutral type-tag names (`int`,
+    // `float`, `number`, `string`, `list`, `map`, `function`, `bool`, `null`,
+    // `any`); a front-end maps its language's spellings onto them at compile
+    // time. The intrinsic passes the neutral name straight through.
     assert_eq!(run_js_and_call("js-is-int", "function f() { return __isType(5, \"int\"); }", "f"), "true");
-    assert_eq!(run_js_and_call("js-is-str", "function f() { return __isType(5, \"String\"); }", "f"), "false");
-    assert_eq!(run_js_and_call("js-is-list", "function f() { return __isType([1], \"List\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-is-str", "function f() { return __isType(5, \"string\"); }", "f"), "false");
+    assert_eq!(run_js_and_call("js-is-list", "function f() { return __isType([1], \"list\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-is-null", "function f() { return __isType(null, \"null\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-is-any", "function f() { return __isType(null, \"any\"); }", "f"), "true");
     // `as` yields the value on a successful check.
-    assert_eq!(run_js_and_call("js-as-num", "function f() { return __asType(42, \"num\"); }", "f"), "42");
+    assert_eq!(run_js_and_call("js-as-num", "function f() { return __asType(42, \"number\"); }", "f"), "42");
 }
 
 #[test]
@@ -531,4 +543,191 @@ fn reified_is_walks_class_hierarchy() {
             return a && !b;
         }";
     assert_eq!(run_js_and_call("js-is-class", js, "f"), "true");
+}
+
+// ---- matured JS surface: operators, statements, methods, statics -----------
+
+#[test]
+fn bitwise_and_shift_operators() {
+    // 32-bit semantics via the universal builtins.
+    assert_eq!(run_js_and_call("js-bit-and", "function f() { return 6 & 3; }", "f"), "2");
+    assert_eq!(run_js_and_call("js-bit-or", "function f() { return 6 | 1; }", "f"), "7");
+    assert_eq!(run_js_and_call("js-bit-xor", "function f() { return 6 ^ 3; }", "f"), "5");
+    assert_eq!(run_js_and_call("js-bit-not", "function f() { return ~5; }", "f"), "-6");
+    assert_eq!(run_js_and_call("js-shl", "function f() { return 1 << 4; }", "f"), "16");
+    assert_eq!(run_js_and_call("js-shr", "function f() { return -8 >> 1; }", "f"), "-4");
+    assert_eq!(run_js_and_call("js-ushr", "function f() { return -1 >>> 28; }", "f"), "15");
+    // Precedence: `&` binds looser than `==`, `|` loosest of the three.
+    assert_eq!(run_js_and_call("js-bit-prec", "function f() { return 1 | 2 & 2; }", "f"), "3");
+    // Hex / binary / octal literals.
+    assert_eq!(run_js_and_call("js-hex", "function f() { return 0xFF + 0b1010 + 0o17; }", "f"), "280");
+}
+
+#[test]
+fn compound_assignment_forms() {
+    // 8 & 6 = 0, 0 | 1 = 1, 1 << 2 = 4.
+    let js = "function f() { var x = 8; x &= 6; x |= 1; x <<= 2; return x; }";
+    assert_eq!(run_js_and_call("js-cmpd", js, "f"), "4");
+    let js2 = "function f() { var x = 0; x ||= 5; x &&= 9; x ??= 100; return x; }";
+    assert_eq!(run_js_and_call("js-logasgn", js2, "f"), "9");
+    let js3 = "function f() { var x = null; x ??= 7; return x; }";
+    assert_eq!(run_js_and_call("js-ncasgn", js3, "f"), "7");
+}
+
+#[test]
+fn typeof_operator() {
+    assert_eq!(run_js_and_call("js-tof-n", "function f() { return typeof 5; }", "f"), "\"number\"");
+    assert_eq!(run_js_and_call("js-tof-s", "function f() { return typeof \"x\"; }", "f"), "\"string\"");
+    assert_eq!(run_js_and_call("js-tof-b", "function f() { return typeof true; }", "f"), "\"boolean\"");
+    assert_eq!(run_js_and_call("js-tof-o", "function f() { return typeof [1]; }", "f"), "\"object\"");
+    assert_eq!(run_js_and_call("js-tof-f", "function f() { return typeof f; }", "f"), "\"function\"");
+}
+
+#[test]
+fn instanceof_and_in_operators() {
+    let js = "class A {} class B extends A {}
+        function f() { var b = new B(); return (b instanceof A) && (b instanceof B); }";
+    assert_eq!(run_js_and_call("js-instanceof", js, "f"), "true");
+    let js2 = "function f() { var o = {a: 1}; return (\"a\" in o) && !(\"b\" in o); }";
+    assert_eq!(run_js_and_call("js-in", js2, "f"), "true");
+}
+
+#[test]
+fn optional_chaining() {
+    // A null base short-circuits the whole access to null; `?? fallback` proves
+    // it produced null rather than throwing.
+    let js = "function f() { var o = null; return (o?.a) ?? 42; }";
+    assert_eq!(run_js_and_call("js-oc1", js, "f"), "42");
+    let js2 = "function f() { var o = {a: {b: 5}}; return o?.a?.b; }";
+    assert_eq!(run_js_and_call("js-oc2", js2, "f"), "5");
+    let js3 = "function f() { var o = null; return (o?.go()) ?? 7; }";
+    assert_eq!(run_js_and_call("js-oc3", js3, "f"), "7");
+    let js4 = "function f() { var o = {go: function() { return 6; }}; return o?.go(); }";
+    assert_eq!(run_js_and_call("js-oc4", js4, "f"), "6");
+}
+
+#[test]
+fn do_while_and_for_of_and_for_in() {
+    let js = "function f() { var i = 0; var s = 0; do { s = s + i; i = i + 1; } while (i < 4); return s; }";
+    assert_eq!(run_js_and_call("js-dowhile", js, "f"), "6");
+    let js2 = "function f() { var s = 0; for (var x of [10, 20, 30]) { s = s + x; } return s; }";
+    assert_eq!(run_js_and_call("js-forof", js2, "f"), "60");
+    let js3 = "function f() { var o = {a: 1, b: 2, c: 3}; var s = 0; for (var k in o) { s = s + o[k]; } return s; }";
+    assert_eq!(run_js_and_call("js-forin", js3, "f"), "6");
+    // continue inside for-of still advances.
+    let js4 = "function f() { var s = 0; for (var x of [1, 2, 3, 4]) { if (x == 2) { continue; } s = s + x; } return s; }";
+    assert_eq!(run_js_and_call("js-forof-cont", js4, "f"), "8");
+}
+
+#[test]
+fn try_catch_throw_finally() {
+    let js = "function f() { try { throw \"boom\"; } catch (e) { return e; } }";
+    assert_eq!(run_js_and_call("js-try1", js, "f"), "\"boom\"");
+    // A native error (out-of-range) is catchable and carries a message.
+    let js2 = "function f() { try { var a = [1]; return removeAt(a, 9); } catch (e) { return e.message; } }";
+    assert!(run_js_and_call("js-try2", js2, "f").contains("range"), "should carry a message");
+    // finally runs on the normal path.
+    let js3 = "function f() { var log = []; try { log.push(1); } finally { log.push(2); } return log.length; }";
+    assert_eq!(run_js_and_call("js-try3", js3, "f"), "2");
+    // finally runs on the throwing path too.
+    let js4 = "function f() { var x = 0; try { throw \"e\"; } catch (e) { x = 1; } finally { x = x + 10; } return x; }";
+    assert_eq!(run_js_and_call("js-try4", js4, "f"), "11");
+}
+
+#[test]
+fn array_higher_order_methods() {
+    let js = "function f() { return [1,2,3,4].map(function(x){ return x*x; }).reduce(function(a,b){ return a+b; }, 0); }";
+    assert_eq!(run_js_and_call("js-map-red", js, "f"), "30");
+    let js2 = "function f() { return [1,2,3,4,5].filter(function(x){ return x % 2 == 1; }).length; }";
+    assert_eq!(run_js_and_call("js-filter", js2, "f"), "3");
+    let js3 = "function f() { return [5,1,4,2,3].sort(function(a,b){ return a-b; })[0]; }";
+    assert_eq!(run_js_and_call("js-sort", js3, "f"), "1");
+    let js4 = "function f() { return [1,2,3].find(function(x){ return x > 1; }); }";
+    assert_eq!(run_js_and_call("js-find", js4, "f"), "2");
+    let js5 = "function f() { return [1,2,3].findIndex(function(x){ return x == 3; }); }";
+    assert_eq!(run_js_and_call("js-findidx", js5, "f"), "2");
+    let js6 = "function f() { return [1,2,3].some(function(x){ return x > 2; }); }";
+    assert_eq!(run_js_and_call("js-some", js6, "f"), "true");
+    let js7 = "function f() { return [[1,2],[3,4]].flatMap(function(x){ return x; }).length; }";
+    assert_eq!(run_js_and_call("js-flatmap", js7, "f"), "4");
+    let js8 = "function f() { return [1,2,3].includes(2); }";
+    assert_eq!(run_js_and_call("js-includes", js8, "f"), "true");
+}
+
+#[test]
+fn array_mutation_and_slicing_methods() {
+    let js = "function f() { var a = [1,2,3]; a.push(4); a.unshift(0); return a.length; }";
+    assert_eq!(run_js_and_call("js-mut", js, "f"), "5");
+    let js2 = "function f() { var a = [1,2,3,4,5]; return a.slice(1, 3).join(\"-\"); }";
+    assert_eq!(run_js_and_call("js-slice", js2, "f"), "\"2-3\"");
+    let js3 = "function f() { var a = [1,2,3,4]; a.splice(1, 2); return a.join(\",\"); }";
+    assert_eq!(run_js_and_call("js-splice", js3, "f"), "\"1,4\"");
+    let js4 = "function f() { return [1,2,3].at(-1); }";
+    assert_eq!(run_js_and_call("js-at", js4, "f"), "3");
+    let js5 = "function f() { return [3,1,2].concat([4,5]).length; }";
+    assert_eq!(run_js_and_call("js-concat", js5, "f"), "5");
+}
+
+#[test]
+fn string_methods_js_faithful() {
+    // JS replace replaces the first only; replaceAll replaces every occurrence.
+    assert_eq!(run_js_and_call("js-rep", "function f() { return \"a-a-a\".replace(\"a\", \"b\"); }", "f"), "\"b-a-a\"");
+    assert_eq!(run_js_and_call("js-repall", "function f() { return \"a-a-a\".replaceAll(\"a\", \"b\"); }", "f"), "\"b-b-b\"");
+    assert_eq!(run_js_and_call("js-inc", "function f() { return \"hello\".includes(\"ell\"); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-up", "function f() { return \"abc\".toUpperCase(); }", "f"), "\"ABC\"");
+    assert_eq!(run_js_and_call("js-pad", "function f() { return \"5\".padStart(3, \"0\"); }", "f"), "\"005\"");
+    assert_eq!(run_js_and_call("js-split", "function f() { return \"a,b,c\".split(\",\").length; }", "f"), "3");
+}
+
+#[test]
+fn static_namespaces() {
+    assert_eq!(run_js_and_call("js-mfloor", "function f() { return Math.floor(3.7); }", "f"), "3");
+    assert_eq!(run_js_and_call("js-mmax", "function f() { return Math.max(3, 9, 5); }", "f"), "9");
+    assert_eq!(run_js_and_call("js-mabs", "function f() { return Math.abs(-4); }", "f"), "4");
+    assert_eq!(run_js_and_call("js-json", "function f() { return JSON.stringify([1, 2]); }", "f"), "\"[1,2]\"");
+    let js = "function f() { var o = JSON.parse(\"{\\\"a\\\": 5}\"); return o.a; }";
+    assert_eq!(run_js_and_call("js-jsonp", js, "f"), "5");
+    assert_eq!(run_js_and_call("js-okeys", "function f() { return Object.keys({a:1, b:2}).length; }", "f"), "2");
+    assert_eq!(run_js_and_call("js-arr", "function f() { return Array.isArray([1]); }", "f"), "true");
+    assert_eq!(run_js_and_call("js-arr2", "function f() { return Array.isArray(5); }", "f"), "false");
+    assert_eq!(run_js_and_call("js-pint", "function f() { return parseInt(\"42\"); }", "f"), "42");
+}
+
+#[test]
+fn map_object_methods() {
+    let js = "function f() { var m = {a: 1, b: 2}; var s = 0; m.forEach(function(v, k){ s = s + v; }); return s; }";
+    assert_eq!(run_js_and_call("js-mfe", js, "f"), "3");
+    let js2 = "function f() { var m = {a: 1}; return m.containsKey(\"a\") && !m.containsKey(\"z\"); }";
+    assert_eq!(run_js_and_call("js-mck", js2, "f"), "true");
+}
+
+#[test]
+fn switch_with_default_clause() {
+    // A `default` clause is desugared to an if/else chain, so it fires when no
+    // case matches — and still returns the matched case otherwise.
+    let js = "function classify(n) {
+        switch (n) {
+            case 1: return 10;
+            case 2: return 20;
+            default: return 99;
+        }
+    }";
+    let id = "js-switch-def";
+    assert!(js2elpian::create_vm_from_js(id.to_string(), js.to_string()));
+    let _ = api::execute_vm(id.to_string());
+    let call = |n: i64| {
+        api::execute_vm_func_with_input(id.to_string(), "classify".into(), n.to_string(), 1).result_value
+    };
+    assert_eq!(call(2), "20");
+    assert_eq!(call(7), "99");
+}
+
+#[test]
+fn exceptions_unwind_across_call_frames() {
+    // A throw inside a nested call is caught by an outer try, unwinding the
+    // intervening frames.
+    let js = "
+        function deep(n) { if (n == 0) { throw \"bottom\"; } return deep(n - 1); }
+        function f() { try { deep(5); return \"no\"; } catch (e) { return e; } }";
+    assert_eq!(run_js_and_call("js-unwind", js, "f"), "\"bottom\"");
 }

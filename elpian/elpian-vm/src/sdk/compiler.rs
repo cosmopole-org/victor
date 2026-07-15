@@ -26,6 +26,12 @@ fn serialize_expr(val: serde_json::Value) -> Vec<u8> {
     // log(&val.to_string());
     let mut result: Vec<u8> = vec![];
     match val["type"].as_str().unwrap() {
+        // The first-class null literal (tag 0x00). Every front-end lowers its
+        // own "absent value" spelling (`null`, `undefined`, `nil`, `None`, …)
+        // to this one neutral literal at compile time.
+        "null" => {
+            result.push(0);
+        }
         "i16" => {
             result.push(1);
             result.append(
@@ -221,13 +227,6 @@ fn serialize_expr(val: serde_json::Value) -> Vec<u8> {
                 }
                 "^" => {
                     result.push(0xfb);
-                }
-                // Dart truncating integer division `~/`: `a ~/ b` computes the
-                // integer quotient truncated toward zero. A native VM opcode (0xfe)
-                // rather than a front-end helper call, so both compilers share the
-                // one implementation.
-                "~/" => {
-                    result.push(0xfe);
                 }
                 _ => {}
             };
@@ -448,6 +447,10 @@ fn collect_bound(node: &Value, bound: &mut std::collections::BTreeSet<String>) {
         "loopStmt" => {
             if let Some(b) = node["data"]["body"].as_array() { for s in b { collect_bound(s, bound); } }
         }
+        "tryStmt" => {
+            if let Some(b) = node["data"]["body"].as_array() { for s in b { collect_bound(s, bound); } }
+            if let Some(b) = node["data"]["catchBody"].as_array() { for s in b { collect_bound(s, bound); } }
+        }
         "switchStmt" => {
             if let Some(cases) = node["data"]["cases"].as_array() {
                 for c in cases {
@@ -549,6 +552,14 @@ fn collect_used(node: &Value, used: &mut std::collections::BTreeSet<String>) {
             collect_used(&node["data"]["condition"], used);
             if let Some(b) = node["data"]["body"].as_array() { for s in b { collect_used(s, used); } }
         }
+        "throwOperation" => collect_used(&node["data"]["value"], used),
+        "tryStmt" => {
+            // The catch binding (`errName`) is a runtime scope binding; treating
+            // its uses as free at worst captures an outer same-named variable
+            // needlessly, which is harmless.
+            if let Some(b) = node["data"]["body"].as_array() { for s in b { collect_used(s, used); } }
+            if let Some(b) = node["data"]["catchBody"].as_array() { for s in b { collect_used(s, used); } }
+        }
         "switchStmt" => {
             collect_used(&node["data"]["value"], used);
             if let Some(cases) = node["data"]["cases"].as_array() {
@@ -642,6 +653,43 @@ pub fn compile_ast(program: serde_json::Value, start_point: usize) -> Vec<u8> {
             "returnOperation" => {
                 result.push(0x14);
                 result.append(&mut serialize_expr(operation["data"]["value"].clone()).to_vec());
+            }
+            // Throw statement: evaluate the value expression and raise it. The
+            // nearest enclosing `tryStmt`'s catch body receives it; with no
+            // handler the run traps. Layout: [0x1e][value expression].
+            "throwOperation" => {
+                result.push(0x1e);
+                result.append(&mut serialize_expr(operation["data"]["value"].clone()).to_vec());
+            }
+            // Try/catch statement — the VM's neutral exception mechanism. Both
+            // the protected body and the handler are plain statement ranges; the
+            // handler binds the thrown value under `errName`. Layout:
+            // [0x1d][errName][body_start][body_end][catch_start][catch_end]
+            // [body...][catch...] (all i64 byte offsets, rewritten to unit
+            // indices at decode).
+            "tryStmt" => {
+                result.push(0x1d);
+                let err_name = operation["data"]["errName"].as_str().unwrap_or("e");
+                let mut name_bytes = err_name.as_bytes().to_vec();
+                result.append(&mut i32::to_be_bytes(name_bytes.len() as i32).to_vec());
+                result.append(&mut name_bytes);
+                let body_start = start_point + result.len() + 8 * 4;
+                let body = compile_ast(
+                    json!({ "body": operation["data"]["body"].clone() }),
+                    body_start,
+                );
+                let body_end = body_start + body.len();
+                let catch_body = compile_ast(
+                    json!({ "body": operation["data"]["catchBody"].clone() }),
+                    body_end,
+                );
+                let catch_end = body_end + catch_body.len();
+                result.append(&mut i64::to_be_bytes(body_start as i64).to_vec());
+                result.append(&mut i64::to_be_bytes(body_end as i64).to_vec());
+                result.append(&mut i64::to_be_bytes(body_end as i64).to_vec());
+                result.append(&mut i64::to_be_bytes(catch_end as i64).to_vec());
+                result.append(&mut body.clone());
+                result.append(&mut catch_body.clone());
             }
             "destructure" => {
                 // Destructuring binding: evaluate one source value and bind a list

@@ -107,10 +107,17 @@ mod list {
     /// bound native methods delegating straight to the like-named builtin.
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
-            "first" | "last" | "reversed" => Dispatch::Getter,
-            "map" | "where" | "forEach" | "fold" | "any" | "every" | "reduce" => Dispatch::Prelude,
-            "push" | "contains" | "indexOf" | "pop" | "slice" | "join" | "pushAll" | "removeAt"
-            | "insert" | "clear" => Dispatch::Method,
+            "length" | "isEmpty" | "isNotEmpty" | "first" | "last" | "reversed" => Dispatch::Getter,
+            // Higher-order members (callback-taking) run as guest prelude
+            // functions so their callbacks execute as guest bytecode. `sort` is
+            // here because it takes an optional comparator.
+            "map" | "where" | "forEach" | "fold" | "any" | "every" | "reduce" | "reduceRight"
+            | "find" | "findIndex" | "findLast" | "findLastIndex" | "flatMap" | "sort"
+            | "takeWhile" | "skipWhile" | "removeWhere" => Dispatch::Prelude,
+            "push" | "contains" | "indexOf" | "lastIndexOf" | "pop" | "shift" | "unshift"
+            | "slice" | "splice" | "concat" | "flatten" | "at" | "pushAll" | "remove"
+            | "removeAt" | "insert" | "clear" | "reverse" | "setAt" | "toString" | "join"
+            | "take" | "skip" | "toSet" | "shuffle" => Dispatch::Method,
             _ => return None,
         })
     }
@@ -118,14 +125,15 @@ mod list {
 
 mod string {
     use super::Dispatch;
-    /// Members of `String` — all bound native methods over the receiver string.
+    /// Members of `String` — size getters plus bound native methods over the
+    /// receiver string.
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
-            "substring" | "contains" | "indexOf" | "upper" | "lower" | "trim" | "trimStart"
-            | "trimEnd" | "split" | "startsWith" | "endsWith" | "replace" | "replaceFirst"
-            | "codeUnitAt" | "padStart" | "padEnd" | "charAt" | "repeat" | "ord" => {
-                Dispatch::Method
-            }
+            "length" | "isEmpty" | "isNotEmpty" | "codeUnits" => Dispatch::Getter,
+            "substring" | "contains" | "indexOf" | "lastIndexOf" | "upper" | "lower" | "trim"
+            | "trimStart" | "trimEnd" | "split" | "startsWith" | "endsWith" | "replace"
+            | "replaceFirst" | "codeUnitAt" | "padStart" | "padEnd" | "charAt" | "repeat"
+            | "ord" | "at" | "slice" | "concat" | "compareTo" | "toString" => Dispatch::Method,
             _ => return None,
         })
     }
@@ -136,9 +144,11 @@ mod num {
     /// Members of `num`/`int`/`double`.
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
-            "isNaN" | "isNegative" => Dispatch::Getter,
-            "int" | "toDouble" | "abs" | "floor" | "ceil" | "round" | "toString"
-            | "toStringAsFixed" | "clamp" => Dispatch::Method,
+            "isNaN" | "isNegative" | "isFinite" | "isEven" | "isOdd" | "sign" => Dispatch::Getter,
+            "int" | "toDouble" | "abs" | "floor" | "ceil" | "round" | "trunc" | "toString"
+            | "toStringAsFixed" | "toRadix" | "clamp" | "remainder" | "compareTo" => {
+                Dispatch::Method
+            }
             _ => return None,
         })
     }
@@ -149,8 +159,12 @@ mod map {
     /// Members of a plain `Map` (objects without a `__class` tag).
     pub fn dispatch(name: &str) -> Option<Dispatch> {
         Some(match name {
-            "keys" | "values" | "isEmpty" | "isNotEmpty" => Dispatch::Getter,
-            "has" | "remove" | "putIfAbsent" => Dispatch::Method,
+            "length" | "keys" | "values" | "isEmpty" | "isNotEmpty" => Dispatch::Getter,
+            // Callback-taking members run as per-front-end prelude functions
+            // (`__Map_forEach`, `__Map_removeWhere`).
+            "forEach" | "removeWhere" => Dispatch::Prelude,
+            "has" | "hasValue" | "get" | "remove" | "putIfAbsent" | "pushAll" | "merge"
+            | "entries" | "toString" => Dispatch::Method,
             _ => return None,
         })
     }

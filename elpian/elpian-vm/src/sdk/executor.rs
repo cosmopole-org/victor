@@ -21,6 +21,7 @@ pub enum OperationTypes {
     AssignVar,
     CallFunc,
     ReturnVal,
+    ThrowVal,
     IfStmt,
     LoopStmt,
     SwitchStmt,
@@ -59,6 +60,8 @@ pub enum ExecStates {
     CallFuncFinished,
     ReturnValStarted,
     ReturnValFinished,
+    ThrowValStarted,
+    ThrowValFinished,
     IfStmtIsConditioned,
     IfStmtFinished,
     LoopStmtStarted,
@@ -460,11 +463,12 @@ impl Operation for CallFunction {
         }
         if self.func.is_some() {
             // Collect exactly as many argument values as the *call site* provided
-            // (`param_count`), not as many as the function declares. JavaScript
-            // calls are arity-flexible: extra arguments are ignored and missing
-            // ones bind to `undefined` (done when the frame is built). Gating on
-            // the declared param count desynced the arg stream whenever a function
-            // was called with fewer arguments than it declares.
+            // (`param_count`), not as many as the function declares. VM calls are
+            // arity-flexible: extra arguments are ignored and missing ones bind
+            // to null (done when the frame is built), so front-ends can express
+            // their language's arity rules on top. Gating on the declared param
+            // count desynced the arg stream whenever a function was called with
+            // fewer arguments than it declares.
             if self.params.len() >= self.param_count.max(0) as usize {
                 self.state = ExecStates::CallFuncFinished;
             }
@@ -533,6 +537,58 @@ impl Operation for ReturnValue {
     fn get_data(&self) -> Vec<Val> {
         vec![self.value.clone().unwrap()]
     }
+}
+
+/// The `throw` statement's value collector — the throwing twin of
+/// [`ReturnValue`]: the value expression that follows the `Throw` unit lands
+/// here, and the dispatch loop then raises it through the try stack.
+struct ThrowValue {
+    typ: OperationTypes,
+    state: ExecStates,
+    pub value: Option<Val>,
+}
+
+impl ThrowValue {
+    pub fn new() -> Self {
+        ThrowValue {
+            typ: OperationTypes::ThrowVal,
+            state: ExecStates::ThrowValStarted,
+            value: None,
+        }
+    }
+}
+
+impl Operation for ThrowValue {
+    fn get_state(&self) -> ExecStates {
+        self.state
+    }
+
+    fn get_type(&self) -> OperationTypes {
+        self.typ
+    }
+
+    fn set_state(&mut self, state: ExecStates, data: StateData) {
+        self.state = state;
+        if state == ExecStates::ThrowValFinished {
+            self.value = Some(data.val());
+        }
+    }
+
+    fn get_data(&self) -> Vec<Val> {
+        vec![self.value.clone().unwrap()]
+    }
+}
+
+/// One live `try` region: everything needed to transfer control to its catch
+/// body when a value is thrown while the region is active — the handler's unit
+/// range, the name the thrown value binds to, and the scope/register depths to
+/// unwind back to (recorded *before* the try body's scope was pushed).
+struct TryFrame {
+    catch_start: usize,
+    catch_end: usize,
+    err_name: Rc<str>,
+    scope_depth: usize,
+    register_depth: usize,
 }
 
 struct IfStmt {
@@ -1201,8 +1257,8 @@ impl Operation for DestructureOp {
 /// Compute the `(name, value)` bindings a destructuring statement produces, from
 /// its plan and the collected values (`values[0]` is the source; the remaining
 /// values are the defaults, in binding order). Pure — the executor performs the
-/// actual `define` for each returned pair. Missing / nullish members fall back
-/// to a declared default (consistent with the VM's `??` nullish test); a rest
+/// actual `define` for each returned pair. A missing / null member falls back
+/// to its declared default (consistent with the VM's `??` null test); a rest
 /// binding gathers whatever the earlier bindings did not consume.
 fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val)> {
     let null = Val { typ: 0, data: Payload::Null };
@@ -1237,7 +1293,7 @@ fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val
             if b.has_default {
                 let dv = values.get(default_idx).cloned().unwrap_or_else(|| null.clone());
                 default_idx += 1;
-                if is_nullish(&v) {
+                if is_null(&v) {
                     v = dv;
                 }
             }
@@ -1277,7 +1333,7 @@ fn apply_destructure(plan: &DestructurePlan, values: &[Val]) -> Vec<(String, Val
             if b.has_default {
                 let dv = values.get(default_idx).cloned().unwrap_or_else(|| null.clone());
                 default_idx += 1;
-                if is_nullish(&v) {
+                if is_null(&v) {
                     v = dv;
                 }
             }
@@ -1434,28 +1490,28 @@ impl Operation for TypeTestOp {
     }
 }
 
-/// Reified type test: does `value` have (dynamic) type `type_name`? Primitive
-/// type names are matched against the value's type tag; a class name is matched
-/// by walking the instance's prototype chain (`__proto` → `__parent`), each
-/// prototype carrying its `__class_name`, so the class hierarchy embedded in the
-/// value answers the check with no external class table. This is the native
-/// replacement for the `dart:core/isType` host round-trip.
-///
-/// Because the front-ends model an absent value as `0` (no first-class null),
-/// the numeric checks accept that representation just as the previous host
-/// implementation did over the JSON bridge.
+/// Reified type test: does `value` have (dynamic) type `type_name`? The names
+/// the VM understands are its own **neutral** type-tag names — `null`, `bool`,
+/// `int`, `float`, `number`, `string`, `list`, `map`, `function`, and the
+/// universal `any` — never a source language's spellings. A front-end maps its
+/// language's type names onto these at compile time (dart2elpian lowers
+/// `double`→`float`, `String`→`string`, `List`→`list`, …; a JS front-end would
+/// map its `typeof` vocabulary the same way). Any other name is a class name,
+/// matched by walking the instance's prototype chain (`__proto` → `__parent`),
+/// each prototype carrying its `__class_name`, so the class hierarchy embedded
+/// in the value answers the check with no external class table.
 fn value_is_type(value: &Val, type_name: &str) -> bool {
     match type_name {
-        "dynamic" | "Object" => value.typ != 0,
+        "any" => true,
         "int" => matches!(value.typ, 1 | 2 | 3),
-        "double" => matches!(value.typ, 4 | 5),
-        "num" => matches!(value.typ, 1..=5),
-        "String" => value.typ == 7,
+        "float" => matches!(value.typ, 4 | 5),
+        "number" => matches!(value.typ, 1..=5),
+        "string" => value.typ == 7,
         "bool" => value.typ == 6,
-        "List" => value.typ == 9,
-        "Map" => value.typ == 8,
-        "Function" => value.typ == 10,
-        "Null" => value.typ == 0,
+        "list" => value.typ == 9,
+        "map" => value.typ == 8,
+        "function" => value.typ == 10,
+        "null" => value.typ == 0,
         class => {
             if value.typ != 8 {
                 return false;
@@ -1497,32 +1553,24 @@ fn value_is_type(value: &Val, type_name: &str) -> bool {
     }
 }
 
-/// Whether a value is "null" for the purposes of the null-coalescing `??`
-/// operator. The front-ends (js2elpian / dart2elpian) currently have **no
-/// distinct null literal** and model an absent value as the integer `0` (see
-/// js2elpian's `null`/`undefined` lowering), so the runtime notion of null is
-/// the real `Payload::Null` (type tag 0) *or* a numeric zero. This exactly
-/// reproduces the semantics of the front-end `__ifNull` helper this native
-/// operator replaced (`a != null ? a : b`, with `null` compiled to `0`). When
-/// the VM gains a first-class null value this predicate narrows to `typ == 0`.
-fn is_nullish(v: &Val) -> bool {
-    match v.typ {
-        0 => true,
-        1 => v.as_i16() == 0,
-        2 => v.as_i32() == 0,
-        3 => v.as_i64() == 0,
-        4 => v.as_f32() == 0.0,
-        5 => v.as_f64() == 0.0,
-        _ => false,
-    }
+/// Whether a value is the VM's first-class null (type tag 0) — the single,
+/// language-neutral "absent value". Every front-end lowers its own spelling
+/// (`null`, `undefined`, `nil`, …) to this literal at compile time, host
+/// replies decode JSON `null` to it, and every absent read (missing argument,
+/// absent member/key, out-of-range element) yields it. It is the value the
+/// null-coalescing operator and `x == null` comparisons test against; a
+/// numeric zero is an ordinary number, never null.
+fn is_null(v: &Val) -> bool {
+    v.typ == 0
 }
 
 /// Short-circuiting `&&` / `||` / `??`. The left operand is evaluated first; the
 /// right is only evaluated when the result is not already decided (`&&` with a
-/// truthy left, `||` with a falsy left, `??` with a non-null left). On
+/// truthy left, `||` with a falsy left, `??` with a non-null left — truthiness
+/// is the VM's own rule, see [`Val::truthy`]; null is the first-class null). On
 /// short-circuit the dispatch loop reuses the left value as the result and jumps
 /// the program counter to `op2_end`, skipping the right operand's units entirely.
-/// No double evaluation, exact JS / Dart semantics.
+/// No double evaluation.
 struct LogicalOp {
     typ: OperationTypes,
     state: ExecStates,
@@ -1682,9 +1730,13 @@ pub struct Executor {
     /// Set when `run_from` suspended this turn because of a host pause request,
     /// so `single_thread_operation` reports the instance as paused (not done).
     paused_out: bool,
-    /// A fatal trap (limit overrun or builtin error) that ended the instance.
+    /// A fatal trap (limit overrun or uncaught error) that ended the instance.
     /// Once set, the instance is terminated and reports this reason to the host.
     trap: Option<String>,
+    /// The live `try` regions, innermost last. A thrown value transfers control
+    /// to the innermost frame's catch body (unwinding scopes and registers back
+    /// to the depths recorded at `try` entry); with no frame the throw is a trap.
+    try_stack: Vec<TryFrame>,
 }
 
 impl Executor {
@@ -1720,6 +1772,7 @@ impl Executor {
             control: ExecControl::new(),
             paused_out: false,
             trap: None,
+            try_stack: Vec::new(),
         }
     }
 
@@ -2055,14 +2108,16 @@ impl Executor {
         if id == "askHost" {
             return Val { typ: 255, data: Payload::Null };
         }
-        let bound = self.ctx.find_val_globally(id);
-        if !bound.is_empty() {
+        // A scope binding — even one currently holding null — shadows a builtin;
+        // only a name bound nowhere falls through to the builtin table, and an
+        // entirely unknown identifier reads as null.
+        if let Some(bound) = self.ctx.lookup_val_globally(id) {
             return bound;
         }
         if stdlib::is_builtin(id) {
             return Val { typ: 252, data: Payload::from(id.to_string()) };
         }
-        bound
+        Val { typ: 0, data: Payload::Null }
     }
     fn check_float_range(&self, num: f64) -> Val {
         if num < f32::MAX.into() {
@@ -2084,9 +2139,10 @@ impl Executor {
     fn deliver_type_member(&mut self, receiver: &Val, member: &type_methods::Member) -> Val {
         match member.dispatch {
             // A getter reads eagerly through stdlib — the member name is the
-            // universal builtin name, invoked directly.
+            // universal builtin name, invoked directly. A getter that errors
+            // reads as null, like any other absent member.
             Dispatch::Getter => stdlib::invoke(&member.name, &[receiver.clone()])
-                .unwrap_or_else(|_| self.check_int_range(0)),
+                .unwrap_or_else(|_| Val { typ: 0, data: Payload::Null }),
             // A method becomes a bound native (typ 253) carrying `[recv, name]`;
             // the call machinery appends the args and calls `stdlib::invoke`.
             Dispatch::Method => {
@@ -3251,29 +3307,6 @@ impl Executor {
             }
         }
     }
-    /// Dart truncating integer division `a ~/ b`: the quotient truncated toward
-    /// zero, always an `int`. Both operands are coerced to `f64` (so mixed
-    /// int/double operands work, matching Dart's `num ~/ num`), divided, and the
-    /// result is truncated and re-tagged as the compact integer for its
-    /// magnitude. Division by zero traps, as it does in Dart (`~/ 0` throws
-    /// `UnsupportedError`/`IntegerDivisionByZeroException`).
-    fn operate_trunc_division(&self, arg1: Val, arg2: Val) -> Val {
-        let coerce = |v: &Val| -> f64 {
-            match v.typ {
-                1 => v.as_i16() as f64,
-                2 => v.as_i32() as f64,
-                3 => v.as_i64() as f64,
-                4 => v.as_f32() as f64,
-                5 => v.as_f64(),
-                _ => panic!("elpian error: ~/ expects numeric operands"),
-            }
-        };
-        let divisor = coerce(&arg2);
-        if divisor == 0.0 {
-            panic!("elpian error: integer division by zero");
-        }
-        self.check_int_range((coerce(&arg1) / divisor).trunc() as i64)
-    }
     fn operate_modulo(&self, arg1: Val, arg2: Val) -> Val {
         match arg1.typ {
             // Integer dividend: keep an integer remainder for integer divisors,
@@ -3393,13 +3426,12 @@ impl Executor {
         }
     }
     fn is_eq(&self, v: Val, v2: Val) -> bool {
-        // A real `Payload::Null` (typ 0 — what host replies and JSON `null`
-        // decode to) and the front-ends' compiled null (numeric 0 — see
-        // `is_nullish`) must compare equal in every combination, or
-        // `x == null` silently fails on any null that crossed the host seam
-        // (e.g. a Godot bridge call that returned nothing).
+        // The first-class null (typ 0) is equal only to itself: guest `null`
+        // literals, host replies decoding JSON `null`, and every absent read
+        // all produce the same value, and a numeric zero is an ordinary
+        // number, distinct from null.
         if v.typ == 0 || v2.typ == 0 {
-            return is_nullish(&v) && is_nullish(&v2);
+            return is_null(&v) && is_null(&v2);
         }
         return match v.typ {
             1 | 2 | 3 => {
@@ -4219,6 +4251,65 @@ impl Executor {
             }
         }
         self.ctx.pop_scope();
+        // A try frame dies with the scope its `tryBody` lives at — whether it
+        // ends normally, is unwound by `return`/`break`/`continue`, or is torn
+        // down by an outer throw. Every scope pop funnels through here, so this
+        // is the single place frames are retired.
+        while self
+            .try_stack
+            .last()
+            .map_or(false, |f| f.scope_depth >= self.ctx.memory.len())
+        {
+            self.try_stack.pop();
+        }
+    }
+    /// Raise `err`: transfer control to the innermost live `try` frame's catch
+    /// body — unwinding scopes (across function frames if needed) and pending
+    /// operation registers back to the depths recorded at `try` entry, and
+    /// binding the thrown value under the frame's error name — or, with no
+    /// live frame, trap the instance with the value's display text. Returns
+    /// whether the throw was caught. Callers must reset their local
+    /// `main_reg` / `is_reg_state_final` and `continue` the dispatch loop.
+    fn begin_catch(&mut self, err: Val) -> bool {
+        match self.try_stack.pop() {
+            Some(frame) => {
+                while self.ctx.memory.len() > frame.scope_depth {
+                    self.pop_scope_governed();
+                }
+                self.registers.truncate(frame.register_depth);
+                // Any return value mid-propagation died with the frames it was
+                // travelling through.
+                self.pending_func_result_value = Val { typ: 254, data: Payload::Null };
+                let mut args = ValMap::default();
+                args.insert(frame.err_name.to_string(), err);
+                self.ctx.push_scope_with_args(
+                    "catchBody".to_string(),
+                    frame.catch_start,
+                    frame.catch_start,
+                    frame.catch_end,
+                    args,
+                );
+                self.pointer = frame.catch_start;
+                self.end_at = frame.catch_end;
+                true
+            }
+            None => {
+                self.trap = Some(format!("uncaught error: {}", err.to_display()));
+                false
+            }
+        }
+    }
+    /// The error value a *native* failure (a stdlib builtin error, a failed
+    /// checked cast) throws: a plain object `{ name, message }`, so guest
+    /// handlers can read `e.message` in any source language.
+    fn native_error(&self, message: String) -> Val {
+        let mut m = ValMap::default();
+        m.insert("name".to_string(), Val { typ: 7, data: Payload::from("Error".to_string()) });
+        m.insert("message".to_string(), Val { typ: 7, data: Payload::from(message) });
+        Val {
+            typ: 8,
+            data: Payload::from(Rc::new(RefCell::new(Object::new(-2, ValGroup::new(m))))),
+        }
     }
     /// Snapshot the enclosing (non-global) locals as a closure's captured
     /// environment. Returns `None` at top level (nothing to close over), so
@@ -4457,6 +4548,18 @@ impl Executor {
                             is_reg_state_final =
                                 self.registers.last().unwrap().get_state()
                                     == ExecStates::ReturnValFinished;
+                            continue;
+                        }
+                    } else if op_type == OperationTypes::ThrowVal {
+                        if self.registers.last().unwrap().get_state()
+                            == ExecStates::ThrowValStarted
+                        {
+                            self.registers.last_mut().unwrap().set_state(
+                                ExecStates::ThrowValFinished,
+                                StateData::Val(main_reg.take().unwrap()),
+                            );
+                            main_reg = None;
+                            is_reg_state_final = true;
                             continue;
                         }
                     } else if op_type
@@ -4778,7 +4881,7 @@ impl Executor {
                             let evaluate_right = match kind {
                                 LogicalKind::And => left.truthy(),
                                 LogicalKind::Or => !left.truthy(),
-                                LogicalKind::NullCoalesce => is_nullish(&left),
+                                LogicalKind::NullCoalesce => is_null(&left),
                             };
                             if evaluate_right {
                                 self.registers
@@ -4918,14 +5021,16 @@ impl Executor {
                                 args.insert("this".to_string(), receiver);
                             }
                             for (i, param_name) in expected_params.iter().enumerate() {
-                                // A parameter with no supplied argument binds to null
-                                // (integer 0), so Dart optional/named params default
-                                // correctly via `== null` rather than a typed-
-                                // undefined that breaks comparisons and arithmetic.
+                                // Calls are arity-flexible at the VM level: a
+                                // parameter with no supplied argument binds to the
+                                // first-class null, so a front-end can express its
+                                // language's defaulting (optional/named parameters,
+                                // `undefined`, …) with a compile-time `== null`
+                                // check.
                                 let arg = provided_args
                                     .get(i)
                                     .cloned()
-                                    .unwrap_or_else(|| Val::new(1, Payload::from(0i16)));
+                                    .unwrap_or_else(|| Val::new(0, Payload::Null));
                                 args.insert(param_name.clone(), arg);
                             }
                             self.ctx
@@ -4985,7 +5090,18 @@ impl Executor {
                                         continue;
                                     }
                                     Err(e) => {
-                                        self.trap = Some(format!("{}: {e}", func_ref.name));
+                                        // A builtin error is a *thrown* error: a
+                                        // guest `try` anywhere up the call chain
+                                        // catches it as `{ name, message }`;
+                                        // uncaught it traps the instance as
+                                        // before.
+                                        let msg = format!("{}: {e}", func_ref.name);
+                                        drop(arg_ref);
+                                        drop(func_ref);
+                                        let err = self.native_error(msg);
+                                        self.begin_catch(err);
+                                        main_reg = None;
+                                        is_reg_state_final = false;
                                         continue;
                                     }
                                 }
@@ -5053,6 +5169,18 @@ impl Executor {
                         is_reg_state_final = false;
                         continue;
                     } else if self.registers.last().unwrap().get_state()
+                        == ExecStates::ThrowValFinished
+                    {
+                        // The thrown value is collected; raise it through the try
+                        // stack (or trap when uncaught).
+                        let data = self.registers.last().unwrap().get_data();
+                        let err = data[0].clone();
+                        self.registers.pop();
+                        self.begin_catch(err);
+                        main_reg = None;
+                        is_reg_state_final = false;
+                        continue;
+                    } else if self.registers.last().unwrap().get_state()
                         == ExecStates::DefineVarExtractValue
                     {
                         let regs = self.registers.last().unwrap().get_data();
@@ -5096,9 +5224,12 @@ impl Executor {
                                     let idx = sidx as usize;
                                     let arr = indexed.as_array();
                                     let mut b = arr.borrow_mut();
-                                    // JS semantics: assigning at or past the end grows
-                                    // the array, filling the gap with null (e.g.
-                                    // `var out = []; out[i] = v;`).
+                                    // The VM's list store semantics: assigning at or
+                                    // past the end grows the list, filling the gap
+                                    // with null (e.g. `var out = []; out[i] = v;`).
+                                    // A front-end for a bounds-strict language lowers
+                                    // an indexed store to the `setAt` builtin, which
+                                    // traps on an out-of-range index, instead.
                                     if idx >= b.data.len() {
                                         b.data.resize(idx + 1, Val { typ: 0, data: Payload::Null });
                                     }
@@ -5132,8 +5263,10 @@ impl Executor {
                         let branch_after_start = regs[5].as_i64() as usize;
                         let mut condition = false;
                         if has_condition {
-                            // JS truthiness — any non-falsy value (object, number,
-                            // non-empty string, …) takes the branch, not just `true`.
+                            // The VM's truthiness rule (see `Val::truthy`) — any
+                            // non-falsy value takes the branch, not just `true`. A
+                            // front-end whose language coerces differently wraps the
+                            // condition at compile time (e.g. the `bool` builtin).
                             condition = cond_val.truthy();
                         }
                         if !has_condition {
@@ -5182,7 +5315,8 @@ impl Executor {
                         // body_end, branch_after].
                         let regs = self.registers.last().unwrap().get_data();
                         let cond_val = regs[0].clone();
-                        // JS truthiness for the loop guard (see if-statement above).
+                        // The VM's truthiness rule for the loop guard (see the
+                        // if-statement above).
                         let condition = cond_val.truthy();
                         let branch_true_start = regs[1].as_i64() as usize;
                         let branch_true_end = regs[2].as_i64() as usize;
@@ -5340,9 +5474,6 @@ impl Executor {
                             12 => {
                                 main_reg = Some(self.operate_power(arg1, arg2));
                             }
-                            13 => {
-                                main_reg = Some(self.operate_trunc_division(arg1, arg2));
-                            }
                             _ => {}
                         }
                         is_reg_state_final = false;
@@ -5356,29 +5487,7 @@ impl Executor {
                         self.registers.pop();
                         if index.typ == 7 {
                             let __key = index.as_string();
-                            // Dart core-type members on built-in List (typ 9) and
-                            // String (typ 7). These are properties (no call), so
-                            // they resolve directly here; this path previously
-                            // errored to null for non-objects.
-                            if indexed.typ == 9
-                                && matches!(__key.as_str(), "length" | "isEmpty" | "isNotEmpty")
-                            {
-                                let len = indexed.as_array().borrow().data.len();
-                                main_reg = Some(match __key.as_str() {
-                                    "length" => self.check_int_range(len as i64),
-                                    "isEmpty" => Val { typ: 6, data: Payload::from(len == 0) },
-                                    _ => Val { typ: 6, data: Payload::from(len != 0) },
-                                });
-                            } else if indexed.typ == 7
-                                && matches!(__key.as_str(), "length" | "isEmpty" | "isNotEmpty")
-                            {
-                                let len = indexed.as_string().chars().count();
-                                main_reg = Some(match __key.as_str() {
-                                    "length" => self.check_int_range(len as i64),
-                                    "isEmpty" => Val { typ: 6, data: Payload::from(len == 0) },
-                                    _ => Val { typ: 6, data: Payload::from(len != 0) },
-                                });
-                            } else if let Some(member) = CoreType::of_tag(indexed.typ)
+                            if let Some(member) = CoreType::of_tag(indexed.typ)
                                 .filter(|t| *t != CoreType::Map)
                                 .and_then(|t| type_methods::resolve(t, &__key))
                             {
@@ -5415,18 +5524,15 @@ impl Executor {
                                     } else {
                                         None
                                     };
-                                    if is_plain_map && key == "length" {
-                                        let n = indexed.as_object().borrow().data.data.len();
-                                        main_reg = Some(self.check_int_range(n as i64));
-                                    } else if let Some(member) = map_member {
-                                        // A plain-Map member (`keys`/`values`/`isEmpty`/
-                                        // `containsKey`/…): delivered by the same
+                                    if let Some(member) = map_member {
+                                        // A plain-Map member (`length`/`keys`/`values`/
+                                        // `isEmpty`/`has`/…): delivered by the same
                                         // registry-driven path as List/String/num.
                                         main_reg = Some(self.deliver_type_member(&indexed, &member));
                                     } else {
-                                        // An absent key/field reads as null (integer 0),
-                                        // matching Dart's `map[absent] == null`.
-                                        main_reg = Some(self.check_int_range(0));
+                                        // An absent key/field reads as the first-class
+                                        // null — the VM's single "absent value".
+                                        main_reg = Some(Val { typ: 0, data: Payload::Null });
                                     }
                                 }
                             } else {
@@ -5501,8 +5607,8 @@ impl Executor {
                         let data = self.registers.last().unwrap().get_data();
                         let val = data[0].clone();
                         self.registers.pop();
-                        // `!x` is the boolean negation of JS truthiness, defined for
-                        // every value (not just booleans).
+                        // `!x` is the boolean negation of the VM's truthiness,
+                        // defined for every value (not just booleans).
                         main_reg = Some(Val {
                             typ: 6,
                             data: Payload::from(!val.truthy()),
@@ -5570,12 +5676,18 @@ impl Executor {
                         self.registers.pop();
                         let matches = value_is_type(&value, &type_name);
                         if cast {
-                            // `as`: yield the value on a match, trap on a mismatch —
-                            // Dart's checked-cast semantics.
+                            // Checked cast: yield the value on a match; a
+                            // mismatch throws (catchable by a guest `try`,
+                            // trapping the instance when uncaught).
                             if matches {
                                 main_reg = Some(value);
                             } else {
-                                panic!("elpian error: TypeError: value is not a {type_name}");
+                                let err = self
+                                    .native_error(format!("TypeError: value is not a {type_name}"));
+                                self.begin_catch(err);
+                                main_reg = None;
+                                is_reg_state_final = false;
+                                continue;
                             }
                         } else {
                             // `is`: the boolean result of the type test.
@@ -6176,6 +6288,39 @@ impl Executor {
                 // return command
                 UnitKind::Return => {
                     self.registers.push(Box::new(ReturnValue::new()));
+                }
+                // throw command (value expression follows)
+                UnitKind::Throw => {
+                    self.registers.push(Box::new(ThrowValue::new()));
+                }
+                // try/catch: record a try frame (scope/register depths as they
+                // are *now*, before the body scope), park the resume point past
+                // the catch body, and enter the protected body. Normal completion
+                // tears the body scope down like any block and resumes at
+                // `catch_end`; a throw anywhere inside (any call depth) unwinds
+                // back here and enters the catch body instead.
+                UnitKind::TryHead { body_start, body_end, catch_start, catch_end, err_name } => {
+                    self.ctx
+                        .memory
+                        .last()
+                        .unwrap()
+                        .borrow_mut()
+                        .update_frozen_pointer(catch_end);
+                    self.try_stack.push(TryFrame {
+                        catch_start,
+                        catch_end,
+                        err_name,
+                        scope_depth: self.ctx.memory.len(),
+                        register_depth: self.registers.len(),
+                    });
+                    self.ctx.push_scope(
+                        "tryBody".to_string(),
+                        body_start,
+                        body_start,
+                        body_end,
+                    );
+                    self.pointer = body_start;
+                    self.end_at = body_end;
                 }
                 // jump command
                 UnitKind::Jump(dest) => {

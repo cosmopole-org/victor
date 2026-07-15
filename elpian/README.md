@@ -15,15 +15,47 @@ targets the Dart VM cannot serve dynamically.
   first-class capability + resource-limit governor.
 - **`js2elpian/` · `dart2elpian/`** — the language front-ends. Each compiles its
   source language (JavaScript / a Dart subset) to Elpian bytecode; the VM is the
-  single, unified execution target. Dart-specific semantics — the `~/` and `??`
-  operators, reified `is`/`as`, the int/double numeric split, and the
-  JSON/UTF-8/Base64 codecs — are **native to the VM**, not front-end shims.
+  single, unified execution target. The split is strict: **the VM defines only
+  language-neutral primitives, and every language-specific rule lives in the
+  compiler layer**, resolved at compile time. Concretely:
+  - the VM has a **first-class null** literal; each front-end lowers its own
+    spelling (`null`, `undefined`, …) to it, absent reads (missing argument,
+    absent member/key, out-of-range element) yield it, and `??` / `== null`
+    test exactly it — a numeric `0` is never null;
+  - Dart's `~/` is not a VM operator: dart2elpian lowers it to the universal
+    `intDiv` builtin (the JS front-end accepts only real JavaScript);
+  - reified `is`/`as` run against the VM's **neutral type-tag names** (`int`,
+    `float`, `number`, `string`, `list`, `map`, `function`, `bool`, `null`,
+    `any`) plus user class names; dart2elpian maps Dart's spellings
+    (`double`→`float`, `String`→`string`, …) at compile time and lowers
+    `Object`/`dynamic` without involving the VM at all;
+  - branch/loop/`!`/`&&`/`||` conditions use the VM's own documented
+    truthiness rule; a front-end whose language coerces differently wraps the
+    condition (e.g. the `bool` builtin) at compile time, and a bounds-strict
+    language can lower indexed stores to the checking `setAt` builtin instead
+    of the VM's auto-growing list store;
+  - **exceptions** are a neutral VM opcode: `throw` raises any value, `try` /
+    `catch` catches it (unwinding across call frames), and a native builtin
+    error surfaces as a catchable `{ name, message }`. Each front-end maps its
+    own syntax onto it — JS `try`/`catch`/`finally`, Dart `try`/`on`/`catch`/
+    `finally` + `rethrow`;
+  - **bitwise & shift** operators have no VM opcode: they lower to universal
+    integer builtins (`bitAnd`/`shl`/`ushr`/…), so a front-end layers its own
+    width semantics (js2elpian composes JS's 32-bit `ToInt32`/`ToUint32`) at
+    compile time.
+
   Standard-library **API names are universal**: the VM exposes one flat, neutral
-  stdlib surface (`push`, `upper`, `has`, `reversed`, …), and each front-end
-  resolves *its* language's spelling (`List.add`, `toUpperCase`, `Array.push`,
-  `includes`, …) onto that universal name **at compile time**. The VM carries no
-  Dart- or JS-specific method names and does no name translation (no proxying)
-  at runtime.
+  stdlib surface (`push`, `upper`, `has`, `reversed`, `length`, `splice`, `at`,
+  `find`, `sort`, `intDiv`, `random`, …), and each front-end resolves *its*
+  language's spelling (`List.add`, `toUpperCase`, `Array.push`, `includes`,
+  `firstWhere`, …) onto that universal name **at compile time**. The VM carries
+  no Dart- or JS-specific method names and does no name translation (no proxying)
+  at runtime. Both front-ends are matured to broad coverage of their language —
+  the full operator tower, control flow (`switch`/`do-while`/`for-of`/`for-in`),
+  exceptions, closures with by-reference capture, and the core-library
+  collection/string/number methods — so idiomatic source in either language
+  compiles to the same AST/bytecode, and a new front-end for any language can
+  target it with full coverage and zero conflicts with the existing compilers.
 - **`dart/`** — the *optional* Dart/Flutter host surface: it drives an Elpian VM
   and services the `dart:*` **foundational ("group 3") libraries** — the native
   surfaces the Flutter framework depends on (`dart:ui`, `dart:typed_data`,

@@ -258,10 +258,25 @@ impl<'a> Lexer<'a> {
             b']' => Tok::RBracket,
             b',' => Tok::Comma,
             b';' => Tok::Semi,
-            b'.' => Tok::Dot,
+            b'.' => {
+                if two(b'.', b'.', self) {
+                    Tok::Op("..".into())
+                } else {
+                    Tok::Dot
+                }
+            }
             b'?' => {
-                if two(b'?', b'?', self) {
-                    Tok::Op("??".into())
+                if self.peek() == b'?' {
+                    self.pos += 1;
+                    if self.peek() == b'=' {
+                        self.pos += 1;
+                        Tok::Op("??=".into())
+                    } else {
+                        Tok::Op("??".into())
+                    }
+                } else if self.peek() == b'.' {
+                    self.pos += 1;
+                    Tok::Op("?.".into())
                 } else {
                     Tok::Question
                 }
@@ -292,7 +307,13 @@ impl<'a> Lexer<'a> {
                     Tok::Op("*".into())
                 }
             }
-            b'%' => Tok::Op("%".into()),
+            b'%' => {
+                if two(b'%', b'=', self) {
+                    Tok::Op("%=".into())
+                } else {
+                    Tok::Op("%".into())
+                }
+            }
             b'/' => {
                 if two(b'/', b'=', self) {
                     Tok::Op("/=".into())
@@ -304,7 +325,8 @@ impl<'a> Lexer<'a> {
                 if two(b'~', b'/', self) {
                     Tok::Op("~/".into())
                 } else {
-                    return Err("unexpected '~'".into());
+                    // Bitwise NOT (unary).
+                    Tok::Op("~".into())
                 }
             }
             b'=' => {
@@ -326,6 +348,14 @@ impl<'a> Lexer<'a> {
             b'<' => {
                 if two(b'<', b'=', self) {
                     Tok::Op("<=".into())
+                } else if self.peek() == b'<' {
+                    self.pos += 1;
+                    if self.peek() == b'=' {
+                        self.pos += 1;
+                        Tok::Op("<<=".into())
+                    } else {
+                        Tok::Op("<<".into())
+                    }
                 } else {
                     Tok::Op("<".into())
                 }
@@ -333,6 +363,22 @@ impl<'a> Lexer<'a> {
             b'>' => {
                 if two(b'>', b'=', self) {
                     Tok::Op(">=".into())
+                } else if self.peek() == b'>' {
+                    self.pos += 1;
+                    if self.peek() == b'>' {
+                        self.pos += 1;
+                        if self.peek() == b'=' {
+                            self.pos += 1;
+                            Tok::Op(">>>=".into())
+                        } else {
+                            Tok::Op(">>>".into())
+                        }
+                    } else if self.peek() == b'=' {
+                        self.pos += 1;
+                        Tok::Op(">>=".into())
+                    } else {
+                        Tok::Op(">>".into())
+                    }
                 } else {
                     Tok::Op(">".into())
                 }
@@ -340,15 +386,26 @@ impl<'a> Lexer<'a> {
             b'&' => {
                 if two(b'&', b'&', self) {
                     Tok::Op("&&".into())
+                } else if two(b'&', b'=', self) {
+                    Tok::Op("&=".into())
                 } else {
-                    return Err("unexpected '&'".into());
+                    Tok::Op("&".into())
                 }
             }
             b'|' => {
                 if two(b'|', b'|', self) {
                     Tok::Op("||".into())
+                } else if two(b'|', b'=', self) {
+                    Tok::Op("|=".into())
                 } else {
-                    return Err("unexpected '|'".into());
+                    Tok::Op("|".into())
+                }
+            }
+            b'^' => {
+                if two(b'^', b'=', self) {
+                    Tok::Op("^=".into())
+                } else {
+                    Tok::Op("^".into())
                 }
             }
             other => return Err(format!("unexpected character '{}'", other as char)),

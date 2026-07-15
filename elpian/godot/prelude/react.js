@@ -80,7 +80,7 @@ var __VR_FRAGMENT = "__vreact_fragment__";
 var __VR_PORTAL = "__vreact_portal__";
 
 function __vrIsElement(x) {
-  if (__isType(x, "Map")) {
+  if (__isType(x, "map")) {
     return x[__VR_ELEMENT] == true;
   }
   return false;
@@ -253,13 +253,13 @@ function useState(initial) {
   let inst = __vrCur;
   let make = () => {
     let v = initial;
-    if (__isType(initial, "Function")) {
+    if (__isType(initial, "function")) {
       v = initial();
     }
     let hook = { state: v, setState: null };
     hook.setState = (next) => {
       let value = next;
-      if (__isType(next, "Function")) {
+      if (__isType(next, "function")) {
         value = next(hook.state);
       }
       if (hook.state != value) {
@@ -280,7 +280,7 @@ function useReducer(reducer, initialArg, init) {
   let inst = __vrCur;
   let make = () => {
     let s = initialArg;
-    if (init != null && __isType(init, "Function")) {
+    if (init != null && __isType(init, "function")) {
       s = init(initialArg);
     }
     let hook = { state: s, dispatch: null };
@@ -365,14 +365,14 @@ function useInsertionEffect(create, deps) {
 function useImperativeHandle(ref, create, deps) {
   useEffect(() => {
     if (ref != null) {
-      if (__isType(ref, "Function")) {
+      if (__isType(ref, "function")) {
         ref(create());
       } else {
         ref.current = create();
       }
     }
     return () => {
-      if (ref != null && !__isType(ref, "Function")) {
+      if (ref != null && !__isType(ref, "function")) {
         ref.current = null;
       }
     };
@@ -401,7 +401,7 @@ function useSyncExternalStore(subscribe, getSnapshot) {
     check();
     let unsub = subscribe(check);
     return () => {
-      if (unsub != null && __isType(unsub, "Function")) {
+      if (unsub != null && __isType(unsub, "function")) {
         unsub();
       }
     };
@@ -415,7 +415,7 @@ function useTransition() {
   let out = [];
   out.push(false);
   out.push((cb) => {
-    if (__isType(cb, "Function")) {
+    if (__isType(cb, "function")) {
       cb();
     }
   });
@@ -511,7 +511,7 @@ function createContext(defaultValue) {
   ctx.Consumer = (props) => {
     // <Context.Consumer>{value => ...}</Context.Consumer>
     let render = props.children;
-    if (__isType(render, "Function")) {
+    if (__isType(render, "function")) {
       return render(ctx._value);
     }
     return null;
@@ -568,7 +568,7 @@ function memo(component, areEqual) {
     let lastEl = useRef(null);
     if (last.current != null) {
       let same = false;
-      if (areEqual != null && __isType(areEqual, "Function")) {
+      if (areEqual != null && __isType(areEqual, "function")) {
         same = areEqual(last.current, props);
       } else {
         same = __vrShallowEqualProps(last.current, props);
@@ -628,17 +628,17 @@ function __vrNormalizeInto(out, ch) {
   if (__isType(ch, "bool")) {
     return;
   }
-  if (__isType(ch, "List")) {
+  if (__isType(ch, "list")) {
     for (let i = 0; i < ch.length; i++) {
       __vrNormalizeInto(out, ch[i]);
     }
     return;
   }
-  if (__isType(ch, "num")) {
+  if (__isType(ch, "number")) {
     out.push("" + ch);
     return;
   }
-  if (__isType(ch, "String")) {
+  if (__isType(ch, "string")) {
     out.push(ch);
     return;
   }
@@ -710,7 +710,7 @@ function __vrMount(child, hostContainer) {
 
   let type = child.type;
 
-  if (__isType(type, "Function")) {
+  if (__isType(type, "function")) {
     let inst = {
       kind: "comp",
       fn: type,
@@ -906,7 +906,7 @@ function __vrUnmount(inst) {
     for (let i = 0; i < hooks.length; i++) {
       let h = hooks[i];
       if (h != null && h.kind == "effect") {
-        if (h.cleanup != null && __isType(h.cleanup, "Function")) {
+        if (h.cleanup != null && __isType(h.cleanup, "function")) {
           h.cleanup();
           h.cleanup = null;
         }
@@ -999,7 +999,7 @@ function __vrApplyHostRef(inst) {
   if (ref == null) {
     return;
   }
-  if (__isType(ref, "Function")) {
+  if (__isType(ref, "function")) {
     ref(inst.node);
   } else {
     ref.current = inst.node;
@@ -1028,12 +1028,12 @@ function __vrRunEffects() {
     let h = q[i];
     if (h.pending == true) {
       h.pending = false;
-      if (h.cleanup != null && __isType(h.cleanup, "Function")) {
+      if (h.cleanup != null && __isType(h.cleanup, "function")) {
         h.cleanup();
         h.cleanup = null;
       }
       let c = h.create();
-      if (c != null && __isType(c, "Function")) {
+      if (c != null && __isType(c, "function")) {
         h.cleanup = c;
       } else {
         h.cleanup = null;
@@ -1061,7 +1061,7 @@ function __vrColor(v) {
     return v;
   }
   let t = VUI.theme();
-  if (__isType(v, "String")) {
+  if (__isType(v, "string")) {
     if (v == "primary") { return t.primary; }
     if (v == "accent") { return t.accent; }
     if (v == "danger") { return t.danger; }
@@ -1126,13 +1126,13 @@ function __vrColorHtml(hex) {
 
 // Call a possibly-absent event prop with an argument.
 function __vrCall(fn, arg) {
-  if (fn != null && __isType(fn, "Function")) {
+  if (fn != null && __isType(fn, "function")) {
     fn(arg);
   }
 }
 
 function __vrCall0(fn) {
-  if (fn != null && __isType(fn, "Function")) {
+  if (fn != null && __isType(fn, "function")) {
     fn();
   }
 }
@@ -1144,7 +1144,7 @@ function __vrNum(v, d) {
   if (v == null) {
     return d;
   }
-  if (__isType(v, "num")) {
+  if (__isType(v, "number")) {
     return v;
   }
   return d;
@@ -2037,7 +2037,7 @@ function __vrApplySelectItems(inst, props, t) {
     let it = items[i];
     let label = it;
     let value = it;
-    if (__isType(it, "Map")) {
+    if (__isType(it, "map")) {
       label = it.label ?? ("" + it.value);
       value = it.value ?? it.label;
     }

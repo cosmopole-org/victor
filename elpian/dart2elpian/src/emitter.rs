@@ -15,10 +15,10 @@ use crate::parser::Parser;
 /// is read). They rely on `this.length`, `this[i]`, `out.add(...)`, and closure
 /// calls — all VM-supported.
 ///
-/// The Dart-specific operators `~/` (truncating integer division) and `??`
-/// (null-coalescing) are **not** in this prelude: they lower to native VM
-/// opcodes emitted directly by [`Emitter::emit_expr`], so no helper functions
-/// are needed.
+/// The Dart-specific operators are **not** in this prelude and never reach the
+/// VM as Dart: [`Emitter::emit_expr`] lowers `~/` (truncating integer division)
+/// to the universal `intDiv` builtin and `??` (null-coalescing) to the VM's
+/// neutral short-circuit operator, so no helper functions are needed.
 const PRELUDE: &str = concat!(
     "function __List_map(f){ var out = []; var i = 0; while (i < this.length) { out.push(f(this[i])); i = i + 1; } return out; }\n",
     "function __List_where(f){ var out = []; var i = 0; while (i < this.length) { if (f(this[i])) { out.push(this[i]); } i = i + 1; } return out; }\n",
@@ -27,6 +27,18 @@ const PRELUDE: &str = concat!(
     "function __List_any(f){ var i = 0; while (i < this.length) { if (f(this[i])) { return true; } i = i + 1; } return false; }\n",
     "function __List_every(f){ var i = 0; while (i < this.length) { if (!f(this[i])) { return false; } i = i + 1; } return true; }\n",
     "function __List_reduce(f){ var acc = this[0]; var i = 1; while (i < this.length) { acc = f(acc, this[i]); i = i + 1; } return acc; }\n",
+    // Dart Iterable methods with single-element predicates/callbacks.
+    "function __List_find(f){ var i = 0; while (i < this.length) { if (f(this[i])) { return this[i]; } i = i + 1; } return null; }\n",
+    "function __List_findIndex(f){ var i = 0; while (i < this.length) { if (f(this[i])) { return i; } i = i + 1; } return -1; }\n",
+    "function __List_findLast(f){ var i = this.length - 1; while (i >= 0) { if (f(this[i])) { return this[i]; } i = i - 1; } return null; }\n",
+    "function __List_flatMap(f){ var out = []; var i = 0; while (i < this.length) { var r = f(this[i]); var j = 0; while (j < r.length) { out.push(r[j]); j = j + 1; } i = i + 1; } return out; }\n",
+    "function __List_takeWhile(f){ var out = []; var i = 0; while (i < this.length) { if (!f(this[i])) { return out; } out.push(this[i]); i = i + 1; } return out; }\n",
+    "function __List_skipWhile(f){ var i = 0; while (i < this.length) { if (!f(this[i])) { break; } i = i + 1; } var out = []; while (i < this.length) { out.push(this[i]); i = i + 1; } return out; }\n",
+    "function __List_removeWhere(f){ var i = 0; while (i < this.length) { if (f(this[i])) { splice(this, i, 1); } else { i = i + 1; } } return null; }\n",
+    "function __List_sort(cmp){ if (cmp == null) { sort(this); return this; } var i = 1; while (i < this.length) { var x = this[i]; var j = i - 1; while (j >= 0 && cmp(this[j], x) > 0) { this[j + 1] = this[j]; j = j - 1; } this[j + 1] = x; i = i + 1; } return this; }\n",
+    // Dart Map.forEach / removeWhere pass (key, value).
+    "function __Map_forEach(f){ var ks = keys(this); var i = 0; while (i < ks.length) { f(ks[i], this[ks[i]]); i = i + 1; } return null; }\n",
+    "function __Map_removeWhere(f){ var ks = keys(this); var i = 0; while (i < ks.length) { if (f(ks[i], this[ks[i]])) { delKey(this, ks[i]); } i = i + 1; } return null; }\n",
     // ---- async/await runtime: Future + microtask-driven continuations -------
     // These helpers are raw Elpian-JS (they bypass the Dart emitter), so they are
     // written directly against the VM's universal names (`push`, not `add`).
@@ -66,6 +78,11 @@ pub(crate) struct Emitter {
     user_members: NameSet,
     locals: Vec<NameSet>,
     in_class: bool,
+    /// Inside a `catch (e)` body, the bound error name — so `rethrow` emits
+    /// `throw e`.
+    rethrow_var: Option<String>,
+    /// Monotonic counter for cascade temporaries (`__casc_N`).
+    casc_counter: usize,
 }
 
 /// Compile-time resolution of a Dart core-type member spelling to the VM's
@@ -77,25 +94,56 @@ pub(crate) struct Emitter {
 /// or `None` when the spelling needs no change.
 fn universal_member(name: &str) -> Option<&'static str> {
     Some(match name {
-        // List
+        // List / Iterable
         "add" => "push",
         "addAll" => "pushAll",
         "removeLast" => "pop",
         "sublist" => "slice",
+        "elementAt" => "at",
+        "expand" => "flatMap",
+        "firstWhere" => "find",
+        "indexWhere" => "findIndex",
+        "lastWhere" => "findLast",
         // String
         "toUpperCase" => "upper",
         "toLowerCase" => "lower",
         "replaceAll" => "replace",
+        "replaceFirst" => "replaceFirst",
         "padLeft" => "padStart",
         "padRight" => "padEnd",
         "trimLeft" => "trimStart",
         "trimRight" => "trimEnd",
         // num
         "toInt" => "int",
+        "truncate" => "int",
+        "remainder" => "remainder",
+        "toRadixString" => "toRadix",
         // Map
         "containsKey" => "has",
+        "containsValue" => "hasValue",
         _ => return None,
     })
+}
+
+/// Compile-time resolution of a Dart *type name* to the VM's neutral type-tag
+/// vocabulary, used by the reified `is` / `as` lowering. The VM's type-test
+/// opcode understands only its own names (`int`, `float`, `number`, `string`,
+/// `list`, `map`, `function`, `bool`, `null`, `any`) — mapping Dart's spellings
+/// onto them is this front-end's job. Any other name is a class name and passes
+/// through unchanged (the VM matches it against the instance's prototype chain).
+fn universal_type_name(ty: &str) -> &str {
+    match ty {
+        "double" => "float",
+        "num" => "number",
+        "String" => "string",
+        // Set literals lower to lists; Iterable's one concrete backing is List.
+        "List" | "Set" | "Iterable" => "list",
+        "Map" => "map",
+        "Function" => "function",
+        "Null" => "null",
+        // `int` and `bool` are already the neutral spelling.
+        other => other,
+    }
 }
 
 /// Native member names the VM binds as properties (not zero-arg getters), which
@@ -119,6 +167,8 @@ impl Emitter {
             user_members: Default::default(),
             locals: Vec::new(),
             in_class: false,
+            rethrow_var: None,
+            casc_counter: 0,
         }
     }
 
@@ -524,6 +574,74 @@ impl Emitter {
                 self.indent(depth);
                 self.out.push_str("}\n");
             }
+            Stmt::DoWhile(b, c) => {
+                self.out.push_str("do {\n");
+                self.push_scope();
+                self.emit_stmts(b, depth + 1);
+                self.pop_scope();
+                self.indent(depth);
+                let cond = self.emit_expr(c);
+                self.out.push_str(&format!("}} while ({cond});\n"));
+            }
+            Stmt::Break => self.out.push_str("break;\n"),
+            Stmt::Continue => self.out.push_str("continue;\n"),
+            Stmt::Switch(v, arms, default) => {
+                let val = self.emit_expr(v);
+                self.out.push_str(&format!("switch ({val}) {{\n"));
+                for (labels, body) in arms {
+                    for label in labels {
+                        let l = self.emit_expr(label);
+                        self.indent(depth + 1);
+                        self.out.push_str(&format!("case {l}:\n"));
+                    }
+                    self.push_scope();
+                    self.emit_stmts(body, depth + 2);
+                    self.pop_scope();
+                    // The VM's switch runs one matched case body then exits; emit a
+                    // `break` so the JS front-end's switch lowering ends the arm.
+                    self.indent(depth + 2);
+                    self.out.push_str("break;\n");
+                }
+                if let Some(body) = default {
+                    self.indent(depth + 1);
+                    self.out.push_str("default:\n");
+                    self.push_scope();
+                    self.emit_stmts(body, depth + 2);
+                    self.pop_scope();
+                }
+                self.indent(depth);
+                self.out.push_str("}\n");
+            }
+            Stmt::Try(body, catch, finally) => {
+                self.out.push_str("try {\n");
+                self.push_scope();
+                self.emit_stmts(body, depth + 1);
+                self.pop_scope();
+                self.indent(depth);
+                self.out.push('}');
+                if let Some((err, cbody)) = catch {
+                    self.out.push_str(&format!(" catch ({err}) {{\n"));
+                    self.push_scope();
+                    self.declare(err);
+                    // `rethrow` inside this catch refers to the bound error.
+                    let saved = self.rethrow_var.take();
+                    self.rethrow_var = Some(err.clone());
+                    self.emit_stmts(cbody, depth + 1);
+                    self.rethrow_var = saved;
+                    self.pop_scope();
+                    self.indent(depth);
+                    self.out.push('}');
+                }
+                if let Some(fbody) = finally {
+                    self.out.push_str(" finally {\n");
+                    self.push_scope();
+                    self.emit_stmts(fbody, depth + 1);
+                    self.pop_scope();
+                    self.indent(depth);
+                    self.out.push('}');
+                }
+                self.out.push('\n');
+            }
             Stmt::Block(b) => {
                 self.out.push_str("{\n");
                 self.push_scope();
@@ -588,10 +706,16 @@ impl Emitter {
                 }
             }
             Expr::Binary(op, a, b) => {
-                // `~/` and `??` are native VM operators (truncating division and
-                // null-coalescing); every operator, these included, emits as the
-                // shared parenthesised infix form the front-end shares with JS.
-                format!("({} {} {})", self.emit_expr(a), op, self.emit_expr(b))
+                // Dart's truncating integer division has no JS spelling and no VM
+                // opcode; it lowers here — in the language front-end — to the
+                // universal `intDiv` builtin. Every other operator (including
+                // `??`, which JS also spells natively) emits as the shared
+                // parenthesised infix form.
+                if op == "~/" {
+                    format!("intDiv({}, {})", self.emit_expr(a), self.emit_expr(b))
+                } else {
+                    format!("({} {} {})", self.emit_expr(a), op, self.emit_expr(b))
+                }
             }
             Expr::Ternary(c, t, e) => {
                 format!("({} ? {} : {})", self.emit_expr(c), self.emit_expr(t), self.emit_expr(e))
@@ -617,6 +741,60 @@ impl Emitter {
                 } else {
                     base
                 }
+            }
+            // Null-aware access `obj?.name` → JS optional chaining (js2elpian
+            // short-circuits to null on a null receiver). A getter is invoked.
+            Expr::NullMember(obj, name) => {
+                let o = self.emit_expr(obj);
+                let resolved = self.resolve_member(name);
+                if self.getters.contains(name) {
+                    format!("{o}?.{resolved}()")
+                } else {
+                    format!("{o}?.{resolved}")
+                }
+            }
+            // `throw e` — emitted as a JS throw. `rethrow` re-throws the current
+            // catch's bound error.
+            Expr::Throw(inner) => {
+                if matches!(&**inner, Expr::Ident(n) if n == "__rethrow") {
+                    let v = self.rethrow_var.clone().unwrap_or_else(|| "__e".to_string());
+                    format!("throw {v}")
+                } else {
+                    format!("throw {}", self.emit_expr(inner))
+                }
+            }
+            // Cascade `target..a()..b = c` → an IIFE that binds the target once,
+            // applies each section to it, and yields the target.
+            Expr::Cascade(target, ops) => {
+                self.casc_counter += 1;
+                let tmp = format!("__casc_{}", self.casc_counter);
+                let t = self.emit_expr(target);
+                let mut body = String::new();
+                for op in ops {
+                    match op {
+                        CascadeOp::Member(name, assign, call) => {
+                            let resolved = self.resolve_member(name);
+                            if let Some((pos, named)) = call {
+                                let mut a: Vec<String> = pos.iter().map(|x| self.emit_expr(x)).collect();
+                                if !named.is_empty() {
+                                    a.push(self.emit_named_object(named));
+                                }
+                                body.push_str(&format!("{tmp}.{resolved}({}); ", a.join(", ")));
+                            } else if let Some(v) = assign {
+                                let val = self.emit_expr(v);
+                                body.push_str(&format!("{tmp}.{resolved} = {val}; "));
+                            } else {
+                                body.push_str(&format!("{tmp}.{resolved}; "));
+                            }
+                        }
+                        CascadeOp::IndexSet(idx, v) => {
+                            let i = self.emit_expr(idx);
+                            let val = self.emit_expr(v);
+                            body.push_str(&format!("{tmp}[{i}] = {val}; "));
+                        }
+                    }
+                }
+                format!("(function() {{ var {tmp} = {t}; {body}return {tmp}; }})()")
             }
             Expr::New(name, pos, named) => {
                 let mut a: Vec<String> = pos.iter().map(|x| self.emit_expr(x)).collect();
@@ -661,16 +839,25 @@ impl Emitter {
                     format!("{{{}}}", pairs.join(", "))
                 }
             }
-            // Reified `is` / `as` are native VM operations, reached through the
-            // `__isType` / `__asType` compiler intrinsics (which js2elpian lowers
-            // to the type-test opcode) rather than a host round-trip. The type is
-            // erased to its base name — the reified check is by base type / class.
-            Expr::Is(x, ty) => {
-                format!("__isType({}, {})", self.emit_expr(x), json_string(ty))
-            }
-            Expr::As(x, ty) => {
-                format!("__asType({}, {})", self.emit_expr(x), json_string(ty))
-            }
+            // Reified `is` / `as` are reached through the `__isType` / `__asType`
+            // compiler intrinsics (which js2elpian lowers to the type-test
+            // opcode) rather than a host round-trip. The type is erased to its
+            // base name, and — because the VM only knows its own *neutral*
+            // type-tag vocabulary — the Dart spelling is resolved here, in the
+            // language front-end, at compile time (`double`→`float`,
+            // `String`→`string`, …). `Object` and `dynamic` never reach the VM
+            // at all: their Dart semantics are pure compile-time lowering.
+            Expr::Is(x, ty) => match ty.as_str() {
+                // Dart: everything but null is an Object.
+                "Object" => format!("({} != null)", self.emit_expr(x)),
+                "dynamic" => format!("__isType({}, \"any\")", self.emit_expr(x)),
+                _ => format!("__isType({}, {})", self.emit_expr(x), json_string(universal_type_name(ty))),
+            },
+            Expr::As(x, ty) => match ty.as_str() {
+                // Upcasts to the top types always succeed: emit the value itself.
+                "Object" | "dynamic" => self.emit_expr(x),
+                _ => format!("__asType({}, {})", self.emit_expr(x), json_string(universal_type_name(ty))),
+            },
             Expr::Call(callee, pos, named) => {
                 if let Expr::Ident(name) = &**callee {
                     if name == "print" && pos.len() == 1 && named.is_empty() {

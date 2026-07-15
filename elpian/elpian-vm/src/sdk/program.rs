@@ -37,12 +37,14 @@ use std::rc::Rc;
 use crate::sdk::data::{Payload, Val};
 
 /// The three short-circuiting binary operators the VM lowers through the single
-/// `0xef` opcode, distinguished by the opcode's flag byte. `And`/`Or` are the
-/// JavaScript logical operators; `NullCoalesce` is the Dart / JS `??` — it
-/// yields the left operand unless it is null, in which case it evaluates and
-/// yields the right operand. (Because the front-ends currently model an absent
-/// value as `0`, the executor's null test also treats a numeric zero as null;
-/// see `executor::is_nullish`.)
+/// `0xef` opcode, distinguished by the opcode's flag byte. All three are
+/// language-neutral value selectors: `And` yields the left operand when it is
+/// falsy (by the VM's truthiness rule, see [`crate::sdk::data::Val::truthy`])
+/// and otherwise evaluates and yields the right; `Or` is its dual;
+/// `NullCoalesce` yields the left operand unless it is the first-class null
+/// (type tag 0), in which case it evaluates and yields the right operand.
+/// Front-ends whose source language uses a different notion of truthiness
+/// coerce their operands at compile time (e.g. via the `bool` builtin).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LogicalKind {
     And,
@@ -100,7 +102,8 @@ pub enum UnitKind {
     Nop,
 
     // ---- value-producing units (what the old `extract_val` returned) --------
-    /// A scalar or string literal (`typ` 1..=7). Cloned to produce the value.
+    /// A null, scalar or string literal (`typ` 0..=7). Cloned to produce the
+    /// value.
     Lit(Val),
     /// An identifier reference (`0x0b`); resolved against the scope chain /
     /// builtins / the `askHost` seam at run time.
@@ -190,6 +193,19 @@ pub enum UnitKind {
     /// expression per binding that declares a default (in binding order); the
     /// plan describes how to bind names from the source's members / positions.
     Destructure { plan: Rc<DestructurePlan> },
+    /// `0x1d` — try/catch. The protected body runs first; a value thrown inside
+    /// it (dynamically, at any call depth) unwinds to the catch body with the
+    /// value bound under `err_name`. Normal completion of the body skips the
+    /// catch entirely. All four positions are unit indices after decode.
+    TryHead {
+        body_start: usize,
+        body_end: usize,
+        catch_start: usize,
+        catch_end: usize,
+        err_name: Rc<str>,
+    },
+    /// `0x1e` — `throw` (value expression follows).
+    Throw,
     /// `0x13` — function definition (hoisted; body follows). `start`/`end` are
     /// unit indices.
     FuncDef {
@@ -297,6 +313,15 @@ impl<'a> Decoder<'a> {
                     start: self.target_unit(*start),
                     end: self.target_unit(*end),
                 },
+                UnitKind::TryHead { body_start, body_end, catch_start, catch_end, err_name } => {
+                    UnitKind::TryHead {
+                        body_start: self.target_unit(*body_start),
+                        body_end: self.target_unit(*body_end),
+                        catch_start: self.target_unit(*catch_start),
+                        catch_end: self.target_unit(*catch_end),
+                        err_name: err_name.clone(),
+                    }
+                }
                 UnitKind::FuncLit { start, end, params } => UnitKind::FuncLit {
                     start: self.target_unit(*start),
                     end: self.target_unit(*end),
@@ -343,6 +368,11 @@ impl<'a> Decoder<'a> {
     fn decode_value(&mut self, pos: usize) -> usize {
         let tag = self.bytes[pos];
         match tag {
+            0 => {
+                // The first-class null literal.
+                self.emit(pos, UnitKind::Lit(Val::new(0, Payload::Null)));
+                pos + 1
+            }
             1 => {
                 self.emit(pos, UnitKind::Lit(Val::new(1, Payload::from(self.read_i16(pos + 1)))));
                 pos + 3
@@ -453,14 +483,6 @@ impl<'a> Decoder<'a> {
             }
             0xf0..=0xfb => {
                 self.emit(pos, UnitKind::Arith((tag - 0xf0 + 1) as i16));
-                let after_op1 = self.decode_value(pos + 1);
-                self.decode_value(after_op1)
-            }
-            0xfe => {
-                // Dart truncating integer division `~/` — arith op id 13. Kept out
-                // of the contiguous `0xf0..=0xfb` block (0xfc/0xfd are `not`/`cast`)
-                // so its id is assigned explicitly rather than by tag arithmetic.
-                self.emit(pos, UnitKind::Arith(13));
                 let after_op1 = self.decode_value(pos + 1);
                 self.decode_value(after_op1)
             }
@@ -595,6 +617,48 @@ impl<'a> Decoder<'a> {
             }
             0x12 => self.decode_switch(pos),
             0x1c => self.decode_destructure(pos),
+            0x1d => {
+                // try/catch: opcode, errName, body_start, body_end, catch_start,
+                // catch_end, body, catch body.
+                let (err_name, consumed) = self.read_str(pos + 1);
+                let idx = self.emit(
+                    pos,
+                    UnitKind::TryHead {
+                        body_start: 0,
+                        body_end: 0,
+                        catch_start: 0,
+                        catch_end: 0,
+                        err_name: Rc::from(err_name.as_str()),
+                    },
+                );
+                let mut p = pos + 1 + consumed;
+                let body_start = self.read_i64(p) as usize;
+                p += 8;
+                let body_end = self.read_i64(p) as usize;
+                p += 8;
+                let catch_start = self.read_i64(p) as usize;
+                p += 8;
+                let catch_end = self.read_i64(p) as usize;
+                p += 8;
+                debug_assert_eq!(p, body_start);
+                if let UnitKind::TryHead { err_name, .. } = &self.units[idx] {
+                    let err_name = err_name.clone();
+                    self.units[idx] = UnitKind::TryHead {
+                        body_start,
+                        body_end,
+                        catch_start,
+                        catch_end,
+                        err_name,
+                    };
+                }
+                self.decode_stmt_seq(body_start, body_end);
+                self.decode_stmt_seq(catch_start, catch_end);
+                catch_end
+            }
+            0x1e => {
+                self.emit(pos, UnitKind::Throw);
+                self.decode_value(pos + 1)
+            }
             0x13 => self.decode_funcdef(pos),
             0x0e => {
                 // definition: 0x0e, 0x0b discriminator, name, value expression.

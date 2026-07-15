@@ -16,24 +16,33 @@
 //!   (`ClassName(args)`), member access, and `this`. Bare field/method
 //!   references inside methods resolve to `this.member` (including inherited
 //!   members), so idiomatic Dart lowers to valid JS classes;
-//! * `if`/`else`, `while`, C-style `for` and **`for-in`** (both lowered to
-//!   `while`), `return`, blocks;
+//! * **control flow**: `if`/`else`, `while`, `do`/`while`, C-style `for` and
+//!   **`for-in`** (lowered to `while`), `switch`/`case`/`default` (with the
+//!   `default` arm), `break`/`continue`, `return`, and blocks;
+//! * **exceptions**: `throw` / `rethrow` and `try` / `on T` / `catch (e[, st])`
+//!   / `finally`, lowered to the VM's neutral try-catch opcode (the `on Type`
+//!   filter and stack-trace binding are erased; a native builtin error is a
+//!   catchable `{ name, message }`);
 //! * expressions: literals (incl. **hex integers** `0xFF2196F3` for colours),
 //!   identifiers, calls, list literals, indexing,
-//!   assignment + compound assignment (`+= -= *= /=`), `++`/`--`, ternary
-//!   `?:`, `|| && == != < <= > >= + - * / % ~/`, unary `! -`;
+//!   assignment + compound assignment (`+= -= *= /= %= &= |= ^= <<= >>= >>>=`
+//!   and `??=`), `++`/`--`, ternary `?:`, the full binary tower
+//!   `?? || && | ^ & == != < <= > >= << >> >>> + - * / % ~/`, unary `! - ~`,
+//!   the null-assertion `x!` (erased), null-aware `obj?.member`, and **cascades**
+//!   `target..a()..b = c`;
 //! * string interpolation (`"$x"`, `"${expr}"`) lowered to concatenation;
-//! * `print(x)` lowered to `askHost("log",[x])`; `~/` lowered to a trunc-div
-//!   helper. `main()` is auto-invoked if present.
+//! * `print(x)` lowered to `askHost("log",[x])`; `~/` and the bitwise/shift
+//!   operators lower to the VM's universal builtins (the operators themselves
+//!   never reach the VM). `main()` is auto-invoked if present.
 //!
 //! * **closures / function expressions**: `(a) => expr`, `(a) { body }`, and
 //!   arrow bodies for function/method declarations (`int f() => expr;`). These
 //!   plus the VM's higher-order Iterable methods (`map`/`where`/`fold`/`reduce`/
-//!   `any`/`every`, bound in the VM to prelude functions) run real functional
-//!   Dart. Closures capture **by reference** for mutated captured locals: a
-//!   source transform boxes such a local into a one-element list (a VM reference
-//!   type), so `forEach((e) => acc += e)` and closure counters propagate
-//!   correctly.
+//!   `any`/`every`/`firstWhere`/`expand`/`takeWhile`/`sort`/…, bound in the VM
+//!   to prelude functions) run real functional Dart. Closures capture **by
+//!   reference** for mutated captured locals — the boxing transform is applied by
+//!   the downstream JS layer (js2elpian), so `forEach((e) => acc += e)` and
+//!   closure counters propagate correctly.
 //!
 //! * **named & optional parameters** (`{this.width}`, `[int x = 0]`, `required`)
 //!   with defaults, lowered to a trailing options object; named arguments at
@@ -45,8 +54,9 @@
 //!   fields/methods and named constructors (reached as `Class.member`, backed by
 //!   the VM's static-member support), **getters** (`T get x => …`, emitted as a
 //!   method and called when read as `obj.x`), and the `??` null-coalescing
-//!   operator (lowered to a helper). A `void` arrow body (`void f() => g();`) is
-//!   a statement, not a `return`.
+//!   operator (emitted onto the VM's neutral short-circuit opcode, which tests
+//!   the first-class null). A `void` arrow body (`void f() => g();`) is a
+//!   statement, not a `return`.
 //! * **`async`/`await`**: `async` functions are CPS-transformed to return a
 //!   `Future` built from `.then` continuations driven by the microtask loop;
 //!   `await` sequences them. Bounded: awaits are transformed only at statement
@@ -64,14 +74,12 @@ pub mod emitter;
 pub mod lexer;
 pub mod parser;
 pub mod token;
-pub mod transforms;
 
 use crate::token::Tok;
 use crate::ast::Item;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::emitter::Emitter;
-use crate::transforms::box_captured_program;
 
 /// Transpile Dart-subset source to the JS subset the Elpian VM ingests.
 pub fn transpile(dart: &str) -> Result<String, String> {
@@ -98,8 +106,10 @@ pub fn transpile_program(dart: &str) -> Result<(String, Vec<ClassInfo>), String>
         }
         set
     };
-    let mut items = Parser::new(toks).parse_program()?;
-    box_captured_program(&mut items);
+    let items = Parser::new(toks).parse_program()?;
+    // By-reference closure capture (boxing captured, mutated locals) is applied
+    // downstream by js2elpian on the emitted JS, so it is intentionally *not*
+    // done here — doing it in both layers would double-box.
     let classes: Vec<ClassInfo> = items
         .iter()
         .filter_map(|it| match it {
@@ -117,11 +127,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn erases_types_and_emits_native_trunc_div() {
-        // `~/` is a native VM operator now, not a helper call.
+    fn erases_types_and_lowers_trunc_div_to_int_div() {
+        // `~/` is a Dart-specific operator: it never reaches the VM. The
+        // front-end lowers it to the universal `intDiv` builtin at compile time.
         let js = transpile("int x = 7 ~/ 2;").unwrap();
-        assert!(js.contains("var x = (7 ~/ 2)"), "got: {js}");
-        assert!(!js.contains("__truncDiv"), "no helper lowering: {js}");
+        assert!(js.contains("var x = intDiv(7, 2)"), "got: {js}");
+        assert!(!js.contains("~/"), "no Dart operator in the emitted program: {js}");
     }
 
     #[test]
@@ -178,12 +189,30 @@ mod tests {
     fn is_and_as_emit_native_intrinsics_not_host_calls() {
         // Reified `is`/`as` lower to the `__isType`/`__asType` compiler intrinsics
         // (native VM opcode), not a `dart:core/isType` host round-trip. Generics
-        // are erased to the base type name.
-        let js = transpile("var a = x is List<int>; var b = y as Foo;").unwrap();
-        assert!(js.contains("__isType(x, \"List\")"), "is -> intrinsic: {js}");
-        assert!(js.contains("__asType(y, \"Foo\")"), "as -> intrinsic: {js}");
+        // are erased to the base type name, and Dart's type spellings are resolved
+        // to the VM's neutral names here, at compile time (`List`→`list`,
+        // `double`→`float`, …); a user class name passes through unchanged.
+        let js = transpile(
+            "var a = x is List<int>; var b = y as Foo; var c = z is double; var d = w is String;",
+        )
+        .unwrap();
+        assert!(js.contains("__isType(x, \"list\")"), "is -> neutral name: {js}");
+        assert!(js.contains("__asType(y, \"Foo\")"), "as -> class passthrough: {js}");
+        assert!(js.contains("__isType(z, \"float\")"), "double -> float: {js}");
+        assert!(js.contains("__isType(w, \"string\")"), "String -> string: {js}");
         assert!(!js.contains("isType\""), "no isType host round-trip: {js}");
         assert!(!js.contains("asType\""), "no asType host round-trip: {js}");
+    }
+
+    #[test]
+    fn is_object_and_dynamic_are_pure_compile_time_lowerings() {
+        // `Object` / `dynamic` never reach the VM's type-test opcode: their Dart
+        // semantics are decided here in the front-end.
+        let js = transpile("var a = x is Object; var b = y as Object; var c = z is dynamic;").unwrap();
+        assert!(js.contains("(x != null)"), "is Object -> null test: {js}");
+        assert!(!js.contains("__isType(x"), "no opcode for is Object: {js}");
+        assert!(js.contains("var b = y"), "as Object -> value: {js}");
+        assert!(js.contains("__isType(z, \"any\")"), "is dynamic -> any: {js}");
     }
 
     #[test]

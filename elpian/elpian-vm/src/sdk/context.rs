@@ -53,11 +53,15 @@ impl Scope {
         self.frozen_end = frozen_end;
     }
     pub fn find_val(&self, name: &str) -> Val {
-        let v = self.memory.borrow();
-        match v.data.get(name) {
-            None => Val::new(0, Payload::Null),
-            Some(val) => val.clone(),
-        }
+        self.get_val(name).unwrap_or_else(|| Val::new(0, Payload::Null))
+    }
+    /// Presence-based read: `Some` for any binding — **including one whose value
+    /// is the first-class null** — and `None` only when the name is not bound in
+    /// this scope. Distinguishing "bound to null" from "unbound" matters now
+    /// that null is an ordinary value (`var x = null;` must shadow an outer `x`
+    /// and a like-named builtin exactly as any other binding does).
+    pub fn get_val(&self, name: &str) -> Option<Val> {
+        self.memory.borrow().data.get(name).cloned()
     }
     pub fn update_val(&mut self, name: String, val: Val) -> bool {
         let mut v = self.memory.borrow_mut();
@@ -132,30 +136,35 @@ impl Context {
     /// regardless of recursion depth — the single biggest per-frame cost in the
     /// renderer's deep widget/paint recursion.
     pub fn find_val_globally(&mut self, name: &str) -> Val {
+        self.lookup_val_globally(name)
+            .unwrap_or_else(|| Val::new(0, Payload::Null))
+    }
+    /// The presence-based form of [`find_val_globally`]: `None` means the name
+    /// is bound in no lexically visible scope (so the executor may fall back to
+    /// a builtin), while `Some(null)` is a real binding whose current value is
+    /// null — which shadows outer bindings and builtins like any other value.
+    pub fn lookup_val_globally(&mut self, name: &str) -> Option<Val> {
         let mem = &self.memory;
         let mut i = mem.len();
         while i > 0 {
             i -= 1;
             let (val, is_func_body) = {
                 let s = mem[i].borrow();
-                (s.find_val(name), s.tag == "funcBody")
+                (s.get_val(name), s.tag == "funcBody")
             };
-            if !val.is_empty() {
-                return val;
+            if let Some(v) = val {
+                return Some(v);
             }
             if is_func_body {
                 // Reached the current function's frame. Caller frames below are
                 // out of lexical scope; probe the global scope directly, then stop.
                 if i > 0 {
-                    let g = mem[0].borrow().find_val(name);
-                    if !g.is_empty() {
-                        return g;
-                    }
+                    return mem[0].borrow().get_val(name);
                 }
-                return Val::new(0, Payload::Null);
+                return None;
             }
         }
-        Val::new(0, Payload::Null)
+        None
     }
     pub fn define_val_globally(&mut self, name: String, val: Val) {
         self.memory.last().unwrap().borrow_mut().define_val(name, val);

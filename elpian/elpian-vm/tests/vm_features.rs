@@ -321,3 +321,68 @@ fn terminate_makes_instance_inert() {
     let after = api::execute_vm_func(id.to_string(), "getx".into(), 2);
     assert_ne!(after.result_value, "5");
 }
+
+// ---- new universal builtins + neutral primitives ---------------------------
+
+#[test]
+fn universal_integer_bit_and_math_builtins() {
+    // Bitwise / shift primitives operate on 64-bit integers.
+    assert_eq!(run_and_call("bit-and", &program(vec![func_def("f", vec![],
+        vec![ret(call("bitAnd", vec![i64v(6), i64v(3)]))])]), "f"), "2");
+    assert_eq!(run_and_call("bit-shl", &program(vec![func_def("f", vec![],
+        vec![ret(call("shl", vec![i64v(1), i64v(10)]))])]), "f"), "1024");
+    // Truncating integer division and remainder.
+    assert_eq!(run_and_call("intdiv", &program(vec![func_def("f", vec![],
+        vec![ret(call("intDiv", vec![i64v(7), i64v(2)]))])]), "f"), "3");
+    assert_eq!(run_and_call("rem", &program(vec![func_def("f", vec![],
+        vec![ret(call("remainder", vec![i64v(7), i64v(3)]))])]), "f"), "1");
+    // Radix conversion round-trips.
+    assert_eq!(run_and_call("radix", &program(vec![func_def("f", vec![],
+        vec![ret(call("toRadix", vec![i64v(255), i64v(16)]))])]), "f"), "\"ff\"");
+    assert_eq!(run_and_call("parseradix", &program(vec![func_def("f", vec![],
+        vec![ret(call("parseRadix", vec![strv("ff"), i64v(16)]))])]), "f"), "255");
+}
+
+#[test]
+fn universal_list_builtins() {
+    // splice returns the removed slice and mutates in place.
+    let ast = program(vec![func_def("f", vec![], vec![
+        def("xs", json!({ "type": "array", "data": { "value": [i64v(1), i64v(2), i64v(3), i64v(4)] } })),
+        def("removed", call("splice", vec![ident("xs"), i64v(1), i64v(2)])),
+        ret(call("len", vec![ident("removed")])),
+    ])]);
+    assert_eq!(run_and_call("splice", &ast, "f"), "2");
+    // at() with negative index, flatten, toSet.
+    assert_eq!(run_and_call("at", &program(vec![func_def("f", vec![], vec![
+        ret(call("at", vec![json!({ "type": "array", "data": { "value": [i64v(1), i64v(2), i64v(3)] } }), i64v(-1)]))])]), "f"), "3");
+    assert_eq!(run_and_call("toset", &program(vec![func_def("f", vec![], vec![
+        ret(call("len", vec![call("toSet", vec![json!({ "type": "array", "data": { "value": [i64v(1), i64v(1), i64v(2)] } })])]))])]), "f"), "2");
+}
+
+#[test]
+fn native_error_is_catchable_and_uncaught_traps() {
+    // An out-of-range native error thrown from a builtin is caught by a guest
+    // try/catch as an object carrying a message.
+    let ast = program(vec![func_def("f", vec![], vec![
+        json!({ "type": "tryStmt", "data": {
+            "errName": "e",
+            "body": [ ret(call("removeAt", vec![
+                json!({ "type": "array", "data": { "value": [i64v(1)] } }), i64v(9)])) ],
+            "catchBody": [ ret(json!({ "type": "indexer", "data": {
+                "target": ident("e"), "index": strv("name") } })) ],
+        } }),
+    ])]);
+    assert_eq!(run_and_call("native-catch", &ast, "f"), "\"Error\"");
+}
+
+#[test]
+fn throw_and_catch_binds_the_thrown_value() {
+    let ast = program(vec![func_def("f", vec![], vec![
+        json!({ "type": "tryStmt", "data": {
+            "errName": "e",
+            "body": [ json!({ "type": "throwOperation", "data": { "value": i64v(77) } }) ],
+            "catchBody": [ ret(ident("e")) ],
+        } }),
+    ])]);
+    assert_eq!(run_and_call("throw-catch", &ast, "f"), "77");
+}
