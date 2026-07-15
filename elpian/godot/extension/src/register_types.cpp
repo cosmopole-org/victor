@@ -7,6 +7,7 @@
 #include <godot_cpp/godot.hpp>
 
 #include "elpian_vm_node.h"
+#include "flutter_view.h"
 
 using namespace godot;
 
@@ -15,6 +16,9 @@ void initialize_elpian_module(ModuleInitializationLevel p_level) {
 		return;
 	}
 	GDREGISTER_CLASS(elpian::ElpianVM);
+	/* The Flutter surface node. Registered in every build (the class is inert
+	 * without ELPIAN_WITH_FLUTTER) so scenes/tooling referencing it still load. */
+	GDREGISTER_CLASS(elpian::FlutterView);
 }
 
 void uninitialize_elpian_module(ModuleInitializationLevel p_level) {

@@ -24,6 +24,7 @@
 #include <memory>
 
 #include "elpian_capi.h"
+#include "flutter_controller.h"
 #include "godot_controller.h"
 
 namespace elpian {
@@ -87,6 +88,9 @@ private:
 
 	ElpianGodotRuntime *rt = nullptr;
 	std::unique_ptr<GodotController> controller;
+	/* Lazily created on the first `flutter.*` host call — a VM that never touches
+	 * Flutter pays nothing (and needs no libflutter). */
+	std::unique_ptr<FlutterController> flutter;
 
 	static char *host_trampoline(void *user, const char *api_name, const char *args_json);
 	static void host_free_fn(void *user, char *s);

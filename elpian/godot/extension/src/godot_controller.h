@@ -127,6 +127,13 @@ public:
 	/* Register (or find) the handle for an engine object. */
 	int64_t register_object(godot::Object *obj);
 
+	/* Resolve a handle to an Object under sandbox `sbx` (0 = unrestricted),
+	 * applying the same containment/ownership checks as an op's `ref`. Used by
+	 * the FlutterController to resolve the Godot node a Flutter view mounts
+	 * under, so a sandboxed VM can only mount inside its own subtree. Returns
+	 * nullptr (with *r_err set) on failure. */
+	godot::Object *resolve_handle_checked(int64_t handle_id, int64_t sbx, godot::String *r_err);
+
 	/* The machine-checked coverage report over the whole of ClassDB. */
 	godot::Dictionary audit();
 

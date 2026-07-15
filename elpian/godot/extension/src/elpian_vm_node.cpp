@@ -86,7 +86,20 @@ char *ElpianVM::host_trampoline(void *user, const char *api_name, const char *ar
 	if (self == nullptr || self->controller == nullptr) {
 		return nullptr;
 	}
-	const String reply = self->controller->service(String::utf8(api_name), String::utf8(args_json));
+	const String api = String::utf8(api_name);
+	String reply;
+	if (api.begins_with("flutter.")) {
+		/* The Flutter UI seam: lazily stand up the controller, then let it drive
+		 * the embedded engine(s). It shares the GodotController so a Flutter view
+		 * resolves its parent node through the same sandbox and widget events
+		 * land in the same dispatch queue. */
+		if (self->flutter == nullptr) {
+			self->flutter = std::make_unique<FlutterController>(self, self->controller.get());
+		}
+		reply = self->flutter->service(api, String::utf8(args_json));
+	} else {
+		reply = self->controller->service(api, String::utf8(args_json));
+	}
 	const CharString utf8 = reply.utf8();
 	char *buf = static_cast<char *>(std::malloc(utf8.length() + 1));
 	if (buf == nullptr) {
@@ -168,6 +181,8 @@ void ElpianVM::stop() {
 	dispatch_event("_exit_tree", Variant());
 	elpian_godot_free(rt);
 	rt = nullptr;
+	/* Tear down Flutter engines/views before the GodotController they borrow. */
+	flutter.reset();
 	controller.reset();
 }
 
