@@ -1956,9 +1956,31 @@ impl JsParser {
         if args[1]["type"] != "string" {
             return None;
         }
-        let type_name = args[1]["data"]["value"].as_str()?;
+        let type_name = Self::universal_type_name(args[1]["data"]["value"].as_str()?);
         Some(json!({ "type": "typeTest", "data": {
             "value": args[0].clone(), "typeName": type_name, "cast": cast } }))
+    }
+
+    /// Compile-time resolution of an `__isType` / `__asType` type name to the
+    /// VM's neutral type-tag vocabulary (the same job dart2elpian's
+    /// `universal_type_name` does for reified `is` / `as`). The VM understands
+    /// only its own names (`int`, `float`, `number`, `string`, `list`, `map`,
+    /// `function`, `bool`, `null`, `any`); guest JS written before the neutral
+    /// vocabulary landed spells them `List`, `Map`, `num`, `Array`, … Any other
+    /// name is a class name and passes through unchanged (matched against the
+    /// instance's prototype chain).
+    fn universal_type_name(ty: &str) -> &str {
+        match ty {
+            "Array" | "List" | "Set" | "Iterable" => "list",
+            "Object" | "Map" => "map",
+            "num" | "Number" => "number",
+            "double" => "float",
+            "String" => "string",
+            "Boolean" => "bool",
+            "Function" => "function",
+            "Null" | "undefined" => "null",
+            other => other,
+        }
     }
 
     fn parse_args(&mut self) -> Vec<Value> {

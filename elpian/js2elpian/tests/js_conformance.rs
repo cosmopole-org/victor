@@ -96,3 +96,42 @@ fn lone_high_surrogate_becomes_replacement_char() {
     let js = r#"function f() { return "\uD83D!"; }"#;
     assert_eq!(run("esc-lone", js), "\"\u{FFFD}!\"");
 }
+
+// ---- Sums involving null / undefined (must never tear down the VM) ---------
+
+#[test]
+fn string_concat_with_null_and_undefined_is_total() {
+    // JS defines `"x" + undefined` / `"x" + null`; before first-class null the
+    // VM summed the compiled 0, and with typ-0 null it panicked the host
+    // process (the CaspiGames client died mid-flow on a status string). Both
+    // spellings conflate to the VM's null and stringify via the total display
+    // coercion.
+    assert_eq!(run("null-cat-r", "function f() { let u; return \"x\" + u; }"), "\"xnull\"");
+    assert_eq!(run("null-cat-l", "function f() { return null + \"x\"; }"), "\"nullx\"");
+    assert_eq!(run("null-cat-m", "function f() { let o = {}; return \"v=\" + o.nope + \"!\"; }"), "\"v=null!\"");
+}
+
+#[test]
+fn numeric_sum_with_null_is_the_identity() {
+    // Pre-null front-ends compiled null/undefined to integer 0, so guest code
+    // relies on `n + null == n` (JS agrees for null: `5 + null === 5`).
+    assert_eq!(run("null-sum-int", "function f() { return 5 + null; }"), "5");
+    assert_eq!(run("null-sum-int-l", "function f() { let u; return u + 5; }"), "5");
+    assert_eq!(run("null-sum-float", "function f() { return 1.5 + null; }"), "1.5");
+    assert_eq!(run("null-sum-null", "function f() { return null + null; }"), "0");
+}
+
+// ---- __isType type-name spellings -------------------------------------------
+
+#[test]
+fn is_type_accepts_pre_neutral_spellings() {
+    // Guest JS written before the VM's neutral type-tag vocabulary spells the
+    // tags `List` / `Map` / `num` / `Array` (the CaspiGames client gates its
+    // whole discovery flow on `__isType(r.games, "List")`). The front-end
+    // resolves them to the neutral names at compile time.
+    assert_eq!(run("ist-list", "function f() { if (__isType([1], \"List\")) { return 1; } return 0; }"), "1");
+    assert_eq!(run("ist-arr", "function f() { if (__isType([1], \"Array\")) { return 1; } return 0; }"), "1");
+    assert_eq!(run("ist-map", "function f() { if (__isType({ a: 1 }, \"Map\")) { return 1; } return 0; }"), "1");
+    assert_eq!(run("ist-num", "function f() { if (__isType(3, \"num\")) { return 1; } return 0; }"), "1");
+    assert_eq!(run("ist-not", "function f() { if (__isType(3, \"List\")) { return 1; } return 0; }"), "0");
+}
