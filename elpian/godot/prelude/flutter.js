@@ -93,40 +93,72 @@ function __flEl(type, props, children) {
 // ---------------------------------------------------------------------------
 
 function __flReify(view, node) {
-  if (node == null) {
+  return __flReifyValue(view, node);
+}
+
+// Reify ANY value for the wire, so an event handler or a widget is reachable in
+// EVERY position — a prop value, an element of a prop array (`children`,
+// `actions`, `slivers`, `tabs`, …), or a value nested in a prop map. This is
+// what makes the guest side complete by construction: any widget type built
+// with `FL.el(type, props, children)` and any handler on any prop is expressed
+// uniformly, with no per-widget code here.
+//
+//   * a function            → a `{callable: id}` tag (a durable slot, reused
+//                             across renders so cb ids stay bounded);
+//   * a widget node (has a string `t`) → reified {t, k?, p, c};
+//   * a list                → each element reified;
+//   * any other map          → each value reified (catches handlers/widgets
+//                             nested inside a value object);
+//   * a scalar               → passed through.
+function __flReifyValue(view, v) {
+  if (v == null) {
     return null;
   }
-  let t = typeof node;
-  if (t == "string" || t == "number" || t == "boolean") {
-    return node;
+  // Use the VM's neutral type tags (list/map/function) — never `.length`, since
+  // a map is not an array even if it answers to a length probe.
+  if (__isType(v, "function")) {
+    return { callable: __flSlot(view, v) };
   }
-  let out = { t: node.t };
-  if (node.k != null) {
-    out.k = node.k;
+  if (__isType(v, "list")) {
+    let arr = [];
+    for (let i = 0; i < v.length; i++) {
+      arr.push(__flReifyValue(view, v[i]));
+    }
+    return arr;
   }
-  if (node.p != null) {
-    let p = {};
-    for (let key in node.p) {
-      let v = node.p[key];
-      if (typeof v == "function") {
-        p[key] = { callable: __flSlot(view, v) };
-      } else if (v != null && typeof v == "object" && v.t != null) {
-        // A widget passed as a prop value (AppBar title, Scaffold body, …).
-        p[key] = __flReify(view, v);
-      } else {
-        p[key] = v;
+  if (__isType(v, "map")) {
+    // Widget node: a map carrying a string type tag `t`.
+    if (__isType(v.t, "string")) {
+      let out = { t: v.t };
+      if (v.k != null) {
+        out.k = v.k;
       }
+      if (v.p != null) {
+        let p = {};
+        for (let key in v.p) {
+          p[key] = __flReifyValue(view, v.p[key]);
+        }
+        out.p = p;
+      }
+      if (v.c != null) {
+        let kids = [];
+        for (let i = 0; i < v.c.length; i++) {
+          kids.push(__flReifyValue(view, v.c[i]));
+        }
+        out.c = kids;
+      }
+      return out;
     }
-    out.p = p;
-  }
-  if (node.c != null) {
-    let kids = [];
-    for (let i = 0; i < node.c.length; i++) {
-      kids.push(__flReify(view, node.c[i]));
+    // Any other map (a value object): reify each value so a handler or widget
+    // nested inside it (a custom decoration, a route map, …) is still reached.
+    let m = {};
+    for (let key in v) {
+      m[key] = __flReifyValue(view, v[key]);
     }
-    out.c = kids;
+    return m;
   }
-  return out;
+  // Scalars (number / string / bool) pass through.
+  return v;
 }
 
 // Hand back a stable cb id for a handler in this render pass, reusing a slot
@@ -346,5 +378,198 @@ class FL {
     props.value = value;
     props.onChanged = onChanged;
     return __flEl("Slider", props);
+  }
+
+  // More content / layout sugar (all thin over __flEl; FL.el reaches anything
+  // the host registry knows, so this list is convenience, not the coverage
+  // boundary — see FLUTTER.md).
+  static align(alignment, child) {
+    return __flEl("Align", { alignment: alignment }, [child]);
+  }
+  static positioned(p, child) {
+    return __flEl("Positioned", p, [child]);
+  }
+  static wrap(children, p) {
+    return __flEl("Wrap", p == null ? {} : p, children);
+  }
+  static flexible(child, flex) {
+    return __flEl("Flexible", { flex: flex == null ? 1 : flex }, [child]);
+  }
+  static aspectRatio(ratio, child) {
+    return __flEl("AspectRatio", { aspectRatio: ratio }, [child]);
+  }
+  static opacity(value, child) {
+    return __flEl("Opacity", { opacity: value }, [child]);
+  }
+  static clip(shape, child) {
+    return __flEl(shape == null ? "ClipRRect" : shape, {}, [child]);
+  }
+  static card(child, p) {
+    return __flEl("Card", p == null ? {} : p, [child]);
+  }
+  static listTile(p) {
+    return __flEl("ListTile", p == null ? {} : p);
+  }
+  static chip(label, p) {
+    let props = p == null ? {} : p;
+    props.label = label;
+    return __flEl("Chip", props);
+  }
+  static checkbox(value, onChanged) {
+    return __flEl("Checkbox", { value: value, onChanged: onChanged });
+  }
+  static radio(value, groupValue, onChanged) {
+    return __flEl("Radio", { value: value, groupValue: groupValue, onChanged: onChanged });
+  }
+  static dropdown(value, items, onChanged) {
+    return __flEl("DropdownButton", { value: value, items: items, onChanged: onChanged });
+  }
+  static scroll(child, p) {
+    return __flEl("SingleChildScrollView", p == null ? {} : p, [child]);
+  }
+  static gridView(children, p) {
+    return __flEl("GridView", p == null ? {} : p, children);
+  }
+  static pageView(children, p) {
+    return __flEl("PageView", p == null ? {} : p, children);
+  }
+  static tabs(tabs, views, p) {
+    let props = p == null ? {} : p;
+    props.tabs = tabs;
+    props.views = views;
+    return __flEl("TabScaffold", props);
+  }
+  static circularProgress(p) {
+    return __flEl("CircularProgressIndicator", p == null ? {} : p);
+  }
+  static linearProgress(p) {
+    return __flEl("LinearProgressIndicator", p == null ? {} : p);
+  }
+  static divider(p) {
+    return __flEl("Divider", p == null ? {} : p);
+  }
+  static circleAvatar(p) {
+    return __flEl("CircleAvatar", p == null ? {} : p);
+  }
+  static tooltip(message, child) {
+    return __flEl("Tooltip", { message: message }, [child]);
+  }
+  static hero(tag, child) {
+    return __flEl("Hero", { tag: tag }, [child]);
+  }
+  static animatedContainer(p, child) {
+    return __flEl("AnimatedContainer", p == null ? {} : p, child == null ? null : [child]);
+  }
+
+  // =========================================================================
+  // The full event surface. Every gesture / pointer / keyboard / focus / drag
+  // / scroll / value callback is reachable — a handler is just a function-valued
+  // prop, converted to a `{callable}` tag by the reifier and dispatched back
+  // through the same path Godot signals use. The host decodes each callback's
+  // details into a JSON argument the handler receives.
+  // =========================================================================
+
+  // GestureDetector — the complete tap / double-tap / long-press / drag / pan /
+  // scale / force-press / secondary / tertiary callback set. Pass any subset in
+  // `handlers`; unknown keys are ignored by the host.
+  //
+  //   onTapDown onTapUp onTap onTapCancel
+  //   onSecondaryTap onSecondaryTapDown onSecondaryTapUp onSecondaryTapCancel
+  //   onTertiaryTapDown onTertiaryTapUp onTertiaryTapCancel
+  //   onDoubleTap onDoubleTapDown onDoubleTapCancel
+  //   onLongPress onLongPressStart onLongPressMoveUpdate onLongPressUp onLongPressEnd
+  //   onVerticalDragStart onVerticalDragUpdate onVerticalDragEnd onVerticalDragDown onVerticalDragCancel
+  //   onHorizontalDragStart onHorizontalDragUpdate onHorizontalDragEnd onHorizontalDragDown onHorizontalDragCancel
+  //   onPanStart onPanUpdate onPanEnd onPanDown onPanCancel
+  //   onScaleStart onScaleUpdate onScaleEnd
+  //   onForcePressStart onForcePressPeak onForcePressUpdate onForcePressEnd
+  static gestures(child, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = child;
+    return __flEl("GestureDetector", p);
+  }
+
+  // InkWell — Material tap feedback: onTap onTapDown onTapUp onTapCancel
+  // onDoubleTap onLongPress onSecondaryTap onHover onFocusChange onHighlightChanged.
+  static inkWell(child, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = child;
+    return __flEl("InkWell", p);
+  }
+
+  // Listener — raw pointer events: onPointerDown onPointerMove onPointerUp
+  // onPointerHover onPointerCancel onPointerSignal onPointerPanZoomStart
+  // onPointerPanZoomUpdate onPointerPanZoomEnd.
+  static listener(child, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = child;
+    return __flEl("Listener", p);
+  }
+
+  // MouseRegion — hover: onEnter onExit onHover (+ cursor).
+  static mouseRegion(child, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = child;
+    return __flEl("MouseRegion", p);
+  }
+
+  // Focus — keyboard focus + key events: onFocusChange onKeyEvent (+ autofocus).
+  static focus(child, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = child;
+    return __flEl("Focus", p);
+  }
+
+  // KeyboardListener — every hardware key: onKeyEvent (down/up/repeat, with
+  // logical/physical key, character, and modifier flags in the details).
+  static keyboard(child, onKeyEvent, p) {
+    let props = p == null ? {} : p;
+    props.child = child;
+    props.onKeyEvent = onKeyEvent;
+    return __flEl("KeyboardListener", props);
+  }
+
+  // NotificationListener — scroll & custom notifications bubbling up:
+  // onNotification (ScrollStart/Update/End/Metrics, OverscrollNotification, …).
+  static notificationListener(child, onNotification) {
+    return __flEl("NotificationListener", { child: child, onNotification: onNotification });
+  }
+
+  // Draggable / DragTarget — drag & drop.
+  //   Draggable handlers: onDragStarted onDragUpdate onDragEnd onDraggableCanceled onDragCompleted
+  //   DragTarget handlers: onWillAccept onAccept onAcceptWithDetails onLeave onMove
+  static draggable(child, feedback, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = child;
+    p.feedback = feedback;
+    return __flEl("Draggable", p);
+  }
+  static dragTarget(builderChild, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.child = builderChild;
+    return __flEl("DragTarget", p);
+  }
+
+  // Dismissible — swipe to dismiss: onDismissed confirmDismiss onResize onUpdate.
+  static dismissible(key, child, handlers) {
+    let p = handlers == null ? {} : handlers;
+    p.dismissKey = key;
+    p.child = child;
+    return __flEl("Dismissible", p);
+  }
+
+  // RefreshIndicator — pull to refresh: onRefresh.
+  static refreshIndicator(child, onRefresh) {
+    return __flEl("RefreshIndicator", { child: child, onRefresh: onRefresh });
+  }
+
+  // PopScope — intercept back navigation: onPopInvoked (+ canPop).
+  static popScope(child, onPopInvoked, canPop) {
+    return __flEl("PopScope", { child: child, onPopInvoked: onPopInvoked, canPop: canPop });
+  }
+
+  // Form / fields — onChanged onSaved validator onFieldSubmitted onEditingComplete.
+  static form(child, onChanged) {
+    return __flEl("Form", { child: child, onChanged: onChanged });
   }
 }

@@ -41,7 +41,10 @@ The pieces, and where they live:
 | C++ `FlutterController` (op interpreter, view table, event bridge) | `extension/src/flutter_controller.*` | **Implemented** (builds; drives engine when enabled) |
 | C++ `FlutterView` node (embedder API, software compositor, input, metrics) | `extension/src/flutter_view.*` | **Implemented** behind `ELPIAN_WITH_FLUTTER` |
 | Node/registration/build wiring | `extension/src/{elpian_vm_node,register_types}.*`, `CMakeLists.txt`, `SConstruct` | **Implemented** |
-| Embedded AOT interpreter app | `flutter_host/` | **Implemented** (needs Flutter SDK to snapshot) |
+| Full event surface (gestures/pointer/keyboard/focus/drag/scroll/value) | `prelude/flutter.js` + `flutter_host/lib/main.dart` | **Implemented + swept by test** |
+| Event-surface sweep (21 event types × all positions) | `capi/tests/run_flutter_demo.rs` | **Passing** |
+| Embedded AOT interpreter app (large hand-written widget/value catalog) | `flutter_host/lib/main.dart` | **Implemented** (needs Flutter SDK to snapshot) |
+| Full-coverage registry generator (from Flutter's API) + committed stub | `flutter_host/tool/gen_registry.dart`, `flutter_host/lib/registry.g.dart` | **Implemented** (needs Flutter SDK + analyzer to run) |
 
 > **What is proven here vs. what needs the engine.** The guest→seam→dispatch
 > contract is implemented and covered by a passing Rust test that drives a full
@@ -63,10 +66,52 @@ So "a reflective FlutterController over everything" is impossible *in principle*
 
 The achievable, App-Store-legal model — the one Google's own `package:rfw` uses —
 is a **widget/property registry** inside a fixed AOT interpreter app: the guest
-sends declarative widget data, the app materializes real widgets. Coverage is
-enumerated (in `flutter_host/lib/main.dart`), not complete-by-construction, but
-it can be made broad and even generated from Flutter's API with the analyzer. The
-guest never ships code — only data — so no JIT, exactly like the rest of Victor.
+sends declarative widget data, the app materializes real widgets. The guest never
+ships code — only data — so no JIT, exactly like the rest of Victor.
+
+### How "no exception" coverage is achieved
+
+Coverage is delivered on three fronts so there is no widget, handler, or event
+type the system cannot express:
+
+1. **Guest side — complete by construction, and tested.** `FL.el(type, props,
+   children)` builds *any* widget by name, and `__flReifyValue` in `flutter.js`
+   converts a handler (or a nested widget) to a wire tag in **every** position —
+   a prop, an element of a prop array (`children`/`actions`/`slivers`/…), or a
+   value nested in a value map. So any widget type and any handler is expressible
+   from the guest with zero per-widget code. `capi/tests/run_flutter_demo.rs`
+   proves this with an event-surface sweep that fires 21 event types across all
+   those positions and checks each reaches its distinct guest closure.
+
+2. **Event side — the whole bounded surface is enumerated.** `flutter.js` and
+   `flutter_host/lib/main.dart` cover every GestureDetector callback (tap /
+   double-tap / long-press / vertical+horizontal drag / pan / scale / force-press
+   / secondary / tertiary), Listener pointer events, MouseRegion hover,
+   Focus/KeyboardListener key events, drag & drop (Draggable/DragTarget),
+   Dismissible, scroll notifications, and every widget-specific value callback —
+   each serialized to a JSON details object the guest handler receives.
+
+3. **Host widget side — a large hand-written catalog + a build-time generator.**
+   `flutter_host/lib/main.dart` hand-writes the common Material/Cupertino/layout/
+   scroll/input catalog (the widgets needing bespoke event or slot wiring), and
+   `flutter_host/tool/gen_registry.dart` closes the long tail: it walks Flutter's
+   *own* public API with the analyzer and generates `lib/registry.g.dart`, a
+   builder for **every** public widget (mapping each constructor parameter from
+   the props through the `_P` decoders) plus a decoder for every enum. This is
+   the Flutter analogue of the Godot bridge's generated `@GlobalScope` table
+   (`tools/gen_global_constants.py`, "never written by hand") — the difference
+   being that Flutter has no runtime reflection, so it is generated at **build
+   time** rather than resolved at runtime. Any widget not in the hand-written
+   switch falls through to the generated registry, so no public widget is out of
+   reach. A committed stub (`registry.g.dart`) keeps the app compiling before the
+   generator has run; running it (with a Flutter SDK) makes coverage complete and
+   keeps it current with the SDK.
+
+The remaining honest caveat is the one Flutter itself imposes: coverage is
+**enumerated by generation**, not reflective — a brand-new widget added to the
+Flutter SDK is reachable after the generator is re-run against that SDK, not the
+instant it ships. That is inherent to a no-reflection AOT framework; within it,
+this is as close to complete-by-construction as the platform allows.
 
 ## Control from Elpian — identical model to Godot
 

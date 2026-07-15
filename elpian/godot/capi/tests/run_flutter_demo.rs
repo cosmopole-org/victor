@@ -204,3 +204,182 @@ fn flutter_widget_event_round_trip() {
         Err(_) => panic!("TIMEOUT — flutter widget round trip wedged"),
     }
 }
+
+// ===========================================================================
+// Event-surface sweep: prove that a handler in EVERY event category and EVERY
+// tree position (a widget's own prop, a prop that is a widget, a widget inside
+// a prop ARRAY, a handler nested in a value map) is reified to a callable tag
+// and, when fired, reaches its distinct guest closure through the same
+// __godotDispatch path. This is the "no exception" guarantee for the guest side.
+// ===========================================================================
+
+/// One tree exercising the whole event vocabulary. Each handler prints a unique
+/// tag when fired, so the test can assert every category round-tripped. Handlers
+/// read their argument defensively so a single generic dispatch arg works for
+/// all of them.
+const EVENTS_APP: &str = r#"
+import 'flutter.js';
+
+function tag(name) { return function (a) { print('EV:' + name); }; }
+
+function App() {
+  return FL.el('Scaffold', {
+    // handler on a plain widget prop
+    body: FL.gestures(
+      FL.text('touch me'),
+      {
+        onTap: tag('tap'),
+        onDoubleTap: tag('doubleTap'),
+        onLongPress: tag('longPress'),
+        onPanUpdate: tag('panUpdate'),
+        onVerticalDragEnd: tag('vDragEnd'),
+        onScaleUpdate: tag('scaleUpdate'),
+      }
+    ),
+    // pointer + hover + keyboard wrappers, each nesting a child widget
+    bottomSheet: FL.listener(
+      FL.mouseRegion(
+        FL.keyboard(FL.text('keys'), tag('key')),
+        { onEnter: tag('enter'), onHover: tag('hover') }
+      ),
+      { onPointerDown: tag('pointerDown'), onPointerSignal: tag('pointerSignal') }
+    ),
+    // value callbacks + a handler inside a prop ARRAY (actions:[ iconButton ])
+    appBar: FL.el('AppBar', {
+      title: FL.text('bar'),
+      actions: [
+        FL.iconButton('menu', tag('action1')),
+        FL.inkWell(FL.text('ink'), { onTap: tag('inkTap'), onHover: tag('inkHover') }),
+      ],
+    }),
+    drawer: FL.column([
+      FL.textField({ onChanged: tag('changed'), onSubmitted: tag('submitted') }),
+      FL.slider(0.0, tag('slide')),
+      FL.checkbox(false, tag('check')),
+      FL.el('Switch', { value: false, onChanged: tag('switch') }),
+    ]),
+    // a handler nested inside a value map (not a widget) — must still be reified
+    floatingActionButton: FL.el('FloatingActionButton', {
+      name: 'add',
+      onTap: tag('fab'),
+      meta: { deep: { onDeep: tag('deep') } },
+    }),
+  });
+}
+
+var view = FL.mount(GD.host(), App, {});
+print('events app up');
+"#;
+
+/// Collect EVERY callable id anywhere in the tree (position-agnostic).
+fn harvest_all(node: &Value, out: &mut Vec<i64>) {
+    match node {
+        Value::Object(o) => {
+            if let Some(c) = o.get("callable").and_then(|v| v.as_i64()) {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+            for (_k, v) in o {
+                harvest_all(v, out);
+            }
+        }
+        Value::Array(a) => {
+            for v in a {
+                harvest_all(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn flutter_event_surface_sweep() {
+    // Every tag the tree wires; firing every harvested callable must produce
+    // every one of these, proving each event category + position round-trips.
+    const EXPECT: &[&str] = &[
+        "tap", "doubleTap", "longPress", "panUpdate", "vDragEnd", "scaleUpdate", "key", "enter",
+        "hover", "pointerDown", "pointerSignal", "action1", "inkTap", "inkHover", "changed",
+        "submitted", "slide", "check", "switch", "fab", "deep",
+    ];
+
+    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+    std::thread::spawn(move || {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tree = std::sync::Arc::new(Mutex::new(Value::Null));
+            let mut mgr = VmManager::new_root_lang(
+                "run-flutter-events".to_string(),
+                EVENTS_APP,
+                GuestLang::Js,
+                true,
+                0,
+                0,
+            )
+            .map_err(|e| format!("COMPILE ERROR: {e}"))?;
+
+            let captured = tree.clone();
+            mgr.set_bridge(Some(Box::new(move |name, args| {
+                let op = args.first().cloned().unwrap_or(Value::Null);
+                match name {
+                    "godot.op" => {
+                        if op.get("self").is_some() {
+                            return Some(json!(-1));
+                        }
+                        Some(Value::Null)
+                    }
+                    "flutter.op" => {
+                        if op.get("newview").is_some() {
+                            return Some(json!(-101));
+                        }
+                        if let Some(t) = op.get("tree") {
+                            *captured.lock().unwrap() = t.clone();
+                        }
+                        Some(Value::Null)
+                    }
+                    _ => None,
+                }
+            })));
+
+            mgr.run_root().map_err(|e| format!("run_root() ERROR: {e}"))?;
+
+            // Harvest every callable the reifier produced, in any position.
+            let cbs = {
+                let t = tree.lock().unwrap();
+                let mut v = Vec::new();
+                harvest_all(&t, &mut v);
+                v
+            };
+            if cbs.len() < EXPECT.len() {
+                return Err(format!(
+                    "only {} callables reified, expected >= {} (a handler position was missed)",
+                    cbs.len(),
+                    EXPECT.len()
+                ));
+            }
+
+            // Fire each with one generic arg (a map that also reads as scalars);
+            // every handler ignores/reads it defensively, so all should log.
+            for cb in &cbs {
+                mgr.invoke("__godotDispatch", json!([cb, [{"dx": 3, "dy": 4, "value": 5}]]));
+            }
+            mgr.pump(16).map_err(|e| format!("pump: {e}"))?;
+
+            Ok::<String, String>(mgr.take_log().join("\n"))
+        }));
+        let _ = tx.send(res.unwrap_or_else(|_| Err("PANIC".into())));
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(Ok(log)) => {
+            eprintln!("EVENT SWEEP LOG:\n{log}");
+            for name in EXPECT {
+                assert!(
+                    log.contains(&format!("EV:{name}")),
+                    "event '{name}' never reached its guest handler (missing from sweep)"
+                );
+            }
+        }
+        Ok(Err(e)) => panic!("event sweep did not run cleanly: {e}"),
+        Err(_) => panic!("TIMEOUT — event sweep wedged"),
+    }
+}

@@ -19,6 +19,10 @@ dependencies:
 
 dev_dependencies:
   flutter_lints: ^3.0.0
+  # Used only by tool/gen_registry.dart to generate lib/registry.g.dart from
+  # Flutter's public API (the "no exception" widget-coverage mechanism). Not
+  # part of the app.
+  analyzer: ^6.4.0
 
 flutter:
   uses-material-design: true
