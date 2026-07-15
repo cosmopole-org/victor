@@ -2239,6 +2239,11 @@ impl Executor {
                     10 => {
                         panic!("elpian error: function and integer can not be summed");
                     }
+                    // null sums as the additive identity: before first-class
+                    // null landed the front-ends compiled absent values to
+                    // integer 0, and guest code (JS `x + null` is defined)
+                    // relies on a sum with null not tearing down the VM.
+                    0 => self.check_int_range(val1),
                     _ => {
                         panic!("elpian error: unknown data type and integer can not be summed");
                     }
@@ -2296,6 +2301,7 @@ impl Executor {
                     10 => {
                         panic!("elpian error: function and float can not be summed");
                     }
+                    0 => self.check_float_range(val1),
                     _ => {
                         panic!("elpian error: unknown data type and float can not be summed");
                     }
@@ -2422,6 +2428,12 @@ impl Executor {
                     10 => {
                         panic!("elpian error: function and string can not be summed");
                     }
+                    // Concat is total over null via the display coercion —
+                    // `"lives: " + maybeNull` must yield a string, not a trap.
+                    0 => Val {
+                        typ: 7,
+                        data: Payload::from(format!("{}{}", val1, arg2.to_display())),
+                    },
                     _ => {
                         panic!("elpian error: unknown data type and string can not be summed");
                     }
@@ -2516,6 +2528,26 @@ impl Executor {
             10 => {
                 panic!("elpian error: function can not be summed with other types");
             }
+            // null on the left: the additive identity for numbers, the total
+            // display coercion ("null") in a string concat — mirrors the
+            // null-on-the-right arms above.
+            0 => match arg2.typ {
+                0 => Val { typ: 1, data: Payload::from(0i16) },
+                1 | 2 | 3 => self.check_int_range(match arg2.typ {
+                    1 => arg2.as_i16() as i64,
+                    2 => arg2.as_i32() as i64,
+                    _ => arg2.as_i64(),
+                }),
+                4 => self.check_float_range(arg2.as_f32() as f64),
+                5 => self.check_float_range(arg2.as_f64()),
+                7 => Val {
+                    typ: 7,
+                    data: Payload::from(format!("{}{}", arg1.to_display(), arg2.as_string())),
+                },
+                _ => {
+                    panic!("elpian error: null can not be summed with this type");
+                }
+            },
             _ => {
                 panic!("elpian error: unknown type can not be summed with other types");
             }
