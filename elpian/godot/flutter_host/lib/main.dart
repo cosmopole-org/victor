@@ -29,6 +29,8 @@
 // the guest handler receives as its argument.
 
 import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
@@ -411,6 +413,19 @@ class _Interp {
         return AnimatedSwitcher(key: key, duration: p.duration('duration') ?? const Duration(milliseconds: 300), child: kid());
       case 'Hero':
         return Hero(key: key, tag: p.raw('tag') ?? 'hero', child: kid());
+
+      // ---- custom painting --------------------------------------------------
+      case 'CustomPaint':
+        final size = p.list('size');
+        return CustomPaint(
+          key: key,
+          size: size != null && size.length >= 2 ? Size((size[0] as num).toDouble(), (size[1] as num).toDouble()) : Size.zero,
+          painter: p.has('ops') ? _ReplayPainter(p.list('ops')!) : null,
+          foregroundPainter: p.has('foregroundOps') ? _ReplayPainter(p.list('foregroundOps')!) : null,
+          isComplex: p.hasB('isComplex'),
+          willChange: p.hasB('willChange'),
+          child: p.w('child'),
+        );
 
       // ---- EVENT wrappers (the full event surface) -------------------------
       case 'GestureDetector':
@@ -875,6 +890,302 @@ class _P {
     );
   }
 }
+
+// =============================================================================
+// Canvas / CustomPainter — replay a serialized dart:ui display list onto the
+// real Flutter Canvas. Every Canvas / Paint / Path / shader / paragraph op the
+// guest FLCanvas can record is handled here.
+// =============================================================================
+
+// Fires when an async image finishes decoding so painters holding it repaint.
+final ValueNotifier<int> _canvasRepaint = ValueNotifier<int>(0);
+final Map<String, ui.Image> _imageCache = {};
+final Set<String> _imageLoading = {};
+
+class _ReplayPainter extends CustomPainter {
+  _ReplayPainter(this.ops) : super(repaint: _canvasRepaint);
+  final List ops;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final raw in ops) {
+      if (raw is! Map) continue;
+      _apply(canvas, raw, size);
+    }
+  }
+
+  void _apply(Canvas canvas, Map o, Size size) {
+    switch (o['op'] as String? ?? '') {
+      case 'save':
+        canvas.save();
+        break;
+      case 'saveLayer':
+        canvas.saveLayer(_rectN(o['rect']), _paint(o['paint']));
+        break;
+      case 'restore':
+        canvas.restore();
+        break;
+      case 'restoreToCount':
+        canvas.restoreToCount(_int(o['count']) ?? 1);
+        break;
+      case 'translate':
+        canvas.translate(_d(o['dx']), _d(o['dy']));
+        break;
+      case 'scale':
+        canvas.scale(_d(o['sx']), _d(o['sy']));
+        break;
+      case 'rotate':
+        canvas.rotate(_d(o['radians']));
+        break;
+      case 'skew':
+        canvas.skew(_d(o['sx']), _d(o['sy']));
+        break;
+      case 'transform':
+        canvas.transform(_float64(o['matrix']));
+        break;
+      case 'clipRect':
+        canvas.clipRect(_rect(o['rect']), clipOp: o['clipOp'] == 'difference' ? ui.ClipOp.difference : ui.ClipOp.intersect, doAntiAlias: o['aa'] != false);
+        break;
+      case 'clipRRect':
+        canvas.clipRRect(_rrect(o['rrect']), doAntiAlias: o['aa'] != false);
+        break;
+      case 'clipPath':
+        canvas.clipPath(_path(o['path']), doAntiAlias: o['aa'] != false);
+        break;
+      case 'drawColor':
+        canvas.drawColor(_decodeColor(o['color']) ?? const Color(0x00000000), _blend(o['blend']));
+        break;
+      case 'drawPaint':
+        canvas.drawPaint(_paint(o['paint']));
+        break;
+      case 'drawLine':
+        canvas.drawLine(_off(o['p1']), _off(o['p2']), _paint(o['paint']));
+        break;
+      case 'drawRect':
+        canvas.drawRect(_rect(o['rect']), _paint(o['paint']));
+        break;
+      case 'drawRRect':
+        canvas.drawRRect(_rrect(o['rrect']), _paint(o['paint']));
+        break;
+      case 'drawDRRect':
+        canvas.drawDRRect(_rrect(o['outer']), _rrect(o['inner']), _paint(o['paint']));
+        break;
+      case 'drawOval':
+        canvas.drawOval(_rect(o['rect']), _paint(o['paint']));
+        break;
+      case 'drawCircle':
+        canvas.drawCircle(Offset(_d(o['cx']), _d(o['cy'])), _d(o['radius']), _paint(o['paint']));
+        break;
+      case 'drawArc':
+        canvas.drawArc(_rect(o['rect']), _d(o['start']), _d(o['sweep']), o['useCenter'] == true, _paint(o['paint']));
+        break;
+      case 'drawPath':
+        canvas.drawPath(_path(o['path']), _paint(o['paint']));
+        break;
+      case 'drawImage':
+        final img = _image(o['src']);
+        if (img != null) canvas.drawImage(img, _off2(o['dx'], o['dy']), _paint(o['paint']));
+        break;
+      case 'drawImageRect':
+        final img = _image(o['src']);
+        if (img != null) canvas.drawImageRect(img, _rect(o['srcRect']), _rect(o['dstRect']), _paint(o['paint']));
+        break;
+      case 'drawImageNine':
+        final img = _image(o['src']);
+        if (img != null) canvas.drawImageNine(img, _rect(o['center']), _rect(o['dstRect']), _paint(o['paint']));
+        break;
+      case 'drawParagraph':
+        canvas.drawParagraph(_paragraph(o['paragraph']), _off2(o['dx'], o['dy']));
+        break;
+      case 'drawPoints':
+        canvas.drawPoints(_pointMode(o['mode']), _offsets(o['points']), _paint(o['paint']));
+        break;
+      case 'drawShadow':
+        canvas.drawShadow(_path(o['path']), _decodeColor(o['color']) ?? const Color(0xFF000000), _d(o['elevation']), o['transparentOccluder'] == true);
+        break;
+      case 'drawVertices':
+        canvas.drawVertices(_vertices(o['vertices']), _blend(o['blend']), _paint(o['paint']));
+        break;
+      case 'drawAtlas':
+        final img = _image(o['src']);
+        if (img != null) {
+          canvas.drawAtlas(img, _rsTransforms(o['transforms']), _rects(o['rects']), _colors(o['colors']), _blend(o['blend']), _rectN(o['cullRect']), _paint(o['paint']));
+        }
+        break;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ReplayPainter old) => !identical(old.ops, ops);
+
+  // ---- canvas value decoders ------------------------------------------------
+  double _d(dynamic v) => v is num ? v.toDouble() : 0.0;
+  int? _int(dynamic v) => v is num ? v.toInt() : null;
+  Offset _off(dynamic v) => v is List && v.length >= 2 ? Offset(_d(v[0]), _d(v[1])) : Offset.zero;
+  Offset _off2(dynamic x, dynamic y) => Offset(_d(x), _d(y));
+  Rect _rect(dynamic v) => v is List && v.length >= 4 ? Rect.fromLTRB(_d(v[0]), _d(v[1]), _d(v[2]), _d(v[3])) : Rect.zero;
+  Rect? _rectN(dynamic v) => v == null ? null : _rect(v);
+  Float64List _float64(dynamic v) => v is List ? Float64List.fromList(v.map((e) => (e as num).toDouble()).toList()) : Matrix4.identity().storage;
+
+  RRect _rrect(dynamic v) {
+    if (v is! Map) return RRect.fromRectAndRadius(_rect(v), Radius.zero);
+    final r = _rect(v['rect']);
+    if (v['radius'] is num) return RRect.fromRectAndRadius(r, Radius.circular((v['radius'] as num).toDouble()));
+    Radius corner(String k) => v[k] is num ? Radius.circular((v[k] as num).toDouble()) : Radius.zero;
+    return RRect.fromRectAndCorners(r, topLeft: corner('tl'), topRight: corner('tr'), bottomLeft: corner('bl'), bottomRight: corner('br'));
+  }
+
+  List<Offset> _offsets(dynamic v) => v is List ? v.map<Offset>((e) => _off(e)).toList() : const [];
+
+  Paint _paint(dynamic v) {
+    final paint = Paint();
+    if (v is! Map) return paint;
+    paint.color = _decodeColor(v['color']) ?? const Color(0xFF000000);
+    if (v['style'] == 'stroke') paint.style = PaintingStyle.stroke;
+    if (v['strokeWidth'] is num) paint.strokeWidth = (v['strokeWidth'] as num).toDouble();
+    paint.strokeCap = _strokeCap(v['strokeCap']);
+    paint.strokeJoin = _strokeJoin(v['strokeJoin']);
+    if (v['strokeMiterLimit'] is num) paint.strokeMiterLimit = (v['strokeMiterLimit'] as num).toDouble();
+    if (v['isAntiAlias'] is bool) paint.isAntiAlias = v['isAntiAlias'] as bool;
+    if (v['blendMode'] != null) paint.blendMode = _blend(v['blendMode']);
+    if (v['invertColors'] == true) paint.invertColors = true;
+    if (v['shader'] != null) paint.shader = _shader(v['shader']);
+    final blurSigma = v['blur'] is num ? (v['blur'] as num).toDouble() : (v['maskFilter'] is Map && (v['maskFilter']['sigma'] is num) ? (v['maskFilter']['sigma'] as num).toDouble() : null);
+    if (blurSigma != null) paint.maskFilter = MaskFilter.blur(_blurStyle(v['maskFilter'] is Map ? v['maskFilter']['style'] : null), blurSigma);
+    return paint;
+  }
+
+  Path _path(dynamic v) {
+    final path = Path();
+    if (v is! Map) return path;
+    if (v['fillType'] == 'evenOdd') path.fillType = PathFillType.evenOdd;
+    for (final verb in (v['verbs'] as List? ?? const [])) {
+      if (verb is! List || verb.isEmpty) continue;
+      final n = verb.map((e) => e is num ? e.toDouble() : e).toList();
+      switch (verb[0]) {
+        case 'moveTo': path.moveTo(n[1], n[2]); break;
+        case 'lineTo': path.lineTo(n[1], n[2]); break;
+        case 'rMoveTo': path.relativeMoveTo(n[1], n[2]); break;
+        case 'rLineTo': path.relativeLineTo(n[1], n[2]); break;
+        case 'quadTo': path.quadraticBezierTo(n[1], n[2], n[3], n[4]); break;
+        case 'rQuadTo': path.relativeQuadraticBezierTo(n[1], n[2], n[3], n[4]); break;
+        case 'cubicTo': path.cubicTo(n[1], n[2], n[3], n[4], n[5], n[6]); break;
+        case 'rCubicTo': path.relativeCubicTo(n[1], n[2], n[3], n[4], n[5], n[6]); break;
+        case 'conicTo': path.conicTo(n[1], n[2], n[3], n[4], n[5]); break;
+        case 'rConicTo': path.relativeConicTo(n[1], n[2], n[3], n[4], n[5]); break;
+        case 'arcTo': path.arcTo(_rect(verb[1]), (verb[2] as num).toDouble(), (verb[3] as num).toDouble(), verb[4] == true); break;
+        case 'arcToPoint': path.arcToPoint(Offset((verb[1] as num).toDouble(), (verb[2] as num).toDouble()), radius: Radius.elliptical((verb[3] as num).toDouble(), (verb[4] as num).toDouble()), rotation: (verb[5] as num).toDouble(), largeArc: verb[6] == true, clockwise: verb[7] != false); break;
+        case 'addRect': path.addRect(_rect(verb[1])); break;
+        case 'addRRect': path.addRRect(_rrect(verb[1])); break;
+        case 'addOval': path.addOval(_rect(verb[1])); break;
+        case 'addArc': path.addArc(_rect(verb[1]), (verb[2] as num).toDouble(), (verb[3] as num).toDouble()); break;
+        case 'addPolygon': path.addPolygon(_offsets(verb[1]), verb[2] == true); break;
+        case 'addPath': path.addPath(_path(verb[1]), Offset((verb[2] as num).toDouble(), (verb[3] as num).toDouble())); break;
+        case 'close': path.close(); break;
+      }
+    }
+    return path;
+  }
+
+  ui.Shader? _shader(dynamic v) {
+    if (v is! Map) return null;
+    final colors = (v['colors'] as List? ?? const []).map((c) => _decodeColor(c) ?? const Color(0xFF000000)).toList();
+    final stops = v['stops'] is List ? (v['stops'] as List).map((e) => (e as num).toDouble()).toList() : null;
+    if (colors.length < 2) return null;
+    switch (v['type']) {
+      case 'linear':
+        return ui.Gradient.linear(_off(v['from']), _off(v['to']), colors, stops, _tileMode(v['tileMode']));
+      case 'radial':
+        return ui.Gradient.radial(_off(v['center']), _d(v['radius']), colors, stops, _tileMode(v['tileMode']));
+      case 'sweep':
+        return ui.Gradient.sweep(_off(v['center']), colors, stops, _tileMode(v['tileMode']), _d(v['startAngle']), v['endAngle'] is num ? (v['endAngle'] as num).toDouble() : 6.2831853);
+      default:
+        return null;
+    }
+  }
+
+  ui.Paragraph _paragraph(dynamic v) {
+    final m = v is Map ? v : const {};
+    final style = m['style'] is Map ? m['style'] as Map : const {};
+    final builder = ui.ParagraphBuilder(ui.ParagraphStyle(
+      textAlign: _textAlign(style['align'] as String? ?? m['align'] as String?),
+      fontSize: (style['size'] as num?)?.toDouble(),
+      fontWeight: style['bold'] == true ? FontWeight.bold : null,
+    ))
+      ..pushStyle(ui.TextStyle(color: _decodeColor(style['color']) ?? const Color(0xFF000000), fontSize: (style['size'] as num?)?.toDouble()))
+      ..addText('${m['text'] ?? ''}');
+    final para = builder.build();
+    para.layout(ui.ParagraphConstraints(width: (m['maxWidth'] as num?)?.toDouble() ?? double.infinity));
+    return para;
+  }
+
+  ui.Vertices _vertices(dynamic v) {
+    final m = v is Map ? v : const {};
+    final positions = _offsets(m['positions']);
+    final colorsRaw = m['colors'] as List?;
+    return ui.Vertices(
+      _vertexMode(m['mode']),
+      positions,
+      textureCoordinates: m['textureCoords'] is List ? _offsets(m['textureCoords']) : null,
+      colors: colorsRaw?.map((c) => _decodeColor(c) ?? const Color(0xFFFFFFFF)).toList(),
+      indices: m['indices'] is List ? (m['indices'] as List).map((e) => (e as num).toInt()).toList() : null,
+    );
+  }
+
+  List<RSTransform> _rsTransforms(dynamic v) => v is List ? v.map<RSTransform>((t) => t is List && t.length >= 4 ? RSTransform(_d(t[0]), _d(t[1]), _d(t[2]), _d(t[3])) : RSTransform(1, 0, 0, 0)).toList() : const [];
+  List<Rect> _rects(dynamic v) => v is List ? v.map<Rect>((r) => _rect(r)).toList() : const [];
+  List<Color>? _colors(dynamic v) => v is List ? v.map<Color>((c) => _decodeColor(c) ?? const Color(0xFFFFFFFF)).toList() : null;
+
+  ui.Image? _image(dynamic src) {
+    final key = '$src';
+    final cached = _imageCache[key];
+    if (cached != null) return cached;
+    if (!_imageLoading.contains(key)) {
+      _imageLoading.add(key);
+      _loadImage(key);
+    }
+    return null;
+  }
+
+  Future<void> _loadImage(String src) async {
+    try {
+      Uint8List bytes;
+      if (src.startsWith('data:')) {
+        bytes = base64Decode(src.substring(src.indexOf(',') + 1));
+      } else if (src.startsWith('http')) {
+        // Network images need an HTTP fetch; left to a host-provided cache.
+        return;
+      } else {
+        final data = await rootBundle.load(src);
+        bytes = data.buffer.asUint8List();
+      }
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      _imageCache[src] = frame.image;
+      _canvasRepaint.value++; // trigger a repaint now that the image is ready
+    } catch (_) {
+      // leave uncached; the op is skipped
+    }
+  }
+
+  StrokeCap _strokeCap(dynamic v) => v == 'round' ? StrokeCap.round : v == 'square' ? StrokeCap.square : StrokeCap.butt;
+  StrokeJoin _strokeJoin(dynamic v) => v == 'round' ? StrokeJoin.round : v == 'bevel' ? StrokeJoin.bevel : StrokeJoin.miter;
+  BlurStyle _blurStyle(dynamic v) => v == 'solid' ? BlurStyle.solid : v == 'outer' ? BlurStyle.outer : v == 'inner' ? BlurStyle.inner : BlurStyle.normal;
+  ui.PointMode _pointMode(dynamic v) => v == 'lines' ? ui.PointMode.lines : v == 'polygon' ? ui.PointMode.polygon : ui.PointMode.points;
+  ui.VertexMode _vertexMode(dynamic v) => v == 'triangleStrip' ? ui.VertexMode.triangleStrip : v == 'triangleFan' ? ui.VertexMode.triangleFan : ui.VertexMode.triangles;
+  TileMode _tileMode(dynamic v) => v == 'repeated' ? TileMode.repeated : v == 'mirror' ? TileMode.mirror : v == 'decal' ? TileMode.decal : TileMode.clamp;
+  BlendMode _blend(dynamic v) => _blendTable[v] ?? BlendMode.srcOver;
+}
+
+const Map<String, BlendMode> _blendTable = {
+  'clear': BlendMode.clear, 'src': BlendMode.src, 'dst': BlendMode.dst, 'srcOver': BlendMode.srcOver,
+  'dstOver': BlendMode.dstOver, 'srcIn': BlendMode.srcIn, 'dstIn': BlendMode.dstIn, 'srcOut': BlendMode.srcOut,
+  'dstOut': BlendMode.dstOut, 'srcATop': BlendMode.srcATop, 'dstATop': BlendMode.dstATop, 'xor': BlendMode.xor,
+  'plus': BlendMode.plus, 'modulate': BlendMode.modulate, 'screen': BlendMode.screen, 'overlay': BlendMode.overlay,
+  'darken': BlendMode.darken, 'lighten': BlendMode.lighten, 'colorDodge': BlendMode.colorDodge, 'colorBurn': BlendMode.colorBurn,
+  'hardLight': BlendMode.hardLight, 'softLight': BlendMode.softLight, 'difference': BlendMode.difference, 'exclusion': BlendMode.exclusion,
+  'multiply': BlendMode.multiply, 'hue': BlendMode.hue, 'saturation': BlendMode.saturation, 'color': BlendMode.color, 'luminosity': BlendMode.luminosity,
+};
 
 // =============================================================================
 // Free enum / value tables.

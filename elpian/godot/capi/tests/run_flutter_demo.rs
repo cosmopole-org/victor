@@ -383,3 +383,145 @@ fn flutter_event_surface_sweep() {
         Err(_) => panic!("TIMEOUT — event sweep wedged"),
     }
 }
+
+// ===========================================================================
+// Canvas / CustomPainter: prove the guest FLCanvas records a complete, well-
+// formed dart:ui display list (every op category, path verbs, paint shader)
+// into the CustomPaint widget's `ops` prop — the data the host _ReplayPainter
+// replays onto the real Flutter Canvas.
+// ===========================================================================
+
+const CANVAS_APP: &str = r#"
+import 'flutter.js';
+
+function App() {
+  return FL.customPaint([300, 200], function (cv) {
+    cv.save();
+    cv.translate(10, 10);
+    cv.rotate(0.5);
+    cv.scale(2, 2);
+    cv.skew(0.1, 0.1);
+    cv.clipRect([0, 0, 100, 100], {});
+    cv.clipRRect(FL.rrect([0, 0, 100, 100], 6), true);
+
+    var stroke = FL.paint({ color: [1, 0, 0, 1], style: 'stroke', strokeWidth: 3, strokeCap: 'round', strokeJoin: 'bevel' });
+    var grad = FL.paint({ shader: FL.linearGradient([0, 0], [100, 100], [[1, 0, 0, 1], [0, 0, 1, 1]], [0.0, 1.0]) });
+    var blur = FL.paint({ color: [0, 0, 0, 1], blur: 4 });
+
+    cv.drawColor([0, 0, 0, 0.1], 'srcOver');
+    cv.drawPaint(blur);
+    cv.drawLine([0, 0], [100, 100], stroke);
+    cv.drawRect([0, 0, 50, 50], stroke);
+    cv.drawRRect(FL.rrect([0, 0, 50, 50], 8), grad);
+    cv.drawDRRect(FL.rrect([0, 0, 50, 50], 8), FL.rrect([5, 5, 45, 45], 4), grad);
+    cv.drawOval([0, 0, 80, 40], stroke);
+    cv.drawCircle(60, 60, 20, grad);
+    cv.drawArc([0, 0, 40, 40], 0.0, 3.14, true, stroke);
+    cv.drawPoints('points', [[1, 1], [2, 2], [3, 3]], stroke);
+
+    var path = FL.path()
+      .moveTo(0, 0)
+      .lineTo(50, 0)
+      .quadraticBezierTo(60, 10, 50, 20)
+      .cubicTo(40, 30, 20, 30, 0, 20)
+      .arcToPoint(10, 10, { radiusX: 5, radiusY: 5 })
+      .addOval([0, 0, 10, 10])
+      .close();
+    cv.drawPath(path, stroke);
+    cv.drawShadow(path, [0, 0, 0, 1], 4.0, false);
+    cv.drawParagraph(FL.paragraph('hello', 100, { size: 14, color: [0, 0, 0, 1] }, 'center'), 5, 5);
+
+    cv.saveLayer([0, 0, 100, 100], grad);
+    cv.restore();
+    cv.restore();
+  });
+}
+
+var view = FL.mount(GD.host(), App, {});
+print('canvas app up');
+"#;
+
+/// Find the ops array of the first CustomPaint node in the tree.
+fn find_custom_paint_ops(node: &Value) -> Option<Vec<Value>> {
+    match node {
+        Value::Object(o) => {
+            if o.get("t").and_then(|v| v.as_str()) == Some("CustomPaint") {
+                if let Some(ops) = o.get("p").and_then(|p| p.get("ops")).and_then(|v| v.as_array()) {
+                    return Some(ops.clone());
+                }
+            }
+            for (_k, v) in o {
+                if let Some(r) = find_custom_paint_ops(v) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        Value::Array(a) => a.iter().find_map(find_custom_paint_ops),
+        _ => None,
+    }
+}
+
+#[test]
+fn flutter_canvas_display_list() {
+    // Every op the recorder must emit for this scene.
+    const EXPECT_OPS: &[&str] = &[
+        "save", "translate", "rotate", "scale", "skew", "clipRect", "clipRRect", "drawColor",
+        "drawPaint", "drawLine", "drawRect", "drawRRect", "drawDRRect", "drawOval", "drawCircle",
+        "drawArc", "drawPoints", "drawPath", "drawShadow", "drawParagraph", "saveLayer", "restore",
+    ];
+
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<Value>, String>>();
+    std::thread::spawn(move || {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let tree = std::sync::Arc::new(Mutex::new(Value::Null));
+            let mut mgr =
+                VmManager::new_root_lang("run-flutter-canvas".to_string(), CANVAS_APP, GuestLang::Js, true, 0, 0)
+                    .map_err(|e| format!("COMPILE ERROR: {e}"))?;
+            let captured = tree.clone();
+            mgr.set_bridge(Some(Box::new(move |name, args| {
+                let op = args.first().cloned().unwrap_or(Value::Null);
+                match name {
+                    "godot.op" => Some(if op.get("self").is_some() { json!(-1) } else { Value::Null }),
+                    "flutter.op" => {
+                        if op.get("newview").is_some() {
+                            return Some(json!(-101));
+                        }
+                        if let Some(t) = op.get("tree") {
+                            *captured.lock().unwrap() = t.clone();
+                        }
+                        Some(Value::Null)
+                    }
+                    _ => None,
+                }
+            })));
+            mgr.run_root().map_err(|e| format!("run_root() ERROR: {e}"))?;
+            let ops = find_custom_paint_ops(&tree.lock().unwrap())
+                .ok_or_else(|| "no CustomPaint ops found in tree".to_string())?;
+            Ok::<Vec<Value>, String>(ops)
+        }));
+        let _ = tx.send(res.unwrap_or_else(|_| Err("PANIC".into())));
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(Ok(ops)) => {
+            let kinds: Vec<&str> = ops.iter().filter_map(|o| o.get("op").and_then(|v| v.as_str())).collect();
+            eprintln!("CANVAS OPS ({}): {:?}", ops.len(), kinds);
+            for want in EXPECT_OPS {
+                assert!(kinds.contains(want), "canvas op '{want}' missing from the display list: {kinds:?}");
+            }
+            // The path op carries a real verb list (moveTo … close).
+            let draw_path = ops.iter().find(|o| o.get("op").and_then(|v| v.as_str()) == Some("drawPath")).expect("drawPath op");
+            let verbs = draw_path.get("path").and_then(|p| p.get("verbs")).and_then(|v| v.as_array()).expect("path verbs");
+            let heads: Vec<&str> = verbs.iter().filter_map(|v| v.as_array()).filter_map(|a| a.first()).filter_map(|v| v.as_str()).collect();
+            for want in ["moveTo", "lineTo", "quadTo", "cubicTo", "arcToPoint", "addOval", "close"] {
+                assert!(heads.contains(&want), "path verb '{want}' missing: {heads:?}");
+            }
+            // A paint carries a shader gradient descriptor.
+            let has_shader = ops.iter().any(|o| o.get("paint").and_then(|p| p.get("shader")).and_then(|s| s.get("type")).and_then(|v| v.as_str()) == Some("linear"));
+            assert!(has_shader, "no paint carried a linear-gradient shader");
+        }
+        Ok(Err(e)) => panic!("canvas display list did not run cleanly: {e}"),
+        Err(_) => panic!("TIMEOUT — canvas display list wedged"),
+    }
+}

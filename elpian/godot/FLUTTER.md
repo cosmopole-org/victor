@@ -45,6 +45,7 @@ The pieces, and where they live:
 | Event-surface sweep (21 event types × all positions) | `capi/tests/run_flutter_demo.rs` | **Passing** |
 | Embedded AOT interpreter app (large hand-written widget/value catalog) | `flutter_host/lib/main.dart` | **Implemented** (needs Flutter SDK to snapshot) |
 | Full-coverage registry generator (from Flutter's API) + committed stub | `flutter_host/tool/gen_registry.dart`, `flutter_host/lib/registry.g.dart` | **Implemented** (needs Flutter SDK + analyzer to run) |
+| Canvas / `CustomPainter` (full `dart:ui` draw surface as a display list) | `prelude/flutter.js` (`FLCanvas`/`FLPath`) + `flutter_host/lib/main.dart` (`_ReplayPainter`) | **Implemented + covered by test** |
 
 > **What is proven here vs. what needs the engine.** The guest→seam→dispatch
 > contract is implemented and covered by a passing Rust test that drives a full
@@ -112,6 +113,40 @@ The remaining honest caveat is the one Flutter itself imposes: coverage is
 Flutter SDK is reachable after the generator is re-run against that SDK, not the
 instant it ships. That is inherent to a no-reflection AOT framework; within it,
 this is as close to complete-by-construction as the platform allows.
+
+### Custom painting (`Canvas` / `CustomPainter`)
+
+The full `dart:ui` drawing surface is exposed the same way the guest already
+records a scene in `dart/src/dart_ui.rs`: as a **serializable display list**. A
+guest builds a painter with `FL.customPaint([w, h], (cv) => …)`, issuing Canvas
+calls into an `FLCanvas`; each becomes a pure-data op, and the host's
+`_ReplayPainter` (a real `CustomPainter`) replays them onto the real Flutter
+`Canvas`. No closures live in the list, so it ships as data and repaints on any
+re-render.
+
+Everything on the `Canvas` is covered:
+
+- **draws** — `drawColor`, `drawPaint`, `drawLine`, `drawRect`, `drawRRect`,
+  `drawDRRect`, `drawOval`, `drawCircle`, `drawArc`, `drawPath`, `drawImage` /
+  `drawImageRect` / `drawImageNine`, `drawParagraph`, `drawPoints`, `drawShadow`,
+  `drawVertices`, `drawAtlas`;
+- **layers / transform / clip** — `save`, `saveLayer`, `restore`,
+  `restoreToCount`, `translate`, `scale`, `rotate`, `skew`, `transform`,
+  `clipRect`, `clipRRect`, `clipPath`;
+- **`Paint`** — color, blend mode (all 29), style, stroke width/cap/join/miter,
+  anti-alias, `MaskFilter` blur, invert, and shaders;
+- **shaders** — `FL.linearGradient` / `radialGradient` / `sweepGradient`
+  (colors, stops, tile mode);
+- **`Path`** — every verb (`moveTo`/`lineTo`/`quadraticBezierTo`/`cubicTo`/
+  `conicTo`/`arcTo`/`arcToPoint`/`addRect`/`addRRect`/`addOval`/`addArc`/
+  `addPolygon`/`addPath`/`close`, absolute and relative), plus fill type;
+- **`Paragraph`** — text + style laid out to a max width for `drawParagraph`.
+
+`capi/tests/run_flutter_demo.rs::flutter_canvas_display_list` records a scene
+touching every op category and asserts the serialized display list — op kinds,
+path verbs, and a gradient shader — is complete and well-formed. Image draws
+resolve `data:`/asset sources through an async cache that repaints when ready;
+network images are left to a host-provided cache.
 
 ## Control from Elpian — identical model to Godot
 

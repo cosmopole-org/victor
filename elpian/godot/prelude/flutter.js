@@ -272,6 +272,119 @@ class FLView {
   }
 }
 
+// ===========================================================================
+// Canvas / CustomPainter — the full dart:ui drawing surface, as a display list.
+// ===========================================================================
+//
+// A painter is recorded to a serializable **display list** (a list of op maps)
+// exactly the way the elpis protocol / `dart/src/dart_ui.rs` record a `dart:ui`
+// scene: the guest issues Canvas calls into an `FLCanvas`, they become pure
+// data, and the host's `_ReplayPainter` replays them onto the REAL Flutter
+// `Canvas`. No closures live in the list, so it ships as plain data and repaints
+// on any re-render.
+//
+//     FL.customPaint([300, 200], function (cv) {
+//       var p = FL.paint({ color: [1, 0, 0, 1], style: 'stroke', strokeWidth: 4 });
+//       cv.drawCircle(150, 100, 60, p);
+//       var path = FL.path().moveTo(0, 0).lineTo(300, 200).close();
+//       cv.drawPath(path, FL.paint({ color: [0, 0, 1, 1] }));
+//     })
+//
+// Geometry on the wire: Offset = [x,y]; Rect = [left,top,right,bottom] (LTRB —
+// use FL.ltwh(l,t,w,h) if you think in width/height); RRect = {rect:[…],
+// radius:n} or {rect, tl,tr,bl,br}; Color = [r,g,b,a] (0..1) or a 0xAARRGGBB int.
+
+// Normalize a path argument to plain data (an FLPath, or an already-plain map).
+function __flPathData(p) {
+  if (p == null) {
+    return null;
+  }
+  if (p._verbs != null) {
+    return { verbs: p._verbs, fillType: p._fillType };
+  }
+  return p;
+}
+
+// A Path builder — records verbs; every dart:ui Path method is present.
+class FLPath {
+  constructor() {
+    this._verbs = [];
+    this._fillType = "nonZero";
+  }
+  moveTo(x, y) { this._verbs.push(["moveTo", x, y]); return this; }
+  lineTo(x, y) { this._verbs.push(["lineTo", x, y]); return this; }
+  relativeMoveTo(dx, dy) { this._verbs.push(["rMoveTo", dx, dy]); return this; }
+  relativeLineTo(dx, dy) { this._verbs.push(["rLineTo", dx, dy]); return this; }
+  quadraticBezierTo(x1, y1, x2, y2) { this._verbs.push(["quadTo", x1, y1, x2, y2]); return this; }
+  relativeQuadraticBezierTo(x1, y1, x2, y2) { this._verbs.push(["rQuadTo", x1, y1, x2, y2]); return this; }
+  cubicTo(x1, y1, x2, y2, x3, y3) { this._verbs.push(["cubicTo", x1, y1, x2, y2, x3, y3]); return this; }
+  relativeCubicTo(x1, y1, x2, y2, x3, y3) { this._verbs.push(["rCubicTo", x1, y1, x2, y2, x3, y3]); return this; }
+  conicTo(x1, y1, x2, y2, w) { this._verbs.push(["conicTo", x1, y1, x2, y2, w]); return this; }
+  relativeConicTo(x1, y1, x2, y2, w) { this._verbs.push(["rConicTo", x1, y1, x2, y2, w]); return this; }
+  arcTo(rect, startAngle, sweepAngle, forceMoveTo) {
+    this._verbs.push(["arcTo", rect, startAngle, sweepAngle, forceMoveTo == true]);
+    return this;
+  }
+  arcToPoint(x, y, opts) {
+    let o = opts == null ? {} : opts;
+    this._verbs.push(["arcToPoint", x, y, o.radiusX == null ? 0 : o.radiusX, o.radiusY == null ? 0 : o.radiusY, o.rotation == null ? 0 : o.rotation, o.largeArc == true, o.clockwise != false]);
+    return this;
+  }
+  addRect(rect) { this._verbs.push(["addRect", rect]); return this; }
+  addRRect(rrect) { this._verbs.push(["addRRect", rrect]); return this; }
+  addOval(rect) { this._verbs.push(["addOval", rect]); return this; }
+  addArc(rect, startAngle, sweepAngle) { this._verbs.push(["addArc", rect, startAngle, sweepAngle]); return this; }
+  addPolygon(points, close) { this._verbs.push(["addPolygon", points, close == true]); return this; }
+  addPath(path, dx, dy) { this._verbs.push(["addPath", __flPathData(path), dx == null ? 0 : dx, dy == null ? 0 : dy]); return this; }
+  close() { this._verbs.push(["close"]); return this; }
+  reset() { this._verbs = []; return this; }
+  fillType(t) { this._fillType = t; return this; }
+  data() { return { verbs: this._verbs, fillType: this._fillType }; }
+}
+
+// The Canvas recorder — every dart:ui Canvas method, each pushing one op.
+class FLCanvas {
+  constructor() {
+    this._ops = [];
+  }
+  // ---- layers / transform / clip ----
+  save() { this._ops.push({ op: "save" }); return this; }
+  saveLayer(rect, paint) { this._ops.push({ op: "saveLayer", rect: rect, paint: paint }); return this; }
+  restore() { this._ops.push({ op: "restore" }); return this; }
+  restoreToCount(count) { this._ops.push({ op: "restoreToCount", count: count }); return this; }
+  translate(dx, dy) { this._ops.push({ op: "translate", dx: dx, dy: dy }); return this; }
+  scale(sx, sy) { this._ops.push({ op: "scale", sx: sx, sy: sy == null ? sx : sy }); return this; }
+  rotate(radians) { this._ops.push({ op: "rotate", radians: radians }); return this; }
+  skew(sx, sy) { this._ops.push({ op: "skew", sx: sx, sy: sy }); return this; }
+  transform(matrix16) { this._ops.push({ op: "transform", matrix: matrix16 }); return this; }
+  clipRect(rect, opts) {
+    let o = opts == null ? {} : opts;
+    this._ops.push({ op: "clipRect", rect: rect, clipOp: o.op == null ? "intersect" : o.op, aa: o.aa != false });
+    return this;
+  }
+  clipRRect(rrect, aa) { this._ops.push({ op: "clipRRect", rrect: rrect, aa: aa != false }); return this; }
+  clipPath(path, aa) { this._ops.push({ op: "clipPath", path: __flPathData(path), aa: aa != false }); return this; }
+  // ---- draws ----
+  drawColor(color, blendMode) { this._ops.push({ op: "drawColor", color: color, blend: blendMode == null ? "srcOver" : blendMode }); return this; }
+  drawPaint(paint) { this._ops.push({ op: "drawPaint", paint: paint }); return this; }
+  drawLine(p1, p2, paint) { this._ops.push({ op: "drawLine", p1: p1, p2: p2, paint: paint }); return this; }
+  drawRect(rect, paint) { this._ops.push({ op: "drawRect", rect: rect, paint: paint }); return this; }
+  drawRRect(rrect, paint) { this._ops.push({ op: "drawRRect", rrect: rrect, paint: paint }); return this; }
+  drawDRRect(outer, inner, paint) { this._ops.push({ op: "drawDRRect", outer: outer, inner: inner, paint: paint }); return this; }
+  drawOval(rect, paint) { this._ops.push({ op: "drawOval", rect: rect, paint: paint }); return this; }
+  drawCircle(cx, cy, radius, paint) { this._ops.push({ op: "drawCircle", cx: cx, cy: cy, radius: radius, paint: paint }); return this; }
+  drawArc(rect, startAngle, sweepAngle, useCenter, paint) { this._ops.push({ op: "drawArc", rect: rect, start: startAngle, sweep: sweepAngle, useCenter: useCenter == true, paint: paint }); return this; }
+  drawPath(path, paint) { this._ops.push({ op: "drawPath", path: __flPathData(path), paint: paint }); return this; }
+  drawImage(src, dx, dy, paint) { this._ops.push({ op: "drawImage", src: src, dx: dx, dy: dy, paint: paint }); return this; }
+  drawImageRect(src, srcRect, dstRect, paint) { this._ops.push({ op: "drawImageRect", src: src, srcRect: srcRect, dstRect: dstRect, paint: paint }); return this; }
+  drawImageNine(src, center, dstRect, paint) { this._ops.push({ op: "drawImageNine", src: src, center: center, dstRect: dstRect, paint: paint }); return this; }
+  drawParagraph(paragraph, dx, dy) { this._ops.push({ op: "drawParagraph", paragraph: paragraph, dx: dx, dy: dy }); return this; }
+  drawPoints(mode, points, paint) { this._ops.push({ op: "drawPoints", mode: mode == null ? "points" : mode, points: points, paint: paint }); return this; }
+  drawShadow(path, color, elevation, transparentOccluder) { this._ops.push({ op: "drawShadow", path: __flPathData(path), color: color, elevation: elevation, transparentOccluder: transparentOccluder == true }); return this; }
+  drawVertices(vertices, blendMode, paint) { this._ops.push({ op: "drawVertices", vertices: vertices, blend: blendMode == null ? "srcOver" : blendMode, paint: paint }); return this; }
+  drawAtlas(src, transforms, rects, colors, blendMode, cullRect, paint) { this._ops.push({ op: "drawAtlas", src: src, transforms: transforms, rects: rects, colors: colors, blend: blendMode, cullRect: cullRect, paint: paint }); return this; }
+}
+
 // ---------------------------------------------------------------------------
 // FL — the facade
 // ---------------------------------------------------------------------------
@@ -571,5 +684,72 @@ class FL {
   // Form / fields — onChanged onSaved validator onFieldSubmitted onEditingComplete.
   static form(child, onChanged) {
     return __flEl("Form", { child: child, onChanged: onChanged });
+  }
+
+  // =========================================================================
+  // Canvas / CustomPainter
+  // =========================================================================
+
+  // Paint a custom drawing at `size` = [w, h]. `painter(cv)` receives an
+  // FLCanvas and issues drawing ops; they are recorded to a display list the
+  // host replays onto the real Flutter Canvas. `opts` may add `child`,
+  // `foreground: true` (draw over the child), `isComplex`, `willChange`.
+  static customPaint(size, painter, opts) {
+    let cv = new FLCanvas();
+    if (painter != null) {
+      painter(cv);
+    }
+    let p = opts == null ? {} : opts;
+    p.size = size;
+    if (p.foreground == true) {
+      p.foregroundOps = cv._ops;
+    } else {
+      p.ops = cv._ops;
+    }
+    return __flEl("CustomPaint", p);
+  }
+
+  // Alias reading like dart:ui's PictureRecorder → Canvas flow.
+  static canvas(size, painter, opts) {
+    return FL.customPaint(size, painter, opts);
+  }
+
+  // A Paint descriptor. Recognized keys: color, blendMode, style('fill'|'stroke'),
+  // strokeWidth, strokeCap('butt'|'round'|'square'), strokeJoin('miter'|'round'|
+  // 'bevel'), strokeMiterLimit, isAntiAlias, shader (a gradient descriptor),
+  // maskFilter ({style:'normal'|'solid'|'outer'|'inner', sigma}), blur (sigma
+  // shortcut), colorFilter, filterQuality, invertColors.
+  static paint(props) {
+    return props == null ? {} : props;
+  }
+
+  // A fresh Path builder.
+  static path() {
+    return new FLPath();
+  }
+
+  // Geometry helpers.
+  static ltwh(l, t, w, h) {
+    return [l, t, l + w, t + h];
+  }
+  static rrect(rect, radius) {
+    return { rect: rect, radius: radius };
+  }
+
+  // Shaders (a Paint's `shader`).
+  static linearGradient(from, to, colors, stops, tileMode) {
+    return { type: "linear", from: from, to: to, colors: colors, stops: stops, tileMode: tileMode };
+  }
+  static radialGradient(center, radius, colors, stops, tileMode) {
+    return { type: "radial", center: center, radius: radius, colors: colors, stops: stops, tileMode: tileMode };
+  }
+  static sweepGradient(center, colors, stops, startAngle, endAngle) {
+    return { type: "sweep", center: center, colors: colors, stops: stops, startAngle: startAngle, endAngle: endAngle };
+  }
+
+  // A Paragraph descriptor for cv.drawParagraph: { text, maxWidth, style,
+  // align('left'|'center'|'right'|'justify') }.
+  static paragraph(text, maxWidth, style, align) {
+    return { text: text, maxWidth: maxWidth, style: style == null ? {} : style, align: align };
   }
 }
