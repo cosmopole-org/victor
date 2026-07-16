@@ -80,11 +80,24 @@ class _ElpianHostState extends State<_ElpianHostApp> {
     if (root == null) return const SizedBox.shrink();
     final built = _interp.build(root);
     // Ensure a Material/Directionality context if the guest did not root a
-    // MaterialApp/CupertinoApp itself.
+    // MaterialApp/CupertinoApp itself. The wrapper is TRANSPARENT — no opaque
+    // scaffold/canvas background — so when this UI composites over a host 3D
+    // scene (the Victor Flutter×Godot demo), the 3D shows through wherever the
+    // guest's own widgets don't paint. A guest that wants an opaque page just
+    // sets its Scaffold/Container background.
     if (root['t'] == 'MaterialApp' || root['t'] == 'CupertinoApp' || root['t'] == 'WidgetsApp') {
       return built;
     }
-    return MaterialApp(debugShowCheckedModeBanner: false, home: built);
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      color: const Color(0x00000000),
+      theme: ThemeData(
+        scaffoldBackgroundColor: Colors.transparent,
+        canvasColor: Colors.transparent,
+        useMaterial3: true,
+      ),
+      home: Material(type: MaterialType.transparency, child: built),
+    );
   }
 }
 

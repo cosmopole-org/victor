@@ -272,6 +272,45 @@ commits the APK, `web-demo-pages.yml` deploys to GitHub Pages.
    Override the locations with ProjectSettings
    `elpian/flutter/{aot_library_path,assets_path,icu_data_path}`.
 
+The custom C embedder this bridge uses is officially supported and has
+**downloadable** engine binaries for **desktop** (Linux/Windows/macOS) and
+**embedded-Linux ARM** — so those are the low-friction targets to see real
+Flutter running.
+
+## Real Flutter on Android (the hard target)
+
+Android is the one target where the custom C embedder is *not* the supported
+path: Flutter on Android normally runs through the Java/Kotlin platform embedder,
+and the **stock Android engine library exports the embedder-C-API symbols with
+HIDDEN visibility** — so `flutter_view.cpp` cannot link against it. A usable
+android-arm64 engine must be **built from source** with:
+
+```sh
+./flutter/tools/gn --target-os android --android-cpu arm64 \
+    --runtime-mode release --embedder-for-target
+ninja -C out/android_release_arm64 flutter_engine gen_snapshot
+```
+
+That is a ~15 GB checkout + multi-hour build that does not fit a GitHub-hosted
+runner, so **CI cannot produce the Android engine binary**. Once you have built
+(or otherwise obtained) an archive containing, for android-arm64,
+`flutter_embedder.h` · `libflutter_engine.so` · `gen_snapshot` · `icudtl.dat`,
+the rest is automated: the **`.github/workflows/android-apk-flutter.yml`**
+workflow (manual `workflow_dispatch`, takes the archive URL + the matching
+Flutter SDK version) AOT-snapshots `flutter_host`, links the extension with
+`with_flutter=yes`, stages `res://flutter/*`, declares `libflutter_engine.so` a
+GDExtension dependency so the export bundles it into the APK's
+`lib/arm64-v8a/`, and exports the demo APK. It is separate from the default
+`android-apk.yml` (which ships the VUI-fallback build) so it can never break the
+green build.
+
+Two more Android caveats even once the engine links: the software-composited
+Flutter surface must stay **transparent** for the 3D to show through (the host
+app now roots a transparent MaterialApp/Material, and the demo uses a
+transparent Scaffold), and pointer/IME hand-off between the Flutter `Control` and
+the Godot scene is the usual embedder plumbing. Treat the Android real-Flutter
+path as experimental.
+
 ## Costs, risks, and limits (stated plainly)
 
 - **Binary size / CI.** ~10–15 MB of engine + AOT snapshot per platform, and a

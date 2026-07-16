@@ -276,9 +276,13 @@ function main() {
     print("flutter+3d demo up: REAL Flutter engine driving the UI");
   } else {
     layer.call("queue_free", []);
-    // Fallback: VUI HUD.
+    // Fallback: VUI HUD. bg:false makes the page TRANSPARENT so the live 3D
+    // scene shows through — VUI.app otherwise paints an opaque full-screen
+    // background (which is what hides the 3D in ui_demo). The controls sit in
+    // their own opaque panel at the bottom; the top ~60% is left clear for the
+    // 3D ring.
     VUI.use(VUI.themeDark());
-    let app = VUI.app({ design: [DW, DH], portrait: true });
+    let app = VUI.app({ design: [DW, DH], portrait: true, bg: false });
     app.push(VUI.column({ gap: 0, children: [VUI.spacer(), buildVuiPanel()] }));
     print("flutter+3d demo up: VUI fallback (no Flutter engine in this build)");
   }
