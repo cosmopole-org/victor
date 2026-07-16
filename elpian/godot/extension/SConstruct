@@ -43,6 +43,23 @@ elif env["platform"] == "web":
     # type" and the engine hangs at the splash screen.
     env.Append(LINKFLAGS=["-sWASM_BIGINT"])
 
+# Optional: embed a real Flutter engine for the FL UI bridge (see godot/FLUTTER.md).
+#   scons with_flutter=yes flutter_engine_dir=/path/to/engine
+# The dir must hold flutter_embedder.h and the engine library. Off by default:
+# flutter_view.cpp then compiles as an inert placeholder needing no libflutter.
+# Not available on the web platform (libflutter does not embed in a wasm export;
+# the web analogue goes through Flutter's CanvasKit engine instead).
+if ARGUMENTS.get("with_flutter", "no") == "yes":
+    if env["platform"] == "web":
+        raise SystemExit("with_flutter is not supported on the web platform; see godot/FLUTTER.md")
+    fdir = ARGUMENTS.get("flutter_engine_dir", "")
+    if not os.path.exists(os.path.join(fdir, "flutter_embedder.h")):
+        raise SystemExit("flutter_engine_dir must contain flutter_embedder.h; see godot/FLUTTER.md")
+    env.Append(CPPDEFINES=["ELPIAN_WITH_FLUTTER"])
+    env.Append(CPPPATH=[fdir])
+    env.Append(LIBPATH=[fdir])
+    env.Append(LIBS=["flutter_engine"])
+
 # One canonical name per platform/arch (shared with CMake and the bundled
 # .gdextension): libelpian_godot.<platform>.<arch>.<so|dylib|dll>.
 library = env.SharedLibrary(

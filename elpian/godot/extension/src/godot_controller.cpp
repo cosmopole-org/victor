@@ -156,6 +156,17 @@ Object *GodotController::resolve_checked(int64_t handle_id, String *r_err) {
 	return obj;
 }
 
+Object *GodotController::resolve_handle_checked(int64_t handle_id, int64_t sbx, String *r_err) {
+	/* Set the sandbox context so resolve_checked applies the same containment
+	 * rules as a normal op `ref`, then restore. Single-thread confined like the
+	 * rest of the controller. */
+	const int64_t saved = ctx_sbx;
+	ctx_sbx = sbx;
+	Object *obj = resolve_checked(handle_id, r_err);
+	ctx_sbx = saved;
+	return obj;
+}
+
 Object *GodotController::resolve(int64_t handle_id, String *r_err) {
 	auto it = handles.find(handle_id);
 	if (it == handles.end()) {

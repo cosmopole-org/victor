@@ -51,6 +51,8 @@ add_library(elpian_godot_ext SHARED
     src/register_types.cpp
     src/elpian_vm_node.cpp
     src/godot_controller.cpp
+    src/flutter_controller.cpp
+    src/flutter_view.cpp
     "${CONSTANTS_INC}")
 set_source_files_properties("${CONSTANTS_INC}" PROPERTIES GENERATED TRUE HEADER_FILE_ONLY TRUE)
 target_include_directories(elpian_godot_ext PRIVATE src "${GEN_DIR}")
@@ -58,6 +60,27 @@ target_compile_features(elpian_godot_ext PRIVATE cxx_std_17)
 target_link_libraries(elpian_godot_ext PRIVATE godot::cpp "${ELPIAN_CAPI_LIB}")
 if(TARGET elpian_capi)
     add_dependencies(elpian_godot_ext elpian_capi)
+endif()
+
+# ---- optional: embed a real Flutter engine (the Flutter UI bridge) -----------
+# Off by default: flutter_view.cpp then compiles as an inert placeholder and no
+# libflutter is needed. Turn on with -DELPIAN_WITH_FLUTTER=ON and point
+# -DFLUTTER_ENGINE_DIR=... at a directory holding the embedder header
+# (flutter_embedder.h) and the engine library (libflutter_engine.so /
+# .dylib / flutter_engine.dll). See godot/FLUTTER.md.
+option(ELPIAN_WITH_FLUTTER "Embed a real Flutter engine for the FL UI bridge" OFF)
+set(FLUTTER_ENGINE_DIR "" CACHE PATH "Directory with flutter_embedder.h and the engine library")
+if(ELPIAN_WITH_FLUTTER)
+    if(NOT EXISTS "${FLUTTER_ENGINE_DIR}/flutter_embedder.h")
+        message(FATAL_ERROR "ELPIAN_WITH_FLUTTER=ON but flutter_embedder.h not found in FLUTTER_ENGINE_DIR='${FLUTTER_ENGINE_DIR}'. See godot/FLUTTER.md.")
+    endif()
+    target_compile_definitions(elpian_godot_ext PRIVATE ELPIAN_WITH_FLUTTER)
+    target_include_directories(elpian_godot_ext PRIVATE "${FLUTTER_ENGINE_DIR}")
+    find_library(FLUTTER_ENGINE_LIB NAMES flutter_engine flutter_engine.so libflutter_engine PATHS "${FLUTTER_ENGINE_DIR}")
+    if(NOT FLUTTER_ENGINE_LIB)
+        message(FATAL_ERROR "Could not find the Flutter engine library in '${FLUTTER_ENGINE_DIR}'.")
+    endif()
+    target_link_libraries(elpian_godot_ext PRIVATE "${FLUTTER_ENGINE_LIB}")
 endif()
 
 # System libraries the Rust staticlib expects.

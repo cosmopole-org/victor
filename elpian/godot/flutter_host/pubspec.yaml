@@ -1,0 +1,28 @@
+name: elpian_flutter_host
+description: >
+  The fixed, AOT-compiled Flutter "interpreter app" the Elpian↔Godot Flutter
+  bridge embeds. It never contains application logic — it receives declarative
+  widget-tree messages from the Elpian VM (over the embedder's platform-message
+  seam) and reconciles them into real Flutter widgets, sending widget events
+  back. All dynamic program code stays on the VM; this app is static and AOT, so
+  the whole system carries no JIT (App-Store-legal). See ../FLUTTER.md.
+publish_to: none
+version: 1.0.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_lints: ^3.0.0
+  # Used only by tool/gen_registry.dart to generate lib/registry.g.dart from
+  # Flutter's public API (the "no exception" widget-coverage mechanism). Not
+  # part of the app.
+  analyzer: ^6.4.0
+
+flutter:
+  uses-material-design: true

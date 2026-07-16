@@ -1,0 +1,9 @@
+[gd_scene format=3 uid="uid://elpianflutter3ddemo1"]
+
+[node name="World3D" type="Node3D"]
+
+[node name="ElpianVM" type="ElpianVM" parent="."]
+script_path = "res://scripts/flutter_3d_demo.js"
+language = "js"
+autostart = true
+prepend_prelude = true

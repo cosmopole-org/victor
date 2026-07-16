@@ -145,6 +145,21 @@ jobs:
           unzip -q templates.tpz -d /tmp/templates
           mv /tmp/templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/"
 
+      # Export the Victor FLUTTER × Godot-3D demo (portrait). The web export
+      # cannot embed a Flutter engine (libflutter does not build into a wasm
+      # Godot export), so `FL.mount` returns null and the demo runs its VUI
+      # fallback HUD over the live 3D scene — fully interactive. Swap the scene
+      # for res://ui_demo.tscn / res://react_3d_demo.tscn to ship a different one.
+      - name: Point the export at the Victor Flutter × Godot-3D demo
+        run: |
+          sed -i \
+            -e 's|^run/main_scene=.*|run/main_scene="res://flutter_3d_demo.tscn"|' \
+            -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
+            -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
+            -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \
+            elpian/godot/project/project.godot
+          grep -E "run/main_scene|viewport_|orientation" elpian/godot/project/project.godot
+
       - name: Import project
         run: godot --headless --path elpian/godot/project --import || true
 

@@ -71,6 +71,14 @@ pub const GODOT_NET_JS: &str = include_str!("../../prelude/net.js");
 /// only on `godot.js`.
 pub const GODOT_CASPAR_JS: &str = include_str!("../../prelude/caspar.js");
 
+/// The Flutter UI bridge (`flutter.js`) — the `FL` facade that drives a real
+/// `libflutter` engine embedded in the GDExtension over the `flutter.op` seam
+/// (declarative widget-tree ops → a fixed AOT interpreter app). Composed ahead
+/// of a JS guest when its source imports it (`import 'flutter.js';`); it depends
+/// only on `godot.js` (it reuses that prelude's callback registry so widget
+/// events route back through the same namespaced-dispatch path).
+pub const GODOT_FLUTTER_JS: &str = include_str!("../../prelude/flutter.js");
+
 /// VReact (`react.js`) — a React-compatible runtime (element factory, the full
 /// hook surface, and a keyed reconciler that mutates retained Godot nodes)
 /// whose host config targets the VUI kit. Composed ahead of a JS guest when its
@@ -169,6 +177,7 @@ pub fn compose_godot_program_js(user_source: &str) -> String {
     let wants_ui_kit = wants_react || imports("ui.js");
     let wants_net = imports("net.js");
     let wants_caspar = imports("caspar.js");
+    let wants_flutter = imports("flutter.js");
 
     let mut parts: Vec<String> = vec![strip(GODOT_PRELUDE_JS)];
     if wants_net {
@@ -180,6 +189,12 @@ pub fn compose_godot_program_js(user_source: &str) -> String {
         // caspar.js depends only on godot.js; compose it before the UI layers
         // so app scaffolding can open node connections from construction time.
         parts.push(strip(GODOT_CASPAR_JS));
+    }
+    if wants_flutter {
+        // flutter.js depends only on godot.js (it reuses the callback registry
+        // and marshaling); compose it before the UI layers so components can
+        // mount Flutter surfaces from construction time.
+        parts.push(strip(GODOT_FLUTTER_JS));
     }
     if wants_ui_kit {
         parts.push(strip(GODOT_UI_KIT_JS));

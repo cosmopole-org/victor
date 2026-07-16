@@ -429,6 +429,33 @@ impl HookEnv {
                 }
                 self.shared.forward("godot.batch", &[ops])
             }
+            // The Flutter UI seam is the exact twin of the Godot seam: a
+            // `flutter.op`/`flutter.batch` op array crosses to the C++
+            // `FlutterController`, which drives an embedded Flutter engine. The
+            // ops carry the same wire vocabulary the Godot bridge uses —
+            // `{"ref": id}` for the parent Godot node a Flutter view mounts
+            // under, `{"callable": n}`/`"cb"` for widget event handlers — so the
+            // identical `sanitize_op` applies: callables/handles are namespaced
+            // into the calling VM's id space and the op is stamped with the VM's
+            // sandbox root (`__sbx`). A sandboxed VM can therefore only mount a
+            // Flutter surface under a node inside its own subtree, exactly as
+            // for native Godot nodes, and widget-event callbacks route back to
+            // the owning VM through the shared dispatch queue.
+            "flutter.op" => {
+                let mut op = args.first().cloned().unwrap_or(Value::Null);
+                sanitize_op(&mut op, self.vm, self.shared.sandbox_of(self.vm));
+                self.shared.forward("flutter.op", &[op])
+            }
+            "flutter.batch" => {
+                let mut ops = args.first().cloned().unwrap_or(Value::Null);
+                let sandbox = self.shared.sandbox_of(self.vm);
+                if let Value::Array(list) = &mut ops {
+                    for op in list {
+                        sanitize_op(op, self.vm, sandbox);
+                    }
+                }
+                self.shared.forward("flutter.batch", &[ops])
+            }
             other => self.shared.forward(other, args),
         }
     }
