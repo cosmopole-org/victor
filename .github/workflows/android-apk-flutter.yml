@@ -1,0 +1,242 @@
+# Build the Victor demo APK with a REAL embedded Flutter engine (ELPIAN_WITH_FLUTTER).
+#
+# ⚠️ EXPERIMENTAL and MANUAL (workflow_dispatch only). It does NOT run on push,
+# and it is intentionally separate from android-apk.yml so it can never break the
+# default (green) APK build. It uploads an artifact; it does not commit anything.
+#
+# ── Why this can't be fully automated ────────────────────────────────────────
+# The custom Flutter C embedder (flutter_embedder.h + libflutter_engine.so) that
+# extension/src/flutter_view.cpp uses is NOT the standard way Flutter runs on
+# Android (that's the Java/Kotlin platform embedder). The stock Android engine
+# library ships the embedder-C-API symbols with HIDDEN visibility, so a custom
+# embedder cannot link them. A usable android-arm64 engine must therefore be
+# built FROM SOURCE with `--embedder-for-target --target-os android
+# --android-cpu arm64` (a ~15 GB checkout + multi-hour build that does not fit a
+# GitHub-hosted runner). This workflow consequently expects you to SUPPLY that
+# engine as an artifact (an archive URL), and it does the rest: AOT-snapshots the
+# host app, links the extension with the engine, stages the runtime assets and
+# bundles the engine .so into the APK.
+#
+# ── The engine archive (engine_url input) ────────────────────────────────────
+# A .tar.gz or .zip that extracts to a directory containing, for android-arm64:
+#   flutter_embedder.h          the embedder C header (stable ABI)
+#   libflutter_engine.so        the engine built --embedder-for-target for android-arm64
+#   gen_snapshot                the matching AOT compiler (android-arm64 host->target)
+#   icudtl.dat                  the ICU data the engine loads
+# Build these once from the Flutter engine source (see godot/FLUTTER.md,
+# "Real Flutter on Android"), host the archive somewhere reachable, and pass its
+# URL. The Flutter SDK version below MUST match the engine's version (a kernel
+# format mismatch otherwise fails the snapshot).
+
+name: Android APK (real Flutter, experimental)
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine_url:
+        description: "URL of an archive with android-arm64 flutter_embedder.h + libflutter_engine.so + gen_snapshot + icudtl.dat"
+        required: true
+      flutter_version:
+        description: "Flutter SDK version matching the engine (e.g. 3.24.0)"
+        required: true
+        default: "3.24.0"
+
+permissions:
+  contents: read
+
+env:
+  GODOT_RELEASE: "4.3-stable"
+  GODOT_TEMPLATE_DIR: "4.3.stable"
+  GODOT_CPP_BRANCH: "godot-4.3-stable"
+  NDK_VERSION: "23.2.8568313"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
+
+      - name: Set up Rust (aarch64-linux-android)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install SCons
+        run: pip3 install scons
+
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ github.event.inputs.flutter_version }}
+
+      - name: Fetch the supplied Flutter engine artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/flutter-engine"
+          cd "$RUNNER_TEMP/flutter-engine"
+          echo "Downloading engine archive…"
+          curl -fsSL -o engine.archive "${{ github.event.inputs.engine_url }}"
+          case "${{ github.event.inputs.engine_url }}" in
+            *.zip) unzip -q engine.archive ;;
+            *)     tar -xf engine.archive ;;
+          esac
+          # Flatten: locate the directory that actually holds flutter_embedder.h.
+          HDR="$(find . -name flutter_embedder.h | head -n1)"
+          if [ -z "$HDR" ]; then echo "flutter_embedder.h not found in archive"; exit 1; fi
+          ENGINE_DIR="$(cd "$(dirname "$HDR")" && pwd)"
+          echo "ENGINE_DIR=$ENGINE_DIR" >> "$GITHUB_ENV"
+          echo "Engine dir: $ENGINE_DIR"; ls -la "$ENGINE_DIR"
+          for f in flutter_embedder.h libflutter_engine.so gen_snapshot icudtl.dat; do
+            test -e "$ENGINE_DIR/$f" || { echo "missing $f in engine dir"; exit 1; }
+          done
+          chmod +x "$ENGINE_DIR/gen_snapshot" || true
+
+      - name: Clone godot-cpp
+        run: |
+          git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
+            https://github.com/godotengine/godot-cpp \
+            elpian/godot/extension/godot-cpp
+
+      - name: Build Elpian VM C-ABI library (aarch64-linux-android)
+        working-directory: elpian
+        run: |
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          cargo build -p elpian-godot-capi --release --target aarch64-linux-android
+
+      # AOT-snapshot the fixed interpreter app (godot/flutter_host) for android-arm64.
+      # `flutter build bundle` gathers assets + compiles the kernel; gen_snapshot
+      # turns the kernel into an ELF app.so the engine loads. The Flutter version
+      # MUST match the engine, or the kernel format is rejected.
+      - name: Build the flutter_host AOT snapshot + assets
+        working-directory: elpian/godot/flutter_host
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter pub get
+          flutter build bundle --release
+          KERNEL="$(find build -name kernel_blob.bin | head -n1)"
+          if [ -z "$KERNEL" ]; then
+            # Release bundles omit the kernel blob; compile it explicitly.
+            flutter build bundle --debug
+            KERNEL="$(find build -name kernel_blob.bin | head -n1)"
+          fi
+          echo "kernel: $KERNEL"
+          "$ENGINE_DIR/gen_snapshot" \
+            --deterministic --snapshot_kind=app-aot-elf \
+            --elf=app.so "$KERNEL"
+          ls -la app.so build/flutter_assets | head
+
+      - name: Build GDExtension WITH Flutter (.so, arm64)
+        working-directory: elpian/godot/extension
+        run: |
+          scons platform=android target=template_release arch=arm64 \
+            with_flutter=yes flutter_engine_dir="$ENGINE_DIR" \
+            elpian_capi=../../target/aarch64-linux-android/release/libelpian_godot.a
+          ls -la ../project/bin/
+
+      - name: Build GDExtension for the host platform (no Flutter)
+        working-directory: elpian/godot/extension
+        run: scons platform=linux target=template_release
+
+      - name: Stage the Flutter runtime assets + engine into the project
+        run: |
+          set -euo pipefail
+          proj=elpian/godot/project
+          mkdir -p "$proj/flutter"
+          cp elpian/godot/flutter_host/app.so "$proj/flutter/app.so"
+          cp -r elpian/godot/flutter_host/build/flutter_assets "$proj/flutter/flutter_assets"
+          cp "$ENGINE_DIR/icudtl.dat" "$proj/flutter/icudtl.dat"
+          # Bundle the engine .so next to the extension and declare it a dependency
+          # so the Android export copies it into the APK's lib/arm64-v8a.
+          cp "$ENGINE_DIR/libflutter_engine.so" "$proj/bin/libflutter_engine.so"
+          if ! grep -q "\[dependencies\]" "$proj/elpian_godot.gdextension"; then
+            printf '\n[dependencies]\nandroid.arm64 = { "res://bin/libflutter_engine.so" : "" }\n' \
+              >> "$proj/elpian_godot.gdextension"
+          fi
+          cat "$proj/elpian_godot.gdextension"
+
+      - name: Install Godot editor + export templates
+        run: |
+          curl -sSL -o godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          curl -sSL -o templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}"
+          unzip -q templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/"
+
+      - name: Install the Android gradle build template into the project
+        run: |
+          mkdir -p elpian/godot/project/android/build
+          unzip -o -q "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/android_source.zip" \
+            -d elpian/godot/project/android/build
+          touch elpian/godot/project/android/build/.gdignore
+          echo "${GODOT_TEMPLATE_DIR}" > elpian/godot/project/android/.build_version
+
+      - name: Generate CI keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore "$RUNNER_TEMP/ci.keystore" \
+            -alias androidci -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Elpian CI,O=cosmopole,C=US"
+
+      - name: Point Godot at the Android SDK / JDK
+        run: |
+          mkdir -p "$HOME/.config/godot"
+          for f in editor_settings-4.tres editor_settings-4.3.tres; do
+            cat > "$HOME/.config/godot/$f" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          EOF
+          done
+
+      - name: Point the export at the Victor Flutter × Godot-3D demo (portrait)
+        run: |
+          sed -i \
+            -e 's|^run/main_scene=.*|run/main_scene="res://flutter_3d_demo.tscn"|' \
+            -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
+            -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
+            -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \
+            elpian/godot/project/project.godot
+
+      - name: Import project
+        run: godot --headless --path elpian/godot/project --import || true
+
+      - name: Export APK
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ runner.temp }}/ci.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androidci
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+          GODOT_ANDROID_KEYSTORE_RELEASE_PATH: ${{ runner.temp }}/ci.keystore
+          GODOT_ANDROID_KEYSTORE_RELEASE_USER: androidci
+          GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
+        run: |
+          mkdir -p elpian/godot/build/android
+          godot --headless --verbose --path elpian/godot/project --export-release "Android" \
+            "$GITHUB_WORKSPACE/elpian/godot/build/android/elpian-godot-flutter.apk"
+          ls -la elpian/godot/build/android
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elpian-godot-flutter-apk
+          path: elpian/godot/build/android/elpian-godot-flutter.apk
