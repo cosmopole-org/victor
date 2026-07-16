@@ -4,29 +4,29 @@
 # and it is intentionally separate from android-apk.yml so it can never break the
 # default (green) APK build. It uploads an artifact; it does not commit anything.
 #
-# ── Why this can't be fully automated ────────────────────────────────────────
+# ── Why Android is special ───────────────────────────────────────────────────
 # The custom Flutter C embedder (flutter_embedder.h + libflutter_engine.so) that
 # extension/src/flutter_view.cpp uses is NOT the standard way Flutter runs on
 # Android (that's the Java/Kotlin platform embedder). The stock Android engine
 # library ships the embedder-C-API symbols with HIDDEN visibility, so a custom
 # embedder cannot link them. A usable android-arm64 engine must therefore be
 # built FROM SOURCE with `--embedder-for-target --target-os android
-# --android-cpu arm64` (a ~15 GB checkout + multi-hour build that does not fit a
-# GitHub-hosted runner). This workflow consequently expects you to SUPPLY that
-# engine as an artifact (an archive URL), and it does the rest: AOT-snapshots the
-# host app, links the extension with the engine, stages the runtime assets and
-# bundles the engine .so into the APK.
+# --android-cpu arm64`.
 #
-# ── The engine archive (engine_url input) ────────────────────────────────────
-# A .tar.gz or .zip that extracts to a directory containing, for android-arm64:
-#   flutter_embedder.h          the embedder C header (stable ABI)
-#   libflutter_engine.so        the engine built --embedder-for-target for android-arm64
-#   gen_snapshot                the matching AOT compiler (android-arm64 host->target)
-#   icudtl.dat                  the ICU data the engine loads
-# Build these once from the Flutter engine source (see godot/FLUTTER.md,
-# "Real Flutter on Android"), host the archive somewhere reachable, and pass its
-# URL. The Flutter SDK version below MUST match the engine's version (a kernel
-# format mismatch otherwise fails the snapshot).
+# ── Two ways to get the engine ───────────────────────────────────────────────
+# 1. Leave `engine_url` EMPTY (default): the job builds the engine from source
+#    in-CI (depot_tools + gclient + GN/ninja). This is disk-hungry (~30–40 GB —
+#    the job frees space first) and slow (hours, near GitHub's 6h ceiling); it
+#    may not fit a hosted runner. If it times out, use option 2 or a larger /
+#    self-hosted runner.
+# 2. Pass `engine_url`: a .tar.gz/.zip that extracts to a directory containing,
+#    for android-arm64: flutter_embedder.h · libflutter_engine.so · gen_snapshot
+#    · icudtl.dat (e.g. built once on a beefy box and hosted as a release asset).
+#
+# Either way the Flutter SDK version below MUST match the engine (a kernel format
+# mismatch otherwise fails the AOT snapshot). The rest is automated: AOT-snapshot
+# the host app, link the extension with the engine, stage the runtime assets, and
+# bundle the engine .so into the APK.
 
 name: Android APK (real Flutter, experimental)
 
@@ -34,10 +34,11 @@ on:
   workflow_dispatch:
     inputs:
       engine_url:
-        description: "URL of an archive with android-arm64 flutter_embedder.h + libflutter_engine.so + gen_snapshot + icudtl.dat"
-        required: true
+        description: "OPTIONAL archive URL (android-arm64 flutter_embedder.h + libflutter_engine.so + gen_snapshot + icudtl.dat). Leave EMPTY to build the engine from source in-job."
+        required: false
+        default: ""
       flutter_version:
-        description: "Flutter SDK version matching the engine (e.g. 3.24.0)"
+        description: "Flutter SDK version (e.g. 3.24.0). The from-source engine is built at the commit this SDK pins."
         required: true
         default: "3.24.0"
 
@@ -53,10 +54,27 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The from-source engine build is long; 6h is GitHub's hard ceiling for a
+    # hosted job. If it times out, either supply a prebuilt engine via engine_url
+    # or move this job to a larger/self-hosted runner.
+    timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # The Flutter engine checkout (gclient) + build needs far more disk than a
+      # stock runner has (~14 GB free). Reclaim ~30 GB by deleting preinstalled
+      # toolchains we do not use.
+      - name: Free disk space
+        if: ${{ github.event.inputs.engine_url == '' }}
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -83,6 +101,7 @@ jobs:
           flutter-version: ${{ github.event.inputs.flutter_version }}
 
       - name: Fetch the supplied Flutter engine artifact
+        if: ${{ github.event.inputs.engine_url != '' }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/flutter-engine"
@@ -103,6 +122,63 @@ jobs:
             test -e "$ENGINE_DIR/$f" || { echo "missing $f in engine dir"; exit 1; }
           done
           chmod +x "$ENGINE_DIR/gen_snapshot" || true
+
+      # ── Build the engine FROM SOURCE (when no engine_url is given) ──────────
+      # depot_tools + gclient sync the engine at the commit the chosen Flutter
+      # SDK pins, then GN/ninja build the custom-embedder engine + gen_snapshot
+      # for android-arm64. This is the long, disk-hungry path; it may exceed the
+      # runner's disk or the 6h limit — see the notes at the top of this file.
+      - name: Build the Flutter engine from source (android-arm64)
+        if: ${{ github.event.inputs.engine_url == '' }}
+        run: |
+          set -euo pipefail
+          # 1) depot_tools
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git "$RUNNER_TEMP/depot_tools"
+          export PATH="$RUNNER_TEMP/depot_tools:$PATH"
+
+          # 2) the engine commit the SDK pins (flutter-action put the SDK on PATH)
+          FLUTTER_ROOT="$(dirname "$(dirname "$(which flutter)")")"
+          ENGINE_HASH="$(cat "$FLUTTER_ROOT/bin/internal/engine.version")"
+          echo "Flutter SDK ${{ github.event.inputs.flutter_version }} -> engine $ENGINE_HASH"
+
+          # 3) gclient checkout of flutter/engine at that hash, with Android deps
+          mkdir -p "$RUNNER_TEMP/engine" && cd "$RUNNER_TEMP/engine"
+          cat > .gclient <<EOF
+          solutions = [
+            {
+              "managed": False,
+              "name": "src/flutter",
+              "url": "https://github.com/flutter/engine.git@${ENGINE_HASH}",
+              "custom_deps": {},
+              "deps_file": "DEPS",
+              "safesync_url": "",
+              "custom_vars": {"download_android_deps": True},
+            },
+          ]
+          EOF
+          gclient sync --no-history --shallow -j2
+
+          # 4) configure + build the embedder engine and the host gen_snapshot
+          cd src
+          ./flutter/tools/gn --target-os android --android-cpu arm64 \
+            --runtime-mode release --embedder-for-target --no-goma
+          OUT=out/android_release_arm64
+          ninja -C "$OUT" flutter_engine gen_snapshot
+
+          # 5) assemble ENGINE_DIR with the four artifacts the rest of the job needs
+          ED="$RUNNER_TEMP/flutter-engine-dir"; mkdir -p "$ED"
+          cp flutter/shell/platform/embedder/embedder.h "$ED/flutter_embedder.h"
+          cp "$OUT/libflutter_engine.so" "$ED/libflutter_engine.so"
+          # host gen_snapshot lands under a clang_x64 subdir when cross-compiling
+          GS="$(find "$OUT" -name gen_snapshot -type f | head -n1)"
+          cp "$GS" "$ED/gen_snapshot"; chmod +x "$ED/gen_snapshot"
+          ICU="$(find "$OUT" flutter/third_party/icu -name icudtl.dat 2>/dev/null | head -n1)"
+          cp "$ICU" "$ED/icudtl.dat"
+          echo "ENGINE_DIR=$ED" >> "$GITHUB_ENV"
+          ls -la "$ED"
+
+          # 6) reclaim the huge checkout before the rest of the job runs
+          rm -rf "$RUNNER_TEMP/engine" || true
 
       - name: Clone godot-cpp
         run: |
