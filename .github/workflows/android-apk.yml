@@ -147,19 +147,21 @@ jobs:
           EOF
           done
 
-      # CI-only override: export the Victor × React MIXED 2D+3D demo instead of
-      # the TPS game — a React app (react.js runtime driving VUI + the G3 3D
-      # layer) that embeds a live Godot 3D scene (camera, light, rotating cubes)
-      # inside a 2D UI, animated with useFrame. It is a portrait app, so the
-      # manifest orientation and the boot viewport flip to portrait too; the
-      # runtime (VictorClient.mountApp → VUI.app) re-asserts orientation +
-      # content scale on boot so the APK launches portrait from the first frame.
-      # Swap res://react_3d_demo.tscn for res://react_demo.tscn (pure 2D) or
-      # res://ui_demo.tscn (the widget-kit showcase) to ship a different demo.
-      - name: Point the export at the Victor React 2D+3D demo
+      # CI-only override: export the Victor FLUTTER × Godot-3D demo instead of
+      # the TPS game — a JavaScript app (flutter.js `FL` + ui.js `VUI` + the G3
+      # 3D layer) that mixes a live Godot 3D scene (camera on an orbit pivot,
+      # light, a spinning ring of primitives) with a 2D UI. The UI is REAL
+      # Flutter (widgets + events + a CustomPaint canvas gauge) when the build
+      # embeds a Flutter engine; this CI build does NOT set ELPIAN_WITH_FLUTTER,
+      # so `FL.mount` returns null and the demo falls back to the equivalent VUI
+      # HUD (fully interactive) — see godot/FLUTTER.md for enabling the real
+      # engine. Portrait app, so the manifest orientation + boot viewport flip
+      # to portrait too. Swap res://flutter_3d_demo.tscn for res://ui_demo.tscn
+      # or res://react_3d_demo.tscn to ship a different demo.
+      - name: Point the export at the Victor Flutter × Godot-3D demo
         run: |
           sed -i \
-            -e 's|^run/main_scene=.*|run/main_scene="res://react_3d_demo.tscn"|' \
+            -e 's|^run/main_scene=.*|run/main_scene="res://flutter_3d_demo.tscn"|' \
             -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
             -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
             -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \

@@ -76,10 +76,13 @@ var __flNextView = 1;
 function __flEl(type, props, children) {
   let node = { t: type, p: props == null ? {} : props };
   if (children != null) {
-    if (typeof children == "string" || children.length == null) {
-      node.c = [children];
-    } else {
+    // A list of children stays a list; a single child (a widget map or a bare
+    // string) is wrapped. Use the VM's neutral type tag, never `.length` — a
+    // widget map is not a list and probing it for `.length` is an error.
+    if (__isType(children, "list")) {
       node.c = children;
+    } else {
+      node.c = [children];
     }
   }
   return node;
@@ -410,11 +413,36 @@ class FL {
     let id = __flNextView;
     __flNextView = __flNextView + 1;
     let ref = parent == null ? null : { ref: parent.id };
-    askHost("flutter.op", [{ newview: true, def: id, parent: ref, opts: opts == null ? {} : opts }]);
+    // Detect whether the embedded Flutter engine is actually available: a
+    // successful newview replies with the (numeric) view handle; a build with
+    // no libflutter (the placeholder, and every web export) replies with an
+    // error which the front-end surfaces as a throw. Return null so callers can
+    // fall back to a native UI (see godot/project/scripts/flutter_3d_demo.js).
+    let ok = false;
+    try {
+      let reply = __gdUnmarshal(askHost("flutter.op", [{ newview: true, def: id, parent: ref, opts: opts == null ? {} : opts }]));
+      ok = __isType(reply, "number");
+    } catch (e) {
+      ok = false;
+    }
+    if (!ok) {
+      return null;
+    }
     let view = new FLView(id, builder);
     __flViews["v" + id] = view;
     __flFlush(view); // initial paint
     return view;
+  }
+
+  // True when the embedded Flutter engine is available in this build. Probes by
+  // mounting a throwaway view under `parent` and disposing it.
+  static available(parent) {
+    let v = FL.mount(parent, function () { return FL.el("SizedBox", {}); }, {});
+    if (v == null) {
+      return false;
+    }
+    v.dispose();
+    return true;
   }
 
   // Raw op escape hatch, symmetrical with GD.op.

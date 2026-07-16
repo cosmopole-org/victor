@@ -46,6 +46,7 @@ The pieces, and where they live:
 | Embedded AOT interpreter app (large hand-written widget/value catalog) | `flutter_host/lib/main.dart` | **Implemented** (needs Flutter SDK to snapshot) |
 | Full-coverage registry generator (from Flutter's API) + committed stub | `flutter_host/tool/gen_registry.dart`, `flutter_host/lib/registry.g.dart` | **Implemented** (needs Flutter SDK + analyzer to run) |
 | Canvas / `CustomPainter` (full `dart:ui` draw surface as a display list) | `prelude/flutter.js` (`FLCanvas`/`FLPath`) + `flutter_host/lib/main.dart` (`_ReplayPainter`) | **Implemented + covered by test** |
+| Mixed Flutter-UI + Godot-3D demo (+ CI wiring) | `project/scripts/flutter_3d_demo.js`, `project/flutter_3d_demo.tscn`, `.github/workflows/{android-apk,web-demo-pages}.yml` | **Implemented + covered by test** |
 
 > **What is proven here vs. what needs the engine.** The guest→seam→dispatch
 > contract is implemented and covered by a passing Rust test that drives a full
@@ -225,6 +226,31 @@ isolates all rasterizer specifics behind `present`/`ensure_texture`, so Phase 2 
 an internal swap of the renderer config + texture-wrapping path — **no guest, no
 protocol, and no `FlutterController` change**. Recommended order: ship software,
 then Vulkan zero-copy, then the remaining backends as needed.
+
+## The demo: Flutter UI × Godot 3D
+
+`project/scripts/flutter_3d_demo.js` (scene `project/flutter_3d_demo.tscn`) is a
+JavaScript app mixing all of the above with a live Godot 3D scene:
+
+- **3D (always on):** an environment, a camera on an orbit pivot, a directional
+  light, a floor, and a spinning ring of primitives built with the `G3` layer.
+- **UI (Flutter when available):** a transparent `Scaffold` with cards, a spin
+  `Slider`, add/remove/colour buttons, a shape-picker (`ChoiceChip`s), a shadows
+  `Switch`, a full-screen `GestureDetector` whose `onPanUpdate` orbits the
+  camera, and a **`CustomPaint` speedometer** (arcs, a sweep-gradient fill, a
+  live needle via canvas transforms, tick marks, a `drawParagraph` readout)
+  repainted every frame. The 2D controls mutate plain state; the 3D world reads
+  it each frame.
+- **Graceful degradation:** a real Flutter engine only exists in a build made
+  with `ELPIAN_WITH_FLUTTER` (and never on the web), so `FL.mount` returns null
+  when the engine is absent and the demo falls back to an **equivalent VUI HUD**
+  over the same 3D scene. The shipped APK / web-Pages artifacts therefore run
+  everywhere (the VUI path), while a Flutter-enabled build shows the real Flutter
+  UI. The active path is labelled on screen and in the boot log.
+
+Both CI workflows export this scene (portrait 720×1280): `android-apk.yml`
+commits the APK, `web-demo-pages.yml` deploys to GitHub Pages.
+`capi/tests/run_flutter_3d_demo.rs` runs the shipped script down both paths.
 
 ## Building with a real engine
 
