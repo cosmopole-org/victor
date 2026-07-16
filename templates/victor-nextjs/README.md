@@ -27,7 +27,7 @@ npm run build        # → build/guest.js  (the single-file guest program)
 ```
 
 Then load `build/guest.js` on the engine like any Victor guest program: copy it
-into `elpian/godot/prelude`-adjacent `elpian/godot/project/scripts/` and point an
+into `victor/bridge/prelude`-adjacent `victor/bridge/project/scripts/` and point an
 `ElpianVM` node's script at it — exactly how `ui_demo.js` is loaded. The engine
 composes `godot.js` + `ui.js` + `react.js` ahead of it automatically (it sees the
 `import 'react.js';` marker at the top of the output).
@@ -179,16 +179,16 @@ see the "honest constraints" note at the top of `react.js`.
 
 ## How it fits the Victor engine
 
-- **`elpian/godot/prelude/react.js`** — VReact: the React-compatible runtime
+- **`victor/bridge/prelude/react.js`** — VReact: the React-compatible runtime
   (element factory, hooks, keyed reconciler, host drivers). Authored in the
   `js2elpian` subset; user-space code, no privileged access. See
-  `../../elpian/godot/prelude/REACT.md`.
-- **`elpian/godot/prelude/ui.js`** — VUI: the widget kit VReact's host config
+  `../../victor/bridge/prelude/REACT.md`.
+- **`victor/bridge/prelude/ui.js`** — VUI: the widget kit VReact's host config
   drives.
-- **`elpian/godot/prelude/godot.js`** — the reflective Godot bridge.
-- The composer (`compose_godot_program_js` in `elpian/godot/capi/src/lib.rs`)
+- **`victor/bridge/prelude/godot.js`** — the reflective Godot bridge.
+- The composer (`compose_godot_program_js` in `victor/bridge/capi/src/lib.rs`)
   prepends these in order when it sees the `import` markers.
 
 The runtime's end-to-end regression (mount, `setState` re-render over the
 bridge, effect + cleanup) lives in
-`elpian/godot/capi/tests/run_react_demo.rs`.
+`victor/bridge/capi/tests/run_react_demo.rs`.

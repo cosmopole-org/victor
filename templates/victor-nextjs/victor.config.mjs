@@ -22,7 +22,7 @@ export default {
   net: false,
 
   // Output location for the compiled single-file guest program the Victor
-  // engine loads (drop it into elpian/godot/project/scripts and point an
+  // engine loads (drop it into victor/bridge/project/scripts and point an
   // ElpianVM node at it, exactly like ui_demo.js).
   outFile: "build/guest.js",
 };

@@ -1,0 +1,303 @@
+# Elpian — a no-JIT execution layer for dynamic Flutter code
+
+This directory embeds the **Elpian VM** and builds a **Dart/Flutter runtime
+layer** on top of it, so a release Flutter app can load and run application code
+**dynamically at runtime with no ahead-of-time compilation and no JIT** — which
+is what makes the approach valid on the iOS App Store and on the web, the two
+targets the Dart VM cannot serve dynamically.
+
+- **`elpian-vm/`** — the Elpian AST/bytecode VM, vendored unmodified from
+  [`cosmopole-org/elpis`](https://github.com/cosmopole-org/elpis) (`crates/elpian-vm`).
+  A *pausing bytecode interpreter*: it compiles a JS-subset (or a pre-built AST)
+  to bytecode and executes it, suspending on `askHost(apiName, payload)` to hand
+  host calls back to the embedder. **It never generates machine code** → no W^X
+  violation (App-Store-legal) and it compiles to `wasm32`. It already ships a
+  first-class capability + resource-limit governor.
+- **`js2elpian/` · `dart2elpian/`** — the language front-ends. Each compiles its
+  source language (JavaScript / a Dart subset) to Elpian bytecode; the VM is the
+  single, unified execution target. The split is strict: **the VM defines only
+  language-neutral primitives, and every language-specific rule lives in the
+  compiler layer**, resolved at compile time. Concretely:
+  - the VM has a **first-class null** literal; each front-end lowers its own
+    spelling (`null`, `undefined`, …) to it, absent reads (missing argument,
+    absent member/key, out-of-range element) yield it, and `??` / `== null`
+    test exactly it — a numeric `0` is never null;
+  - Dart's `~/` is not a VM operator: dart2elpian lowers it to the universal
+    `intDiv` builtin (the JS front-end accepts only real JavaScript);
+  - reified `is`/`as` run against the VM's **neutral type-tag names** (`int`,
+    `float`, `number`, `string`, `list`, `map`, `function`, `bool`, `null`,
+    `any`) plus user class names; dart2elpian maps Dart's spellings
+    (`double`→`float`, `String`→`string`, …) at compile time and lowers
+    `Object`/`dynamic` without involving the VM at all;
+  - branch/loop/`!`/`&&`/`||` conditions use the VM's own documented
+    truthiness rule; a front-end whose language coerces differently wraps the
+    condition (e.g. the `bool` builtin) at compile time, and a bounds-strict
+    language can lower indexed stores to the checking `setAt` builtin instead
+    of the VM's auto-growing list store;
+  - **exceptions** are a neutral VM opcode: `throw` raises any value, `try` /
+    `catch` catches it (unwinding across call frames), and a native builtin
+    error surfaces as a catchable `{ name, message }`. Each front-end maps its
+    own syntax onto it — JS `try`/`catch`/`finally`, Dart `try`/`on`/`catch`/
+    `finally` + `rethrow`;
+  - **bitwise & shift** operators have no VM opcode: they lower to universal
+    integer builtins (`bitAnd`/`shl`/`ushr`/…), so a front-end layers its own
+    width semantics (js2elpian composes JS's 32-bit `ToInt32`/`ToUint32`) at
+    compile time.
+
+  Standard-library **API names are universal**: the VM exposes one flat, neutral
+  stdlib surface (`push`, `upper`, `has`, `reversed`, `length`, `splice`, `at`,
+  `find`, `sort`, `intDiv`, `random`, …), and each front-end resolves *its*
+  language's spelling (`List.add`, `toUpperCase`, `Array.push`, `includes`,
+  `firstWhere`, …) onto that universal name **at compile time**. The VM carries
+  no Dart- or JS-specific method names and does no name translation (no proxying)
+  at runtime. Both front-ends are matured to broad coverage of their language —
+  the full operator tower, control flow (`switch`/`do-while`/`for-of`/`for-in`),
+  exceptions, closures with by-reference capture, and the core-library
+  collection/string/number methods — so idiomatic source in either language
+  compiles to the same AST/bytecode, and a new front-end for any language can
+  target it with full coverage and zero conflicts with the existing compilers.
+- **`dart/`** — the *optional* Dart/Flutter host surface: it drives an Elpian VM
+  and services the `dart:*` **foundational ("group 3") libraries** — the native
+  surfaces the Flutter framework depends on (`dart:ui`, `dart:typed_data`,
+  `dart:isolate`, …) plus the widget layer — as governed host-bridge calls. It
+  is gated behind the `dart` cargo feature (the `--include-dart` switch): a VM
+  build that does not want the Dart extras simply omits it.
+- **`bridge/`** — the **Godot engine bridge**: a Godot 4 project + C++
+  GDExtension embedding the VM (dart feature on) whose `GodotController` is a
+  *reflective interpreter* over ClassDB — the same paradigm as the CanvasKit
+  bridge — so a Dart program on Elpian drives **every** engine class, method,
+  property, signal, server, and constant by name, with batching, a handle
+  table, and queued signal dispatch for performance. One node hosts a
+  **multi-VM system**: a Rust `VmManager` runs a *tree* of Elpian VMs in the
+  same scene — any VM can spawn children it fully controls (lifecycle,
+  limits, permissions, messaging), with hierarchical rules (terminating a
+  parent kills its subtree; budgets are enforced against aggregate subtree
+  usage; effective permissions are the AND of the ancestor path) and each
+  spawned VM sandboxed to an assigned node subtree. `bridge/capi/` is the
+  Rust C-ABI crate the extension links; `bridge/prelude/godot.dart` is the
+  guest library (`GD`, `VMs`, `VmController`). The project's main scene is
+  **VICTOR: CITY STRIKE — a complete third-person shooter written entirely
+  in Dart on the VM** (city generation, animated characters, hitscan combat,
+  wave AI, HUD/menus, touch controls, synthesized audio), verified headless
+  end-to-end by `bridge/capi/tests/run_tps.rs`; see `bridge/GAME_DESIGN.md`.
+  See `bridge/README.md`.
+
+The crates build and test on native **and** `wasm32-unknown-unknown`:
+
+```sh
+cd victor
+cargo test                                             # full suite, all green
+cargo build -p dart --target wasm32-unknown-unknown --release              # with Dart extras
+cargo build -p dart --no-default-features --target wasm32-unknown-unknown   # VM-only, no Dart
+```
+
+## Why this architecture (and not "run Dart on Elpian directly")
+
+Two hard facts shape everything here:
+
+1. **iOS forbids JIT** (no writable-executable memory; App Store Guideline
+   2.5.2). **Web has no Dart VM** (Dart → JS/WASM). So the Dart VM cannot be the
+   runtime for *dynamically delivered* code on those platforms — only a
+   no-codegen interpreter can. Elpian is exactly that.
+2. The Flutter framework is inseparable from the Dart runtime's **foundational
+   libraries** (`dart:ui`, `dart:typed_data`, `dart:isolate`, `dart:io`,
+   `dart:ffi`). In stock Flutter these are **native C++ functions** bound into
+   the Dart isolate by the engine (tonic / `Dart_SetNativeResolver`) — *not* Dart
+   source. So "running Flutter on a different VM" is fundamentally about
+   **re-providing those native surfaces to the guest**, not about parsing Dart.
+
+This layer therefore re-expresses each foundational library as a **host-bridge
+service** over Elpian's `askHost` seam, governed per-call. `dart:ui`'s `Canvas`
+calls are *recorded* into a serializable scene tree that the real, native
+(AOT-compiled, iOS-legal) engine rasterizes — the guest never touches the GPU or
+generates code.
+
+## Universal "shape" operators (native VM opcodes)
+
+Beyond scalars, arithmetic and the classic collection literals, the VM natively
+implements a set of language-neutral **shape operators** as first-class opcodes
+in the executor state machine — *not* front-end desugaring — so **every** language
+lowered to the Elpian AST gets them uniformly, with one shared implementation.
+They carry no language-specific naming.
+
+| Operator | AST node → opcode | Behaviour |
+|---|---|---|
+| **Spread** (`...value`) | `spread` → `0x19` / `0x1a` | Expands a collection in place inside an **array** literal, an **object** literal, or a **call** argument list. Spreading an array contributes its elements; a string, its characters; an object (in an object literal), its members. |
+| **Template / interpolation** | `template` → `0x1b` | Concatenates an ordered list of value parts using the VM's display coercion (a string contributes itself; other values their text form). Literal segments are string parts. |
+| **Destructuring** | `destructure` → `0x1c` | Binds many names from one source value by **member key** (object) or **position** (array), with per-binding **defaults**, array **holes**, and a trailing **rest** binding that gathers the remainder into a fresh collection. |
+
+These are exercised end-to-end on the real VM by `elpian-vm/tests/vm_shape_ops.rs`
+(built straight from the AST, as any front-end would) and through the JavaScript
+front-end by `js2elpian/tests/js_shape_ops.rs` (`[...a]`, `{...o}`, `f(...args)`,
+`` `a${x}b` ``, `let {a, b: r, c = 1, ...rest} = o`, `let [x, , y, ...tail] = a`).
+The value model's `Val::to_display` supplies the neutral "text of a value" the
+template operator concatenates.
+
+## Governance (the controlling mechanisms) — two layers
+
+Every `dart:*` call passes through both:
+
+1. **VM layer (backstop)** — Elpian's built-in coarse capability families
+   (`Gpu`, `Network`, `Storage`, `Clock`, `Randomness`, `Other`, …) plus its
+   instruction / memory / call-depth limits. A disabled family short-circuits a
+   call to a typed null before it reaches this crate.
+2. **Dart layer** (`dart/src/governance.rs`) — a finer
+   [`DartCapability`] per library (`Painting`, `TypedData`, `Io`, `Isolate`,
+   `Ffi`, `Environment`), *fails closed* for unknown libraries, plus a
+   [`ResourceMeter`] bounding host-call count and bytes moved across the seam.
+   `DartCapabilitySet::sandboxed()` denies io/isolate/ffi by default.
+
+## What is implemented and verified today
+
+| Area | Status | Where |
+|---|---|---|
+| VM embed + `askHost` driver loop | ✅ built, e2e-tested | `runtime.rs` |
+| Two-layer capability + resource governor | ✅ built, tested | `governance.rs`, `runtime.rs` |
+| Dart **numeric tower** (`int` vs `double`, `~/`, `/`→double, wrapping, `is int`) | ✅ built, tested | `value.rs` |
+| **P1** `dart:typed_data` — `ByteData` + typed-list views + endianness + `setRange` | ✅ built, tested | `typed_data.rs` |
+| **P1** `dart:ui` — `Canvas`/`Paint`/`Path`/transform/clip/`PictureRecorder`/`SceneBuilder` → scene tree | ✅ built, tested | `dart_ui.rs` |
+| **P1** `dart:core`/`dart:math` — `DateTime.now`, seeded `Random`, math fns, String methods | ✅ built, tested | `core.rs` |
+| **P1+** `dart:convert` — JSON / UTF-8 / Base64 codecs | ✅ built, tested | `convert.rs` |
+| **P2** async model — microtask/timer event loop with Dart's exact ordering + `Timer.periodic` | ✅ built, tested | `async_loop.rs`, `runtime.rs` |
+| **P2+** `dart:isolate` — `ReceivePort`/`SendPort`/`Isolate.spawn` (cooperative) | ✅ built, tested | `isolate.rs` |
+| **P3** Dart → Elpian front-end — types, control flow, `~/`, interpolation, ternary, `++`/compound | ✅ built, tested | `dart_frontend.rs` |
+| **P3+** Dart **classes** — fields, ctors (`this.x`), methods, `extends`/`super`, `this`, instantiation | ✅ built, tested | `dart_frontend.rs` |
+| **P4** reified types, subtyping, function types, generics substitution, `const` canon., `noSuchMethod` | ✅ built, tested | `types.rs` |
+| **P4+** reified `is`/`as` end-to-end — class-instance subtype + primitive checks from Dart | ✅ built, tested | `runtime.rs` |
+| **P5** framework binding — pointer/lifecycle/text events + vsync frame pump | ✅ built, tested | `binding.rs`, `runtime.rs` |
+| **P5+** retained **scene diffing** — minimal per-frame patch (diff + apply) | ✅ built, tested | `scene_diff.rs` |
+| **P5** signed code-delivery — SHA-256/HMAC (KAT-verified), verify-before-load, downgrade guard, signed **manifest** with content-hash pinning | ✅ built, tested | `sha256.rs`, `bundle.rs` |
+| **P6** **widget layer** — `StatelessWidget`/`StatefulWidget`/`State`, `runApp`, `Container`/`Column`/`Row`/`Center`/`Text`/`GestureDetector`/… ; build → layout → paint → tap → `setState` → repaint | ✅ built, tested | `widgets.rs` |
+| **P6** front-end deepening — `for-in` loops + hex int literals (`0xFF2196F3`) | ✅ built, tested | `dart_frontend.rs` |
+| **P7** **`flutter.dart` library** — a large, idiomatic Flutter widget/painting library (`Widget`/`State`/`Color`/`Colors`/`EdgeInsets`/`Alignment`/`BoxConstraints`/enums/`RenderFlex`-style layout/`MaterialApp`/`Scaffold`/`AppBar`/`Card`/…), `import`ed by an app | ✅ built, tested | `flutter/flutter.dart` |
+| **P7** front-end idioms — annotations, `abstract`, `const`, `enum`, `static` members + named ctors, **getters**, `??`, `void`-arrow bodies | ✅ built, tested | `dart_frontend.rs` |
+| **P8** **real Skia via CanvasKit** — a reflective bridge that drives the *entire* Skia API (construct/call/enum/marshal by name; audited 575 symbols, 0 unreachable), replaying Elpian scenes/programs on genuine Skia with real text | ✅ built, browser-tested | `web-demo/canvaskit_bridge.js` |
+| native + `wasm32` compilation | ✅ verified | — |
+
+**190 tests pass** (native) and the whole stack builds for `wasm32`. The
+integration tests run **real guest programs on the real VM** end-to-end,
+including: Dart classes with inheritance, reified `is`/`as`, the async ordering
+guarantee, isolate message passing, a capability denial, a resource-limit
+cutoff, the pointer-event + frame-render loop with retained diffing, the
+signed-bundle accept/tamper-reject path, a **real Flutter-style widget app**
+that renders / taps / `setState`s / repaints, and — new — a **realistic app
+written against the imported `flutter.dart` library** (`MaterialApp` → `Scaffold`
+→ `AppBar` + a `StatefulWidget` counter card with `+`/`-` `ElevatedButton`s,
+`Card`, `Row`/`Column`, `Expanded`, and stat chips) whose buttons drive
+`setState`. Both apps also run in a **headless browser and rasterize to real
+pixels** (`web-demo/widgets_test.mjs`, `web-demo/flutter_test.mjs`).
+
+The `flutter.dart` library is imported exactly as in Flutter:
+
+```dart
+import 'flutter.dart';
+class MyApp extends StatelessWidget {
+  Widget build(BuildContext context) => MaterialApp(
+    home: Scaffold(
+      appBar: AppBar(title: Text('Hi', style: TextStyle(color: Colors.white))),
+      body: Center(child: Text('Hello', style: TextStyle(fontSize: 32.0))),
+    ),
+  );
+}
+void main() => runApp(MyApp());
+```
+
+> A finding that de-risks the language work: Elpian's value model **already
+> represents integers and floats with separate tags** (`typ` 1/2/3 = i16/i32/i64,
+> `typ` 4/5 = f32/f64). Dart's `int`/`double` split — usually the first thing a
+> JS-based VM gets wrong — maps onto this natively; `value.rs` supplies the
+> Dart-correct *semantics* over that representation.
+
+## Roadmap status
+
+Phases 1–5 each landed a real, tested vertical slice (see the table above). What
+each phase established, and what remains to *deepen* it toward the full framework:
+
+**Phase 1 — foundational libraries ✅ (slice).** `dart:typed_data`, `dart:ui`,
+`dart:core`/`dart:math` implemented for their load-bearing subsets. *Deepen:*
+`Image`/`ParagraphBuilder` layout, `ByteBuffer` sharing, the rest of `dart:core`.
+
+**Phase 2 — async & concurrency ✅ (slice).** The microtask/timer event loop with
+Dart's exact ordering; `Future`/`Stream`/`async`-`await` layer on top in Dart
+source. *Deepen:* `dart:isolate` (`SendPort`/`ReceivePort`) on Elpian's worker
+pool; `Zone`s; `async*`/`sync*`.
+
+**Phase 3 — Dart → Elpian front-end ✅ (slice).** A real lexer/parser/emitter for
+a Dart subset (typed decls, control flow, `~/`, interpolation). *Deepen:*
+classes/mixins, generics, pattern matching, and a Dart **kernel** (`.dill`)
+front-end for unchanged app code.
+
+**Phase 4 — reified types & conformance ✅ (slice).** Reified types + subtyping,
+`is`/`as`, `const` canonicalization, `noSuchMethod` resolution. *Deepen:* wire
+the front-end to emit type metadata at allocation/`is`/`as` sites; exact
+exception semantics.
+
+**Phase 5 — framework binding & delivery ✅ (slice).** Pointer/lifecycle/text
+event routing, the `onBeginFrame`/`onDrawFrame` vsync pump returning a scene
+tree, and a **signed** bundle loader (real SHA-256/HMAC, verify-before-load,
+downgrade protection). *Deepen:* connect the returned scene tree to a native
+Flutter rasterizer (engine embedder / platform view) and add ed25519 signatures.
+
+**Phase 6 — the widget layer ✅ (slice).** A Flutter-shaped widget framework
+(`widgets.rs`), written in the Dart subset and compiled through the same
+front-end, so **real widget code** — `StatelessWidget`/`StatefulWidget` with
+`build()` and nested children — runs on the VM. `runApp` owns the engine binding;
+each frame it rebuilds the tree from the root, lays it out under constraints,
+and paints it into the `dart:ui` scene; taps are hit-tested to `GestureDetector`s
+and `setState` requests the next frame. `State` persists across frames (matched
+by build order). The `engine/.../elpian` layer exposes `LoadWidgetApp` /
+`elpian_init_widgets` to run such a bundle.
+
+**Phase 7 — the `flutter.dart` library ✅.** A large, **idiomatic** Flutter
+widget/painting library authored as ordinary Dart in
+[`flutter/flutter.dart`](dart/flutter/flutter.dart) and modelled on the
+real framework's public API — `Key`, `Widget`/`StatelessWidget`/`StatefulWidget`/
+`State`, `BuildContext`; the painting value types `Color`/`Colors`/`Offset`/
+`Size`/`Rect`/`EdgeInsets`/`Alignment`/`BorderRadius`/`BoxDecoration`/`TextStyle`/
+`BoxConstraints`; the enums `Axis`/`MainAxisAlignment`/`CrossAxisAlignment`/
+`MainAxisSize`/`TextAlign`/`FontWeight`; a real two-phase `layout(constraints)`/
+`paint(offset)` protocol with a `RenderFlex`-style flex algorithm; the widgets
+`Container`/`DecoratedBox`/`ColoredBox`/`Padding`/`Center`/`Align`/`Column`/`Row`/
+`Stack`/`Positioned`/`Expanded`/`Flexible`/`Spacer`/`SizedBox`/`Text`/`Icon`/
+`Divider`/`GestureDetector`; and the Material shells `MaterialApp`/`Scaffold`/
+`AppBar`/`Card`/`ElevatedButton`/`TextButton`. An app imports it (`import
+'flutter.dart';`) and runs on the VM (`LoadFlutterApp` / `elpian_init_flutter`).
+Landing it drove the front-end
+to accept the idioms the real framework is written in (annotations, `abstract`,
+`const`, `enum`, `static` members + named constructors, getters, `??`). *Deepen:*
+`Stack` fit/clipping, `ListView`/scrolling, `Theme`/`InheritedWidget`, keyed
+reconciliation, animations, and engine-provided text metrics.
+
+**Phase 8 — real Skia via CanvasKit ✅.** A **reflective bridge**
+([`web-demo/canvaskit_bridge.js`](web-demo/canvaskit_bridge.js)) drives real Skia
+through **CanvasKit** (Skia-in-WASM — the renderer Flutter web uses). Rather than
+hand-wrapping Skia's ~1000 methods, it interprets a uniform "Skia program": it
+can construct any object, call any static factory or instance method, resolve any
+enum/constant, and marshal every Skia argument shape (colors, rects, rrects,
+matrices, scalar/point arrays, typed data, handles, nested option dicts) — all
+**by name**, so it covers the **entire Skia API with no exceptions**, audited at
+runtime against the loaded library (575 symbols, 0 unreachable). It replays both
+Elpian widget scenes (with **real text layout** via CanvasKit's Paragraph API)
+and raw programs a guest emits over `dart:ui`. Verified headless: the
+`flutter.dart` app rasterized by real Skia (interactive), a full-API showcase
+(gradients, Bézier paths, mask/image-filter blur, `saveLayer`, shaped text), and
+a guest that drives Skia directly from bytecode. *Deepen:* GPU (WebGL/WebGPU)
+surface in production, `dart:ui` recorder emitting the program in Rust, and the
+matching native Skia/Impeller binding for iOS/Android/desktop.
+
+## Honest scope statement
+
+Phases 1–7 are real, compile (native + wasm32), and are covered by 190 passing
+tests including end-to-end runs on the actual VM — now including a realistic app
+written against the imported `flutter.dart` library that renders a full Material
+screen, takes taps, and repaints from mutated `State`, verified both in the Rust
+suite and, rasterized to pixels, in a headless browser.
+This is a working **foundation and vertical slice through every layer** of the
+architecture — not a complete Dart VM or a drop-in for the unmodified Flutter
+framework. The two things that remain genuinely large are (a) breadth — filling
+out each `dart:*` library, the language front-end, and the widget set toward the
+full `package:flutter` surface, and (b) the final native-rasterizer binding
+(compiling the `engine/.../elpian` glue in a real engine build, plus
+`drawParagraph` text layout). Every slice here is a concrete, verifiable step
+toward the "update app code live in a release build on iOS/web/Android/desktop"
+goal, with the security-critical verify-before-execute control already real.
