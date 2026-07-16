@@ -45,10 +45,10 @@ jobs:
         run: |
           git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
             https://github.com/godotengine/godot-cpp \
-            elpian/godot/extension/godot-cpp
+            victor/bridge/extension/godot-cpp
 
       - name: Build linux host library (linux-only, clean tree)
-        working-directory: elpian/godot/extension
+        working-directory: victor/bridge/extension
         run: scons platform=linux target=template_release
 
       - name: Install Godot editor + export templates
@@ -66,32 +66,32 @@ jobs:
       - name: "P0: quit-only, linux host lib only"
         run: |
           set +e
-          timeout 120 godot --headless --path elpian/godot/project --quit > p0.log 2>&1
+          timeout 120 godot --headless --path victor/bridge/project --quit > p0.log 2>&1
           echo "PROBE P0 exit=$?"
           tail -8 p0.log
 
       - name: "P1: import, linux host lib only"
         run: |
           set +e
-          rm -rf elpian/godot/project/.godot
-          timeout 300 godot --headless --verbose --path elpian/godot/project --import > p1.log 2>&1
+          rm -rf victor/bridge/project/.godot
+          timeout 300 godot --headless --verbose --path victor/bridge/project --import > p1.log 2>&1
           echo "PROBE P1 exit=$?"
           grep -E "stack smashing|Aborted" p1.log; tail -6 p1.log
 
       - name: "P2: import + export with DUMMY wasm present"
         run: |
           set +e
-          printf 'dummy' > elpian/godot/project/bin/libelpian_godot.web.wasm32.wasm
-          rm -rf elpian/godot/project/.godot
-          timeout 300 godot --headless --verbose --path elpian/godot/project --import > p2a.log 2>&1
+          printf 'dummy' > victor/bridge/project/bin/libelpian_godot.web.wasm32.wasm
+          rm -rf victor/bridge/project/.godot
+          timeout 300 godot --headless --verbose --path victor/bridge/project --import > p2a.log 2>&1
           echo "PROBE P2a(import) exit=$?"
           grep -E "stack smashing" p2a.log; tail -4 p2a.log
-          mkdir -p elpian/godot/build/web
-          timeout 300 godot --headless --verbose --path elpian/godot/project --export-release "Web" \
-            "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html" > p2b.log 2>&1
+          mkdir -p victor/bridge/build/web
+          timeout 300 godot --headless --verbose --path victor/bridge/project --export-release "Web" \
+            "$GITHUB_WORKSPACE/victor/bridge/build/web/index.html" > p2b.log 2>&1
           echo "PROBE P2b(export) exit=$?"
           grep -E "stack smashing" p2b.log; tail -6 p2b.log
-          rm -f elpian/godot/project/bin/libelpian_godot.web.wasm32.wasm
+          rm -f victor/bridge/project/bin/libelpian_godot.web.wasm32.wasm
 
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v14
@@ -101,8 +101,8 @@ jobs:
       - name: "P3: import with emsdk env, NO wasm"
         run: |
           set +e
-          rm -rf elpian/godot/project/.godot
-          timeout 300 godot --headless --verbose --path elpian/godot/project --import > p3.log 2>&1
+          rm -rf victor/bridge/project/.godot
+          timeout 300 godot --headless --verbose --path victor/bridge/project --import > p3.log 2>&1
           echo "PROBE P3 exit=$?"
           grep -E "stack smashing" p3.log; tail -4 p3.log
 
@@ -116,9 +116,9 @@ jobs:
         env:
           CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS: "-C link-arg=-sSIDE_MODULE=2"
         run: |
-          cd elpian
+          cd victor
           cargo +1.81.0 build -p elpian-godot-capi --release --target wasm32-unknown-emscripten
-          cd godot/extension
+          cd bridge/extension
           scons platform=web threads=no target=template_release \
             elpian_capi=../../target/wasm32-unknown-emscripten/release/libelpian_godot.a
           ls -la ../project/bin/
@@ -126,30 +126,30 @@ jobs:
       - name: "P4: import + export with REAL wasm (host lib from linux-only build)"
         run: |
           set +e
-          rm -rf elpian/godot/project/.godot
-          timeout 300 godot --headless --verbose --path elpian/godot/project --import > p4a.log 2>&1
+          rm -rf victor/bridge/project/.godot
+          timeout 300 godot --headless --verbose --path victor/bridge/project --import > p4a.log 2>&1
           echo "PROBE P4a(import) exit=$?"
           grep -E "stack smashing" p4a.log; tail -4 p4a.log
-          mkdir -p elpian/godot/build/web
-          timeout 600 godot --headless --verbose --path elpian/godot/project --export-release "Web" \
-            "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html" > p4b.log 2>&1
+          mkdir -p victor/bridge/build/web
+          timeout 600 godot --headless --verbose --path victor/bridge/project --export-release "Web" \
+            "$GITHUB_WORKSPACE/victor/bridge/build/web/index.html" > p4b.log 2>&1
           echo "PROBE P4b(export) exit=$?"
           grep -E "stack smashing" p4b.log; tail -8 p4b.log
-          ls -la elpian/godot/build/web || true
+          ls -la victor/bridge/build/web || true
 
       - name: "P5: rebuild linux host AFTER web, then import + export"
         run: |
           set +e
-          cd elpian/godot/extension
+          cd victor/bridge/extension
           scons platform=linux target=template_release > /dev/null 2>&1
           echo "host rebuild exit=$?"
           cd "$GITHUB_WORKSPACE"
-          rm -rf elpian/godot/project/.godot
-          timeout 300 godot --headless --verbose --path elpian/godot/project --import > p5a.log 2>&1
+          rm -rf victor/bridge/project/.godot
+          timeout 300 godot --headless --verbose --path victor/bridge/project --import > p5a.log 2>&1
           echo "PROBE P5a(import) exit=$?"
           grep -E "stack smashing" p5a.log; tail -4 p5a.log
-          timeout 600 godot --headless --verbose --path elpian/godot/project --export-release "Web" \
-            "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html" > p5b.log 2>&1
+          timeout 600 godot --headless --verbose --path victor/bridge/project --export-release "Web" \
+            "$GITHUB_WORKSPACE/victor/bridge/build/web/index.html" > p5b.log 2>&1
           echo "PROBE P5b(export) exit=$?"
           grep -E "stack smashing" p5b.log; tail -6 p5b.log
 

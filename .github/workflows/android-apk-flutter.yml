@@ -184,20 +184,20 @@ jobs:
         run: |
           git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
             https://github.com/godotengine/godot-cpp \
-            elpian/godot/extension/godot-cpp
+            victor/bridge/extension/godot-cpp
 
       - name: Build Elpian VM C-ABI library (aarch64-linux-android)
-        working-directory: elpian
+        working-directory: victor
         run: |
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_HOME/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
           cargo build -p elpian-godot-capi --release --target aarch64-linux-android
 
-      # AOT-snapshot the fixed interpreter app (godot/flutter_host) for android-arm64.
+      # AOT-snapshot the fixed interpreter app (bridge/flutter_host) for android-arm64.
       # `flutter build bundle` gathers assets + compiles the kernel; gen_snapshot
       # turns the kernel into an ELF app.so the engine loads. The Flutter version
       # MUST match the engine, or the kernel format is rejected.
       - name: Build the flutter_host AOT snapshot + assets
-        working-directory: elpian/godot/flutter_host
+        working-directory: victor/bridge/flutter_host
         run: |
           set -euo pipefail
           flutter --version
@@ -216,7 +216,7 @@ jobs:
           ls -la app.so build/flutter_assets | head
 
       - name: Build GDExtension WITH Flutter (.so, arm64)
-        working-directory: elpian/godot/extension
+        working-directory: victor/bridge/extension
         run: |
           scons platform=android target=template_release arch=arm64 \
             with_flutter=yes flutter_engine_dir="$ENGINE_DIR" \
@@ -224,16 +224,16 @@ jobs:
           ls -la ../project/bin/
 
       - name: Build GDExtension for the host platform (no Flutter)
-        working-directory: elpian/godot/extension
+        working-directory: victor/bridge/extension
         run: scons platform=linux target=template_release
 
       - name: Stage the Flutter runtime assets + engine into the project
         run: |
           set -euo pipefail
-          proj=elpian/godot/project
+          proj=victor/bridge/project
           mkdir -p "$proj/flutter"
-          cp elpian/godot/flutter_host/app.so "$proj/flutter/app.so"
-          cp -r elpian/godot/flutter_host/build/flutter_assets "$proj/flutter/flutter_assets"
+          cp victor/bridge/flutter_host/app.so "$proj/flutter/app.so"
+          cp -r victor/bridge/flutter_host/build/flutter_assets "$proj/flutter/flutter_assets"
           cp "$ENGINE_DIR/icudtl.dat" "$proj/flutter/icudtl.dat"
           # Bundle the engine .so next to the extension and declare it a dependency
           # so the Android export copies it into the APK's lib/arm64-v8a.
@@ -258,11 +258,11 @@ jobs:
 
       - name: Install the Android gradle build template into the project
         run: |
-          mkdir -p elpian/godot/project/android/build
+          mkdir -p victor/bridge/project/android/build
           unzip -o -q "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/android_source.zip" \
-            -d elpian/godot/project/android/build
-          touch elpian/godot/project/android/build/.gdignore
-          echo "${GODOT_TEMPLATE_DIR}" > elpian/godot/project/android/.build_version
+            -d victor/bridge/project/android/build
+          touch victor/bridge/project/android/build/.gdignore
+          echo "${GODOT_TEMPLATE_DIR}" > victor/bridge/project/android/.build_version
 
       - name: Generate CI keystore
         run: |
@@ -292,10 +292,10 @@ jobs:
             -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
             -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
             -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \
-            elpian/godot/project/project.godot
+            victor/bridge/project/project.godot
 
       - name: Import project
-        run: godot --headless --path elpian/godot/project --import || true
+        run: godot --headless --path victor/bridge/project --import || true
 
       - name: Export APK
         env:
@@ -306,13 +306,13 @@ jobs:
           GODOT_ANDROID_KEYSTORE_RELEASE_USER: androidci
           GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD: android
         run: |
-          mkdir -p elpian/godot/build/android
-          godot --headless --verbose --path elpian/godot/project --export-release "Android" \
-            "$GITHUB_WORKSPACE/elpian/godot/build/android/elpian-godot-flutter.apk"
-          ls -la elpian/godot/build/android
+          mkdir -p victor/bridge/build/android
+          godot --headless --verbose --path victor/bridge/project --export-release "Android" \
+            "$GITHUB_WORKSPACE/victor/bridge/build/android/elpian-godot-flutter.apk"
+          ls -la victor/bridge/build/android
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: elpian-godot-flutter-apk
-          path: elpian/godot/build/android/elpian-godot-flutter.apk
+          path: victor/bridge/build/android/elpian-godot-flutter.apk

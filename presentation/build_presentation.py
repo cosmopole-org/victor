@@ -625,11 +625,11 @@ card(s, Inches(6.9), Inches(4.5), Inches(6.0), Inches(1.95), "Deterministic sema
 s = new_slide()
 chrome(s, "Implementation status in this repository", "8 · Status")
 rows = [
-    ("Elpian VM (elpian/elpian-vm)", "AST/bytecode pausing interpreter; capability + resource governor; native & wasm32", "✅ built & tested"),
+    ("Elpian VM (victor/elpian-vm)", "AST/bytecode pausing interpreter; capability + resource governor; native & wasm32", "✅ built & tested"),
     ("Language front-ends (js2elpian, dart2elpian)", "JS and Dart-subset compilers to Elpian bytecode; universal stdlib names resolved at compile time", "✅ built & tested"),
-    ("Dart runtime layer (elpian/dart)", "dart:ui, typed_data, convert, isolates, async loop, widget layer, flutter.dart library", "✅ 190 tests pass"),
-    ("Web renderer (elpian/web-demo)", "reflective CanvasKit/Skia bridge — 575 symbols audited, 0 unreachable; headless-browser verified", "✅ built & verified"),
-    ("Godot bridge (elpian/godot)", "reflective controller over ClassDB (~900 classes); multi-VM tree with sandboxing & budgets", "✅ built & verified"),
+    ("Dart runtime layer (victor/dart)", "dart:ui, typed_data, convert, isolates, async loop, widget layer, flutter.dart library", "✅ 190 tests pass"),
+    ("Web renderer (victor/web-demo)", "reflective CanvasKit/Skia bridge — 575 symbols audited, 0 unreachable; headless-browser verified", "✅ built & verified"),
+    ("Godot bridge (victor/bridge)", "reflective controller over ClassDB (~900 classes); multi-VM tree with sandboxing & budgets", "✅ built & verified"),
     ("Prompt → AST pipeline (pending-work/prompts)", "classifier + 9 per-family extractor prompts emitting template AST JSON", "🔶 prototype"),
     ("Interface adaptation (views/actors per modality)", "edge-module scanning and per-device materialisation", "🔷 design stage"),
 ]
@@ -801,11 +801,11 @@ put(tf, "References & artefacts", size=16, color=CODE_HL, bold=True, first=True)
 
 refs = [
     ("Repository", "github.com/cosmopole-org/victor — this presentation: presentation/"),
-    ("Elpian VM & Dart layer", "elpian/ — VM, dart2elpian, js2elpian, flutter.dart, 190-test suite (elpian/README.md)"),
+    ("Elpian VM & Dart layer", "victor/ — VM, dart2elpian, js2elpian, flutter.dart, 190-test suite (victor/README.md)"),
     ("Elpian VM upstream", "github.com/cosmopole-org/elpis (crates/elpian-vm)"),
     ("Prompt → AST pipeline", "pending-work/prompts/ — classifier + nine operation-family extractor prompts"),
-    ("Web / Skia bridge", "elpian/web-demo/canvaskit_bridge.js — reflective CanvasKit driver (575 symbols audited)"),
-    ("Godot bridge & case study", "elpian/godot/ — reflective ClassDB controller, multi-VM tree, VICTOR: CITY STRIKE (GAME_DESIGN.md)"),
+    ("Web / Skia bridge", "victor/web-demo/canvaskit_bridge.js — reflective CanvasKit driver (575 symbols audited)"),
+    ("Godot bridge & case study", "victor/bridge/ — reflective ClassDB controller, multi-VM tree, VICTOR: CITY STRIKE (GAME_DESIGN.md)"),
 ]
 _, tf = textbox(s, Inches(0.9), Inches(2.9), Inches(11.6), Inches(3.4))
 for i, (a, b) in enumerate(refs):

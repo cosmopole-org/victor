@@ -3,7 +3,7 @@
 // It turns this ordinary-looking Next.js + React project into the single-file
 // guest program the Victor engine runs (Elpian VM compiles it with js2elpian,
 // Godot renders it via the VUI widget kit). There is no browser and no DOM —
-// the compiled program calls into the VReact runtime (`elpian/godot/prelude/
+// the compiled program calls into the VReact runtime (`victor/bridge/prelude/
 // react.js`), whose host config maps React elements onto retained Godot nodes.
 //
 // Pipeline, per source module:
@@ -247,7 +247,7 @@ async function build() {
   console.log("  bytes  : " + Buffer.byteLength(chunks.join("\n")));
   console.log("");
   console.log("Load it on the engine like any guest program, e.g. copy to");
-  console.log("elpian/godot/project/scripts/ and point an ElpianVM node's script at it.");
+  console.log("victor/bridge/project/scripts/ and point an ElpianVM node's script at it.");
 }
 
 build().catch((e) => {

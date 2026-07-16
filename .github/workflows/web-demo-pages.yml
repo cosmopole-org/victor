@@ -18,7 +18,7 @@ on:
   push:
     branches: [main, master]
     paths:
-      - "elpian/**"
+      - "victor/**"
       - ".github/workflows/web-demo-pages.yml"
   workflow_dispatch:
 
@@ -75,7 +75,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: elpian
+          workspaces: victor
 
       - name: Install SCons
         run: pip3 install scons
@@ -84,16 +84,16 @@ jobs:
         run: |
           git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
             https://github.com/godotengine/godot-cpp \
-            elpian/godot/extension/godot-cpp
+            victor/bridge/extension/godot-cpp
 
       - name: Cache godot-cpp web build
         uses: actions/cache@v4
         with:
           path: |
-            elpian/godot/extension/godot-cpp/bin
-            elpian/godot/extension/godot-cpp/gen
-            elpian/godot/extension/godot-cpp/src
-            elpian/godot/extension/.sconsign.dblite
+            victor/bridge/extension/godot-cpp/bin
+            victor/bridge/extension/godot-cpp/gen
+            victor/bridge/extension/godot-cpp/src
+            victor/bridge/extension/.sconsign.dblite
           key: godot-cpp-web-${{ env.GODOT_CPP_BRANCH }}-${{ env.EMSDK_VERSION }}-v1
 
       # SIDE_MODULE=2: cargo also links the dependency crates' declared cdylib
@@ -102,7 +102,7 @@ jobs:
       # missing main(). Linking them as side modules makes those byproducts
       # inert; the staticlib archive is unaffected.
       - name: Build Elpian VM C-ABI library (emscripten)
-        working-directory: elpian
+        working-directory: victor
         env:
           CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS: "-C link-arg=-sSIDE_MODULE=2"
         run: cargo +1.81.0 build -p elpian-godot-capi --release --target wasm32-unknown-emscripten
@@ -120,7 +120,7 @@ jobs:
       # compiled against 32-bit Variant/String layouts and the 64-bit editor
       # aborts with "stack smashing detected" during import/export.
       - name: Build GDExtension (.wasm side module, nothreads)
-        working-directory: elpian/godot/extension
+        working-directory: victor/bridge/extension
         run: |
           scons platform=web threads=no target=template_release generate_bindings=yes \
             elpian_capi=../../target/wasm32-unknown-emscripten/release/libelpian_godot.a
@@ -130,7 +130,7 @@ jobs:
       # host (linux) library must exist too. SConstruct cargo-builds the native
       # archive automatically when it is missing.
       - name: Build GDExtension for the host platform
-        working-directory: elpian/godot/extension
+        working-directory: victor/bridge/extension
         run: scons platform=linux target=template_release generate_bindings=yes
 
       - name: Install Godot editor + export templates
@@ -157,18 +157,18 @@ jobs:
             -e 's|^window/size/viewport_width=.*|window/size/viewport_width=720|' \
             -e 's|^window/size/viewport_height=.*|window/size/viewport_height=1280|' \
             -e 's|^window/handheld/orientation=.*|window/handheld/orientation=1|' \
-            elpian/godot/project/project.godot
-          grep -E "run/main_scene|viewport_|orientation" elpian/godot/project/project.godot
+            victor/bridge/project/project.godot
+          grep -E "run/main_scene|viewport_|orientation" victor/bridge/project/project.godot
 
       - name: Import project
-        run: godot --headless --path elpian/godot/project --import || true
+        run: godot --headless --path victor/bridge/project --import || true
 
       - name: Export web build
         run: |
-          mkdir -p elpian/godot/build/web
-          godot --headless --verbose --path elpian/godot/project --export-release "Web" \
-            "$GITHUB_WORKSPACE/elpian/godot/build/web/index.html"
-          ls -la elpian/godot/build/web
+          mkdir -p victor/bridge/build/web
+          godot --headless --verbose --path victor/bridge/project --export-release "Web" \
+            "$GITHUB_WORKSPACE/victor/bridge/build/web/index.html"
+          ls -la victor/bridge/build/web
 
       # Godot's official web templates are built without exception catching,
       # but Rust's prebuilt emscripten std unwinds panics emscripten-style, so
@@ -177,7 +177,7 @@ jobs:
       # 'invoke_viii'". Teach the exported glue to synthesize them (see the
       # script header for the full story).
       - name: Patch exported JS glue for the Rust side module
-        run: node elpian/godot/patch-web-export.mjs elpian/godot/build/web/index.js
+        run: node victor/bridge/patch-web-export.mjs victor/bridge/build/web/index.js
 
       # No COOP/COEP shim needed: the nothreads build never touches
       # SharedArrayBuffer, so plain GitHub Pages hosting is sufficient.
@@ -185,7 +185,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: elpian/godot/build/web
+          path: victor/bridge/build/web
 
   deploy:
     needs: build
