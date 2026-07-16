@@ -241,12 +241,39 @@ JavaScript app mixing all of the above with a live Godot 3D scene:
   live needle via canvas transforms, tick marks, a `drawParagraph` readout)
   repainted every frame. The 2D controls mutate plain state; the 3D world reads
   it each frame.
-- **Graceful degradation:** a real Flutter engine only exists in a build made
-  with `ELPIAN_WITH_FLUTTER` (and never on the web), so `FL.mount` returns null
-  when the engine is absent and the demo falls back to an **equivalent VUI HUD**
-  over the same 3D scene. The shipped APK / web-Pages artifacts therefore run
-  everywhere (the VUI path), while a Flutter-enabled build shows the real Flutter
-  UI. The active path is labelled on screen and in the boot log.
+- **Graceful degradation with Flutter parity:** a real Flutter engine only
+  exists in a build made with `ELPIAN_WITH_FLUTTER` (and never on the web), so
+  `FL.mount` returns null when the engine is absent and the demo falls back to
+  the **Victor UI kit (VUI)** rendering the *same* feature set **natively** over
+  the same 3D scene — so the shipped APK / web-Pages artifacts show all of it.
+  The gauge is drawn by **one shared painter** that runs on both `FLCanvas`
+  (real Flutter) and `VuiCanvas` (native), the gesture pad uses `VUI.gestures`
+  (drag to orbit, tap to reset, long-press), and the controls are VUI widgets.
+  The active path is labelled on screen and in the boot log.
+
+### VUI Flutter-parity layer
+
+Because the shipped artifacts run the VUI path, the Victor UI kit itself gained
+Flutter-equivalent capabilities that render natively on Godot `Control` nodes:
+
+- **`VUI.canvas({size, paint})`** — a `CustomPainter`-equivalent drawing surface
+  backed by `RenderingServer.canvas_item_add_*` on the Control's canvas-item RID
+  (retained commands that work outside the draw phase, unlike `CanvasItem.draw_*`
+  and the deferred bridged `draw` signal). Its `VuiCanvas` **mirrors the
+  `FLCanvas` method surface** (arc/circle/line/rect/rrect/oval/path/save/
+  translate/rotate/scale/restore/paragraph/color/points, with a transform
+  stack), so one painter function serves both paths. `VUI.repaint(node)` re-runs
+  it for animation.
+- **`VUI.gestures(child, handlers)`** — the Flutter event vocabulary on a Godot
+  Control via `gui_input`/`mouse_entered`/`mouse_exited`: `onTapDown`/`onTapUp`/
+  `onTap`/`onSecondaryTap`/`onDoubleTap`/`onLongPress`/`onPanStart`/`onPanUpdate`
+  (`{dx,dy,x,y}`)/`onPanEnd`/`onEnter`/`onExit`/`onHover`/`onScroll`, mouse and
+  touch.
+- Extra layout widgets: `VUI.stack`/`positioned`/`align`/`aspectRatio`/`wrap`/
+  `image` alongside the existing VUI catalog.
+
+`capi/tests/run_flutter_3d_demo.rs` asserts the VUI path emits the canvas draw
+ops, wires `gui_input`, and re-renders each frame.
 
 Both CI workflows export this scene (portrait 720×1280): `android-apk.yml`
 commits the APK, `web-demo-pages.yml` deploys to GitHub Pages.
