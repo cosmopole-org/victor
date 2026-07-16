@@ -30,6 +30,10 @@ struct Mock {
     creates_mesh_instance: usize,
     /// `pressed` callback ids in connection order (VUI buttons).
     pressed_cbs: Vec<i64>,
+    /// RenderingServer `canvas_item_*` draw commands the VUI canvas emitted.
+    canvas_ops: usize,
+    /// `gui_input` connections (VUI gesture surfaces).
+    gui_input_connects: usize,
     /// The most recent Flutter render tree.
     last_tree: Value,
 }
@@ -44,6 +48,9 @@ impl Mock {
             if sig == "pressed" {
                 self.pressed_cbs.push(cb);
             }
+            if sig == "gui_input" {
+                self.gui_input_connects += 1;
+            }
             return Value::Null;
         }
         if let Some(class) = op.get("new").and_then(|v| v.as_str()) {
@@ -52,7 +59,16 @@ impl Mock {
             }
         }
         if let Some(method) = op.get("method").and_then(|v| v.as_str()) {
+            if method.starts_with("canvas_item_") {
+                self.canvas_ops += 1;
+                return Value::Null;
+            }
             match method {
+                // Returns an RID the VUI canvas draws into.
+                "get_canvas_item" => {
+                    self.next_handle -= 1;
+                    return json!({ "rid": self.next_handle });
+                }
                 // These return engine objects the guest then calls methods on,
                 // so hand back a marshaled object ({obj,class}) → a GObj, not a
                 // bare handle (mirrors run_ui_demo's mock).
@@ -176,13 +192,17 @@ fn flutter_3d_demo_falls_back_to_vui() {
     let boot_log = mgr.take_log().join("\n");
     mgr.invoke("__godotEvent", json!(["_ready", Value::Null]));
 
-    let pressed = {
+    let (pressed, canvas_ops_boot) = {
         let m = mock.lock().unwrap();
         assert_eq!(m.newviews, 1, "FL.mount is attempted once");
         assert_eq!(m.renders, 0, "no Flutter render when the engine is absent");
         assert!(m.creates_mesh_instance >= 6, "the 3D ring still builds, saw {}", m.creates_mesh_instance);
         assert!(!m.pressed_cbs.is_empty(), "the VUI fallback should wire button 'pressed' handlers");
-        m.pressed_cbs.clone()
+        // The native VUI canvas (the gauge + the gesture pad) emitted draw ops.
+        assert!(m.canvas_ops > 20, "VUI.canvas should emit many RenderingServer draw ops, saw {}", m.canvas_ops);
+        // The gesture pad wired gui_input.
+        assert!(m.gui_input_connects >= 1, "the VUI gesture pad should connect gui_input, saw {}", m.gui_input_connects);
+        (m.pressed_cbs.clone(), m.canvas_ops)
     };
     assert!(boot_log.contains("VUI fallback"), "should report the fallback path: {boot_log}");
 
@@ -196,6 +216,11 @@ fn flutter_3d_demo_falls_back_to_vui() {
         mgr.invoke("__godotEvent", json!(["_process", 0.016]));
         mgr.pump(16).unwrap();
     }
-    // At least one button (add-shape / shape-picker) should have rebuilt the ring.
-    assert!(mock.lock().unwrap().creates_mesh_instance > before, "a control press should have rebuilt the 3D ring");
+    {
+        let m = mock.lock().unwrap();
+        // At least one button (add-shape / shape-picker) rebuilt the ring.
+        assert!(m.creates_mesh_instance > before, "a control press should have rebuilt the 3D ring");
+        // Per-frame VUI.repaint re-emitted the gauge's canvas ops (animation).
+        assert!(m.canvas_ops > canvas_ops_boot, "per-frame VUI.repaint should re-emit canvas ops, boot={canvas_ops_boot} now={}", m.canvas_ops);
+    }
 }

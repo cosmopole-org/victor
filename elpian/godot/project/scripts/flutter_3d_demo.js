@@ -157,54 +157,61 @@ function orbit(dx, dy) {
 // Flutter UI (primary) — widgets + events + a live canvas speedometer
 // ---------------------------------------------------------------------------
 
-function gauge() {
-  let w = 320.0;
-  let h = 190.0;
-  return FL.customPaint([w, h], function (cv) {
-    let cx = w * 0.5;
-    let cy = h * 0.86;
-    let r = 128.0;
-    let a0 = rad(180.0); // sweep from 180°…
-    let span = rad(180.0); // …through 180° (a half-dial)
-    let frac = clamp(S.speed / 180.0, 0.0, 1.0);
+var GAUGE_W = 320.0;
+var GAUGE_H = 190.0;
 
-    // Track.
-    cv.drawArc([cx - r, cy - r, cx + r, cy + r], a0, span, false,
-      FL.paint({ color: [1, 1, 1, 0.14], style: "stroke", strokeWidth: 16, strokeCap: "round" }));
-    // Filled portion, sweep-gradient.
-    cv.drawArc([cx - r, cy - r, cx + r, cy + r], a0, span * frac, false,
-      FL.paint({
-        style: "stroke", strokeWidth: 16, strokeCap: "round",
-        shader: FL.sweepGradient([cx, cy], [[0.25, 0.75, 1, 1], [0.6, 0.4, 1, 1], [1, 0.4, 0.6, 1]], [0.0, 0.5, 1.0], a0, a0 + span),
-      }));
+// The speedometer painter — written ONCE against the canvas method surface, so
+// it runs unchanged on the real-Flutter path (FLCanvas) and the native VUI path
+// (VuiCanvas). Reads shared state S so it animates as the ring spins.
+function drawGauge(cv) {
+  let w = GAUGE_W;
+  let h = GAUGE_H;
+  let cx = w * 0.5;
+  let cy = h * 0.86;
+  let r = 128.0;
+  let a0 = rad(180.0); // sweep from 180°…
+  let span = rad(180.0); // …through 180° (a half-dial)
+  let frac = clamp(S.speed / 180.0, 0.0, 1.0);
 
-    // Tick marks around the dial.
-    let ticks = FL.paint({ color: [1, 1, 1, 0.35], style: "stroke", strokeWidth: 3, strokeCap: "round" });
-    for (let i = 0; i <= 10; i++) {
-      cv.save();
-      cv.translate(cx, cy);
-      cv.rotate(a0 + span * (i / 10.0));
-      cv.drawLine([r - 6.0, 0.0], [r + 6.0, 0.0], ticks);
-      cv.restore();
-    }
+  // Track.
+  cv.drawArc([cx - r, cy - r, cx + r, cy + r], a0, span, false,
+    FL.paint({ color: [1, 1, 1, 0.14], style: "stroke", strokeWidth: 16, strokeCap: "round" }));
+  // Filled portion (a sweep-gradient on Flutter; the `color` is the VUI fallback).
+  cv.drawArc([cx - r, cy - r, cx + r, cy + r], a0, span * frac, false,
+    FL.paint({
+      color: [0.35, 0.7, 1, 1], style: "stroke", strokeWidth: 16, strokeCap: "round",
+      shader: FL.sweepGradient([cx, cy], [[0.25, 0.75, 1, 1], [0.6, 0.4, 1, 1], [1, 0.4, 0.6, 1]], [0.0, 0.5, 1.0], a0, a0 + span),
+    }));
 
-    // Live needle: points at the fill fraction, and jitters with the actual
-    // spin so you can see the 3D and the gauge share one clock.
-    let needleA = a0 + span * frac;
+  // Tick marks around the dial.
+  let ticks = FL.paint({ color: [1, 1, 1, 0.35], style: "stroke", strokeWidth: 3, strokeCap: "round" });
+  for (let i = 0; i <= 10; i++) {
     cv.save();
     cv.translate(cx, cy);
-    cv.rotate(needleA);
-    cv.drawLine([0.0, 0.0], [r - 14.0, 0.0],
-      FL.paint({ color: [1, 0.85, 0.3, 1], style: "stroke", strokeWidth: 5, strokeCap: "round" }));
+    cv.rotate(a0 + span * (i / 10.0));
+    cv.drawLine([r - 6.0, 0.0], [r + 6.0, 0.0], ticks);
     cv.restore();
-    cv.drawCircle(cx, cy, 9.0, FL.paint({ color: [1, 0.85, 0.3, 1] }));
+  }
 
-    // Readout.
-    cv.drawParagraph(
-      FL.paragraph(iround(S.speed) + "  °/s",
-        w, { size: 22, color: [1, 1, 1, 0.92], bold: true }, "center"),
-      0.0, cy - 44.0);
-  });
+  // Live needle at the fill fraction.
+  let needleA = a0 + span * frac;
+  cv.save();
+  cv.translate(cx, cy);
+  cv.rotate(needleA);
+  cv.drawLine([0.0, 0.0], [r - 14.0, 0.0],
+    FL.paint({ color: [1, 0.85, 0.3, 1], style: "stroke", strokeWidth: 5, strokeCap: "round" }));
+  cv.restore();
+  cv.drawCircle(cx, cy, 9.0, FL.paint({ color: [1, 0.85, 0.3, 1] }));
+
+  // Readout.
+  cv.drawParagraph(
+    FL.paragraph(iround(S.speed) + "  °/s",
+      w, { size: 22, color: [1, 1, 1, 0.92], bold: true }, "center"),
+    0.0, cy - 44.0);
+}
+
+function gauge() {
+  return FL.customPaint([GAUGE_W, GAUGE_H], drawGauge);
 }
 
 function shapeChip(label, idx) {
@@ -276,19 +283,12 @@ function main() {
     print("flutter+3d demo up: REAL Flutter engine driving the UI");
   } else {
     layer.call("queue_free", []);
-    // Fallback: VUI HUD. bg:false makes the page TRANSPARENT so the live 3D
-    // scene shows through — VUI.app otherwise paints an opaque full-screen
-    // background (which is what hides the 3D in ui_demo). The controls sit in
-    // their own opaque panel at the bottom; the top ~60% is left clear for the
-    // 3D ring.
-    VUI.use(VUI.themeDark());
-    let app = VUI.app({ design: [DW, DH], portrait: true, bg: false });
-    app.push(VUI.column({ gap: 0, children: [VUI.spacer(), buildVuiPanel()] }));
-    print("flutter+3d demo up: VUI fallback (no Flutter engine in this build)");
+    buildVuiUI();
+    print("flutter+3d demo up: VUI fallback (Flutter-parity: canvas + gestures + widgets)");
   }
 
-  // Per-frame: spin the ring and, when Flutter is live, repaint the gauge so
-  // the needle tracks the same clock as the 3D.
+  // Per-frame: spin the ring, and repaint whichever UI is live so the gauge
+  // needle tracks the same clock as the 3D.
   GD.onProcess((d) => {
     S.angle = S.angle + d * S.speed;
     if (spinner != null) {
@@ -296,12 +296,52 @@ function main() {
     }
     if (flView != null) {
       flView.update();
+    } else if (vuiGauge != null) {
+      VUI.repaint(vuiGauge);
     }
   });
 }
 
-// The VUI fallback panel, rebuilt so the selected-shape highlight refreshes.
+// ---------------------------------------------------------------------------
+// VUI path — the SAME feature set as the Flutter path, rendered natively via
+// the Victor UI kit: a canvas gauge (VUI.canvas), a gesture pad (VUI.gestures,
+// drag to orbit), and the widget controls. This is what the Android/web build
+// actually shows, so every implemented feature is visible there.
+// ---------------------------------------------------------------------------
+var vuiGauge = null;
+var vuiPad = null;
+var vuiPadCanvas = null;
+var vuiPadHint = null;
+
+function buildVuiUI() {
+  VUI.use(VUI.themeDark());
+  // bg:false → transparent page so the live 3D scene shows through.
+  let app = VUI.app({ design: [DW, DH], portrait: true, bg: false });
+  app.push(VUI.column({ gap: 0, children: [VUI.spacer(), buildVuiPanel()] }));
+}
+
 function buildVuiPanel() {
+  // The canvas gauge, drawn by the SHARED painter via VUI.canvas.
+  vuiGauge = VUI.canvas({ size: [GAUGE_W, GAUGE_H], paint: drawGauge });
+
+  // A gesture pad: drag to orbit the 3D camera, tap to reset. Demonstrates the
+  // native event surface (onPanUpdate / onTap) and repaints itself to visualise
+  // the last gesture.
+  vuiPadHint = "drag to orbit · tap to reset";
+  let padCanvas = VUI.canvas({
+    size: [DW - 72.0, 92.0],
+    paint: (cv) => {
+      cv.drawRRect({ rect: [0, 0, DW - 72.0, 92.0], radius: 14 }, FL.paint({ color: [1, 1, 1, 0.05] }));
+      cv.drawParagraph(FL.paragraph(vuiPadHint, DW - 72.0, { size: 15, color: [0.75, 0.85, 1, 0.9] }, "center"), 0.0, 36.0);
+    },
+  });
+  vuiPadCanvas = padCanvas;
+  vuiPad = VUI.gestures(padCanvas, {
+    onPanUpdate: (e) => { orbit(e.dx == null ? 0.0 : e.dx, e.dy == null ? 0.0 : e.dy); vuiPadHint = "orbit  yaw " + iround(S.camYaw) + "°"; VUI.repaint(vuiPadCanvas); },
+    onTap: () => { S.camYaw = 0.0; S.camPitch = -14.0; applyOrbit(); vuiPadHint = "reset"; VUI.repaint(vuiPadCanvas); },
+    onLongPress: () => { cycleColor(); vuiPadHint = "colour!"; VUI.repaint(vuiPadCanvas); },
+  });
+
   let shapeButtons = [];
   for (let i = 0; i < SHAPES.length; i++) {
     let idx = i;
@@ -310,11 +350,14 @@ function buildVuiPanel() {
       onTap: () => { pickShape(idx); },
     })));
   }
+
   return VUI.panel({
     pad: 18, radius: 22,
     child: VUI.column({ gap: 12, children: [
       VUI.title("Victor — VUI × Godot 3D"),
-      VUI.caption("UI: VUI fallback (build without ELPIAN_WITH_FLUTTER)"),
+      VUI.caption("Native canvas + gestures + widgets (no Flutter engine in this build)"),
+      VUI.center({ child: vuiGauge }),
+      vuiPad,
       VUI.row({ gap: 10, children: [
         VUI.text("Spin"),
         VUI.expand(VUI.slider({ value: S.speed, min: 0.0, max: 180.0, onChanged: (v) => { setSpeed(v); } })),

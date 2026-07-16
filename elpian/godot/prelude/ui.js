@@ -2473,3 +2473,429 @@ VUI.toast = (msg, o) => {
   });
   return p;
 };
+
+// ===========================================================================
+// VUI canvas — a Flutter-CustomPainter-equivalent drawing surface, NATIVE.
+// ===========================================================================
+//
+// Renders via `RenderingServer.canvas_item_add_*` on a Control's canvas-item
+// RID. Those commands are RETAINED and can be issued at ANY time (unlike
+// `CanvasItem.draw_*`, which only work inside the draw phase, and the bridged
+// `draw` signal, which is delivered deferred) — so the guest can (re)paint
+// whenever it likes. The `VuiCanvas` object MIRRORS the `FLCanvas` method
+// surface (drawArc/drawCircle/drawLine/drawRect/drawRRect/drawOval/drawPath/
+// save/translate/rotate/scale/restore/drawParagraph/…), so a single painter
+// function works unchanged on both the real-Flutter path and this native path.
+// Geometry matches FL: Offset = [x,y]; Rect = [l,t,r,b]; Color = [r,g,b,a].
+
+var __vuiCanvasPaint = {}; // node.id -> repaint closure (for animation)
+var __vuiRS = null;
+function __vuiRenderingServer() {
+  if (__vuiRS == null) {
+    __vuiRS = GD.singleton("RenderingServer");
+  }
+  return __vuiRS;
+}
+
+function __vuiV2(a) {
+  return new Vector2(a[0], a[1]);
+}
+function __vuiPaintColor(paint, def) {
+  if (paint == null) {
+    return def;
+  }
+  let c = paint.color;
+  if (c == null) {
+    return def;
+  }
+  if (__isType(c, "list")) {
+    return new Color(c[0], c[1], c[2], c.length > 3 ? c[3] : 1.0);
+  }
+  return def;
+}
+function __vuiPaintStroke(paint) {
+  return paint != null && paint.style == "stroke";
+}
+function __vuiPaintWidth(paint) {
+  return paint != null && paint.strokeWidth != null ? paint.strokeWidth : 1.0;
+}
+
+// 2D transform helpers (Transform2D = [xx, xy, yx, yy, ox, oy]).
+function __vuiTId() { return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]; }
+function __vuiTMul(a, b) {
+  return [
+    a[0] * b[0] + a[2] * b[1],
+    a[1] * b[0] + a[3] * b[1],
+    a[0] * b[2] + a[2] * b[3],
+    a[1] * b[2] + a[3] * b[3],
+    a[0] * b[4] + a[2] * b[5] + a[4],
+    a[1] * b[4] + a[3] * b[5] + a[5],
+  ];
+}
+
+// Sample an arc/ellipse into a flat [x,y,x,y,…] point list.
+function __vuiArcPts(cx, cy, rx, ry, start, sweep, includeCenter) {
+  let steps = sweep < 0 ? -sweep : sweep;
+  let n = steps / 0.18;
+  n = n < 8 ? 8 : (n > 128 ? 128 : (n - n % 1.0));
+  let pts = [];
+  if (includeCenter) {
+    pts.push(cx);
+    pts.push(cy);
+  }
+  for (let i = 0; i <= n; i++) {
+    let a = start + sweep * (i / n);
+    pts.push(cx + cos(a) * rx);
+    pts.push(cy + sin(a) * ry);
+  }
+  return pts;
+}
+
+class VuiCanvas {
+  constructor(node) {
+    this.node = node;
+    this.item = node.call("get_canvas_item");
+    this.rs = __vuiRenderingServer();
+    this._stack = [];
+    this._x = __vuiTId();
+  }
+
+  clear() {
+    this.rs.call("canvas_item_clear", [this.item]);
+    this._stack = [];
+    this._x = __vuiTId();
+  }
+
+  // ---- transform stack ----
+  _apply() {
+    this.rs.call("canvas_item_add_set_transform", [this.item, new Transform2D(this._x)]);
+  }
+  save() { this._stack.push(this._x); }
+  saveLayer(rect, paint) { this._stack.push(this._x); }
+  restore() {
+    if (this._stack.length > 0) {
+      this._x = this._stack.pop();
+    }
+    this._apply();
+  }
+  translate(dx, dy) { this._x = __vuiTMul(this._x, [1.0, 0.0, 0.0, 1.0, dx, dy]); this._apply(); }
+  rotate(a) { let c = cos(a); let s = sin(a); this._x = __vuiTMul(this._x, [c, s, -s, c, 0.0, 0.0]); this._apply(); }
+  scale(sx, sy) { this._x = __vuiTMul(this._x, [sx, 0.0, 0.0, sy == null ? sx : sy, 0.0, 0.0]); this._apply(); }
+  transform(m16) { /* 4x4 not supported in 2D canvas; ignore z/w */ }
+  clipRect(rect, opts) { /* per-command clipping is unavailable in RS immediate mode */ }
+  clipRRect(rrect, aa) {}
+  clipPath(path, aa) {}
+
+  // ---- polyline / polygon helpers ----
+  _stroke(flatPts, color, width, closed) {
+    let pts = flatPts;
+    if (closed && pts.length >= 4) {
+      pts = pts.slice(0);
+      pts.push(pts[0]);
+      pts.push(pts[1]);
+    }
+    this.rs.call("canvas_item_add_polyline", [
+      this.item, Packed.vector2s(pts), Packed.colors([color.r, color.g, color.b, color.a]),
+      width, true,
+    ]);
+  }
+  _fill(flatPts, color) {
+    this.rs.call("canvas_item_add_polygon", [
+      this.item, Packed.vector2s(flatPts), Packed.colors([color.r, color.g, color.b, color.a]),
+    ]);
+  }
+
+  // ---- draws ----
+  drawColor(color, blend) {
+    let sz = this.node.get("size");
+    let col = __isType(color, "list") ? new Color(color[0], color[1], color[2], color.length > 3 ? color[3] : 1.0) : color;
+    this.rs.call("canvas_item_add_rect", [this.item, new Rect2(0.0, 0.0, sz.x, sz.y), col]);
+  }
+  drawPaint(paint) {
+    let sz = this.node.get("size");
+    this.rs.call("canvas_item_add_rect", [this.item, new Rect2(0.0, 0.0, sz.x, sz.y), __vuiPaintColor(paint, new Color(0, 0, 0, 1))]);
+  }
+  drawLine(p1, p2, paint) {
+    this.rs.call("canvas_item_add_line", [this.item, __vuiV2(p1), __vuiV2(p2), __vuiPaintColor(paint, new Color(1, 1, 1, 1)), __vuiPaintWidth(paint), true]);
+  }
+  drawRect(rect, paint) {
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    let l = rect[0]; let t = rect[1]; let r = rect[2]; let b = rect[3];
+    if (__vuiPaintStroke(paint)) {
+      this._stroke([l, t, r, t, r, b, l, b], col, __vuiPaintWidth(paint), true);
+    } else {
+      this.rs.call("canvas_item_add_rect", [this.item, new Rect2(l, t, r - l, b - t), col]);
+    }
+  }
+  drawRRect(rrect, paint) {
+    let rect = rrect.rect;
+    let rad = rrect.radius == null ? 0.0 : rrect.radius;
+    let l = rect[0]; let t = rect[1]; let r = rect[2]; let b = rect[3];
+    let pts = [];
+    let push = (cx, cy, a0, a1) => {
+      let arc = __vuiArcPts(cx, cy, rad, rad, a0, a1 - a0, false);
+      for (let i = 0; i < arc.length; i++) { pts.push(arc[i]); }
+    };
+    let HALF = 3.14159265358979 * 0.5;
+    push(r - rad, t + rad, -HALF, 0.0);
+    push(r - rad, b - rad, 0.0, HALF);
+    push(l + rad, b - rad, HALF, 3.14159265358979);
+    push(l + rad, t + rad, 3.14159265358979, 3.14159265358979 + HALF);
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    if (__vuiPaintStroke(paint)) { this._stroke(pts, col, __vuiPaintWidth(paint), true); } else { this._fill(pts, col); }
+  }
+  drawOval(rect, paint) {
+    let cx = (rect[0] + rect[2]) * 0.5; let cy = (rect[1] + rect[3]) * 0.5;
+    let rx = (rect[2] - rect[0]) * 0.5; let ry = (rect[3] - rect[1]) * 0.5;
+    let pts = __vuiArcPts(cx, cy, rx, ry, 0.0, 6.28318530718, false);
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    if (__vuiPaintStroke(paint)) { this._stroke(pts, col, __vuiPaintWidth(paint), false); } else { this._fill(pts, col); }
+  }
+  drawCircle(cx, cy, radius, paint) {
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    if (__vuiPaintStroke(paint)) {
+      this._stroke(__vuiArcPts(cx, cy, radius, radius, 0.0, 6.28318530718, false), col, __vuiPaintWidth(paint), false);
+    } else {
+      this.rs.call("canvas_item_add_circle", [this.item, new Vector2(cx, cy), radius, col]);
+    }
+  }
+  drawArc(rect, start, sweep, useCenter, paint) {
+    let cx = (rect[0] + rect[2]) * 0.5; let cy = (rect[1] + rect[3]) * 0.5;
+    let rx = (rect[2] - rect[0]) * 0.5; let ry = (rect[3] - rect[1]) * 0.5;
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    if (__vuiPaintStroke(paint)) {
+      this._stroke(__vuiArcPts(cx, cy, rx, ry, start, sweep, false), col, __vuiPaintWidth(paint), false);
+    } else {
+      this._fill(__vuiArcPts(cx, cy, rx, ry, start, sweep, useCenter == true), col);
+    }
+  }
+  drawPath(path, paint) {
+    let verbs = (path != null && path.verbs != null) ? path.verbs : [];
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    let stroke = __vuiPaintStroke(paint);
+    let w = __vuiPaintWidth(paint);
+    let sub = [];
+    let cx = 0.0; let cy = 0.0;
+    let flush = (closed) => {
+      if (sub.length >= 4) { if (stroke) { this._stroke(sub, col, w, closed); } else { this._fill(sub, col); } }
+      sub = [];
+    };
+    for (let i = 0; i < verbs.length; i++) {
+      let v = verbs[i];
+      let k = v[0];
+      if (k == "moveTo") { flush(false); cx = v[1]; cy = v[2]; sub.push(cx); sub.push(cy); }
+      else if (k == "lineTo") { cx = v[1]; cy = v[2]; sub.push(cx); sub.push(cy); }
+      else if (k == "quadTo") {
+        let x1 = v[1]; let y1 = v[2]; let x2 = v[3]; let y2 = v[4];
+        for (let s = 1; s <= 12; s++) { let tt = s / 12.0; let u = 1.0 - tt;
+          sub.push(u * u * cx + 2 * u * tt * x1 + tt * tt * x2);
+          sub.push(u * u * cy + 2 * u * tt * y1 + tt * tt * y2); }
+        cx = x2; cy = y2;
+      }
+      else if (k == "cubicTo") {
+        let x1 = v[1]; let y1 = v[2]; let x2 = v[3]; let y2 = v[4]; let x3 = v[5]; let y3 = v[6];
+        for (let s = 1; s <= 16; s++) { let tt = s / 16.0; let u = 1.0 - tt;
+          sub.push(u*u*u*cx + 3*u*u*tt*x1 + 3*u*tt*tt*x2 + tt*tt*tt*x3);
+          sub.push(u*u*u*cy + 3*u*u*tt*y1 + 3*u*tt*tt*y2 + tt*tt*tt*y3); }
+        cx = x3; cy = y3;
+      }
+      else if (k == "addRect") { let r = v[1]; this.drawRect(r, paint); }
+      else if (k == "addOval") { this.drawOval(v[1], paint); }
+      else if (k == "close") { flush(true); }
+    }
+    flush(false);
+  }
+  drawParagraph(para, dx, dy) {
+    let m = para == null ? {} : para;
+    let style = m.style == null ? {} : m.style;
+    let size = style.size == null ? 16.0 : style.size;
+    let col = style.color != null && __isType(style.color, "list")
+      ? new Color(style.color[0], style.color[1], style.color[2], style.color.length > 3 ? style.color[3] : 1.0)
+      : new Color(1, 1, 1, 1);
+    let font = this.node.call("get_theme_default_font");
+    if (font != null && !GD.isError(font)) {
+      // pos.y is the baseline; nudge down by the font size for top-anchored text.
+      font.call("draw_string", [this.item, new Vector2(dx, dy + size), "" + (m.text == null ? "" : m.text), GInt(1), GFloat(m.maxWidth == null ? -1.0 : m.maxWidth), GInt(size), col]);
+    }
+  }
+  drawPoints(mode, points, paint) {
+    let col = __vuiPaintColor(paint, new Color(1, 1, 1, 1));
+    let w = __vuiPaintWidth(paint);
+    for (let i = 0; i < points.length; i++) {
+      this.rs.call("canvas_item_add_circle", [this.item, __vuiV2(points[i]), w * 0.6, col]);
+    }
+  }
+  drawShadow(path, color, elevation, occ) { /* soft shadow omitted in the native path */ }
+}
+
+// VUI.canvas({ size:[w,h], paint: (cv)=>{…}, expand }) -> a Control that paints
+// `paint` via VuiCanvas. Repaint (for animation) with VUI.repaint(node).
+VUI.canvas = (o) => {
+  o = o ?? {};
+  let node = GD.create("Control");
+  let w = o.size != null ? o.size[0] : 100.0;
+  let h = o.size != null ? o.size[1] : 100.0;
+  __vuiMinSize(node, w, h);
+  node.set("mouse_filter", GInt(o.interactive == true ? 0 : 2));
+  if (o.expand == true) { __vuiExpandH(node); }
+  let cv = new VuiCanvas(node);
+  let painter = o.paint;
+  __vuiCanvasPaint["c" + node.id] = () => {
+    cv.clear();
+    if (painter != null) { painter(cv); }
+  };
+  __vuiCanvasPaint["c" + node.id]();
+  return node;
+};
+
+// Re-run a VUI.canvas node's painter (call from a per-frame handler to animate).
+VUI.repaint = (node) => {
+  if (node == null) { return; }
+  let f = __vuiCanvasPaint["c" + node.id];
+  if (f != null) { f(); }
+};
+
+// ===========================================================================
+// VUI gestures — the Flutter event surface on a Godot Control.
+// ===========================================================================
+//
+// Wraps `child` in a Control that STOPs for input and translates Godot's
+// `gui_input` / `mouse_entered` / `mouse_exited` into the Flutter callback
+// vocabulary, each firing with a details object:
+//   onTapDown/onTapUp/onTap · onSecondaryTap · onDoubleTap · onLongPress
+//   onPanStart/onPanUpdate({dx,dy,x,y})/onPanEnd · onEnter/onExit/onHover({x,y})
+//   onScroll({dy}) (mouse wheel). Works with mouse AND touch.
+VUI.gestures = (child, handlers) => {
+  handlers = handlers ?? {};
+  let box = GD.create("Control");
+  box.set("mouse_filter", GInt(0)); // STOP: receive input
+  if (child != null) {
+    __vuiFullRect(child);
+    box.call("add_child", [child]);
+  }
+  let st = { down: false, sx: 0.0, sy: 0.0, moved: false, taps: 0, longTimer: null };
+  let fire = (name, detail) => { let h = handlers[name]; if (h != null) { h(detail == null ? {} : detail); } };
+
+  box.connect("gui_input", (ev) => {
+    let mb = ev.call("is_class", ["InputEventMouseButton"]);
+    let mm = ev.call("is_class", ["InputEventMouseMotion"]);
+    let st_touch = ev.call("is_class", ["InputEventScreenTouch"]);
+    let sd = ev.call("is_class", ["InputEventScreenDrag"]);
+    if (mb == true || st_touch == true) {
+      let pressed = ev.get("pressed");
+      let pos = ev.get("position");
+      let btn = mb == true ? ev.get("button_index") : 1;
+      if (mb == true && (btn == 4 || btn == 5)) {
+        // wheel up/down
+        if (pressed == true) { fire("onScroll", { dy: btn == 5 ? 1.0 : -1.0 }); }
+        return;
+      }
+      if (pressed == true) {
+        st.down = true; st.moved = false; st.sx = pos.x; st.sy = pos.y;
+        fire("onTapDown", { x: pos.x, y: pos.y });
+        fire("onPanStart", { x: pos.x, y: pos.y });
+        if (handlers.onLongPress != null) {
+          st.longTimer = GTimer.after(500, () => { if (st.down && !st.moved) { fire("onLongPress", { x: pos.x, y: pos.y }); } });
+        }
+      } else {
+        st.down = false;
+        fire("onTapUp", { x: pos.x, y: pos.y });
+        fire("onPanEnd", { x: pos.x, y: pos.y });
+        if (!st.moved) {
+          if (mb == true && btn == 2) { fire("onSecondaryTap", { x: pos.x, y: pos.y }); }
+          else {
+            fire("onTap", { x: pos.x, y: pos.y });
+            st.taps = st.taps + 1;
+            let mine = st.taps;
+            GTimer.after(260, () => { if (st.taps == mine) { st.taps = 0; } });
+            if (st.taps >= 2) { st.taps = 0; fire("onDoubleTap", { x: pos.x, y: pos.y }); }
+          }
+        }
+      }
+    } else if (mm == true || sd == true) {
+      let rel = ev.get("relative");
+      let pos = ev.get("position");
+      if (st.down) {
+        if (rel.x > 1.5 || rel.x < -1.5 || rel.y > 1.5 || rel.y < -1.5) { st.moved = true; }
+        fire("onPanUpdate", { dx: rel.x, dy: rel.y, x: pos.x, y: pos.y });
+      } else {
+        fire("onHover", { x: pos.x, y: pos.y });
+      }
+    }
+  });
+  box.connect("mouse_entered", () => fire("onEnter", {}));
+  box.connect("mouse_exited", () => fire("onExit", {}));
+  return box;
+};
+
+// ===========================================================================
+// A few more Flutter-parity layout widgets (thin over Godot containers).
+// ===========================================================================
+
+// Absolute-positioning stack (Flutter Stack). Children can be VUI.positioned.
+VUI.stack = (o) => {
+  o = o ?? {};
+  let c = GD.create("Control");
+  c.set("mouse_filter", GInt(2));
+  let kids = o.children ?? [];
+  for (let i = 0; i < kids.length; i++) { c.call("add_child", [__vuiNodeOf(kids[i])]); }
+  return c;
+};
+// Position a child within a VUI.stack via anchors/offsets (Flutter Positioned).
+VUI.positioned = (o) => {
+  o = o ?? {};
+  let n = __vuiNodeOf(o.child);
+  // left/top/right/bottom in px from the corresponding edges.
+  if (o.left != null) { n.set("anchor_left", GFloat(0.0)); n.set("offset_left", GFloat(__vuiPx(o.left))); }
+  if (o.top != null) { n.set("anchor_top", GFloat(0.0)); n.set("offset_top", GFloat(__vuiPx(o.top))); }
+  if (o.right != null) { n.set("anchor_right", GFloat(1.0)); n.set("offset_right", GFloat(-__vuiPx(o.right))); }
+  if (o.bottom != null) { n.set("anchor_bottom", GFloat(1.0)); n.set("offset_bottom", GFloat(-__vuiPx(o.bottom))); }
+  if (o.width != null) { n.set("offset_right", GFloat((o.left != null ? __vuiPx(o.left) : 0.0) + __vuiPx(o.width))); }
+  if (o.height != null) { n.set("offset_bottom", GFloat((o.top != null ? __vuiPx(o.top) : 0.0) + __vuiPx(o.height))); }
+  return n;
+};
+VUI.align = (o) => {
+  o = o ?? {};
+  let c = GD.create("Control");
+  c.set("mouse_filter", GInt(2));
+  __vuiFullRect(c);
+  let child = __vuiNodeOf(o.child);
+  c.call("add_child", [child]);
+  // alignment [-1..1] mapped to Godot anchors; default center.
+  let ax = o.alignment != null ? (o.alignment[0] + 1.0) * 0.5 : 0.5;
+  let ay = o.alignment != null ? (o.alignment[1] + 1.0) * 0.5 : 0.5;
+  child.set("anchor_left", GFloat(ax)); child.set("anchor_top", GFloat(ay));
+  child.set("anchor_right", GFloat(ax)); child.set("anchor_bottom", GFloat(ay));
+  return c;
+};
+VUI.aspectRatio = (o) => {
+  o = o ?? {};
+  let c = GD.create("AspectRatioContainer");
+  c.set("ratio", GFloat(__vuiNum(o.ratio, 1.0)));
+  if (o.child != null) { c.call("add_child", [__vuiNodeOf(o.child)]); }
+  return c;
+};
+VUI.wrap = (o) => {
+  o = o ?? {};
+  let c = GD.create("FlowContainer");
+  c.set("theme_override_constants/h_separation", GInt(__vuiPx(__vuiNum(o.spacing, 8))));
+  c.set("theme_override_constants/v_separation", GInt(__vuiPx(__vuiNum(o.runSpacing, 8))));
+  let kids = o.children ?? [];
+  for (let i = 0; i < kids.length; i++) { c.call("add_child", [__vuiNodeOf(kids[i])]); }
+  return c;
+};
+VUI.image = (o) => {
+  o = o ?? {};
+  let tr = GD.create("TextureRect");
+  if (o.texture != null) { tr.set("texture", o.texture); }
+  tr.set("expand_mode", GInt(1)); // IGNORE_SIZE
+  tr.set("stretch_mode", GInt(o.cover == true ? 6 : 5)); // KEEP_ASPECT_COVERED / KEEP_ASPECT_CENTERED
+  __vuiMinSize(tr, __vuiNum(o.width, 0.0), __vuiNum(o.height, 0.0));
+  return tr;
+};
+
+// Resolve a value that is already a node (GObj) or a VUI descriptor to a node.
+function __vuiNodeOf(x) {
+  if (x == null) { return GD.create("Control"); }
+  return __vuiNode(x);
+}
