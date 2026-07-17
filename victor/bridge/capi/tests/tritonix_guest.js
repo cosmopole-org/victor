@@ -322,6 +322,48 @@ function VictorApp(props) {
   });
 }
 
+// ---- lib/skin.jsx ----
+// lib/skin.jsx — install the Casual UI pack as the app-wide widget skin.
+//
+// VUI.useTextures (added to the Victor ui.js prelude) makes every button, input
+// and panel render with the pack's nine-patch PNGs instead of the flat Material
+// look. Each path is loaded with GD.load and silently ignored if the asset is
+// missing, so the UI still works when the pack has not been staged.
+//
+// Assets are staged at res://assets/ui/ by godot/setup-project.sh during the
+// web export (the Casual UI / Kenney UI pack, mapped to these standard names).
+
+function installSkin() {
+  if (typeof VUI === "undefined" || VUI == null) return;
+  if (VUI.useTextures == null) return; // older engine without the skin hook
+  VUI.useTextures({
+    button: {
+      normal: "res://assets/ui/button_normal.png",
+      hover: "res://assets/ui/button_hover.png",
+      pressed: "res://assets/ui/button_pressed.png",
+      margin: 12,
+      padY: 12
+    },
+    panel: {
+      texture: "res://assets/ui/panel.png",
+      margin: 22
+    },
+    card: {
+      texture: "res://assets/ui/card.png",
+      margin: 18
+    },
+    field: {
+      normal: "res://assets/ui/field.png",
+      focus: "res://assets/ui/field_focus.png",
+      margin: 10
+    }
+  });
+}
+
+// Install at module-evaluation time — before the generated mountApp() call at
+// the end of the bundle — so the very first frame is already skinned.
+installSkin();
+
 // ---- lib/store.jsx ----
 // lib/store.jsx — a tiny global store with subscribe/notify, plus a React hook
 // that re-renders subscribers when the store changes. Written in the Victor
@@ -799,6 +841,9 @@ var NAV = [{
   href: "/world",
   label: "🗺️ World"
 }, {
+  href: "/mines",
+  label: "⛏️ Mines"
+}, {
   href: "/research",
   label: "🔬 Research"
 }, {
@@ -991,12 +1036,41 @@ function CityMarker(props) {
     })]
   });
 }
+function mineColor(res) {
+  if (res == "gold") return new Color(1.0, 0.82, 0.25, 1.0);
+  if (res == "iron") return new Color(0.62, 0.66, 0.72, 1.0);
+  if (res == "lumber") return new Color(0.55, 0.36, 0.2, 1.0);
+  if (res == "marble") return new Color(0.92, 0.9, 0.82, 1.0);
+  if (res == "glass") return new Color(0.4, 0.8, 0.86, 1.0);
+  if (res == "sulfur") return new Color(0.9, 0.82, 0.25, 1.0);
+  if (res == "wine") return new Color(0.7, 0.2, 0.4, 1.0);
+  return new Color(0.8, 0.8, 0.8, 1.0);
+}
+function MineMarker(props) {
+  var col = mineColor(props.mine.resource);
+  return /*#__PURE__*/_jsxs("node3d", {
+    position: props.pos,
+    children: [/*#__PURE__*/_jsx("cylinder", {
+      radius: 0.28,
+      height: 0.5,
+      position: [0.0, 0.4, 0.0],
+      color: col,
+      metallic: 0.4,
+      roughness: 0.5
+    }), /*#__PURE__*/_jsx("box", {
+      size: [0.5, 0.12, 0.5],
+      position: [0.0, 0.1, 0.0],
+      color: new Color(0.25, 0.22, 0.2, 1.0)
+    })]
+  });
+}
 function WorldScene(props) {
   var center = props.center || {
     x: 0,
     y: 0
   };
   var cities = props.cities || [];
+  var minesData = props.mines || [];
   var tiles = [];
   for (var dx = -HALF; dx <= HALF; dx++) {
     for (var dy = -HALF; dy <= HALF; dy++) {
@@ -1025,6 +1099,18 @@ function WorldScene(props) {
       pos: [mdx * STEP, bb.h, mdy * STEP]
     }, "c-" + c.id));
   }
+  var mineMarkers = [];
+  for (var k = 0; k < minesData.length; k++) {
+    var mn = minesData[k];
+    var mdx2 = mn.x - center.x;
+    var mdy2 = mn.y - center.y;
+    if (Math.abs(mdx2) > HALF || Math.abs(mdy2) > HALF) continue;
+    var mb = biome(mn.x, mn.y);
+    mineMarkers.push(/*#__PURE__*/_jsx(MineMarker, {
+      mine: mn,
+      pos: [mdx2 * STEP, mb.h, mdy2 * STEP]
+    }, "m-" + mn.id));
+  }
   return /*#__PURE__*/_jsxs("scene3d", {
     height: props.height || 420,
     children: [/*#__PURE__*/_jsx("environment", {
@@ -1039,7 +1125,7 @@ function WorldScene(props) {
       position: [0.0, 22.0, 20.0],
       rotation: [-48, 0, 0],
       fov: 55
-    }), tiles, markers]
+    }), tiles, mineMarkers, markers]
   });
 }
 
@@ -1383,6 +1469,137 @@ function __page__military() {
   });
 }
 
+// ---- app/mines/page.jsx ----
+// app/mines/page.jsx — assign city population to work the resource mines
+// scattered across the world map. Mines are the primary resource source.
+
+function MineRow(props) {
+  var m = props.mine;
+  var val = useState("");
+  function assign(n) {
+    Api.post("/mines/" + m.id + "/assign", {
+      workers: n
+    }, function (st) {
+      if (st != null && st.city != null) {
+        flash("Assigned " + n + " workers to " + m.name, "success");
+        Api.refreshState();
+        props.reload();
+      }
+    });
+  }
+  function apply() {
+    var n = parseInt(val[0], 10);
+    if (isNaN(n) || n < 0) n = 0;
+    assign(n);
+  }
+  return /*#__PURE__*/_jsxs("card", {
+    gap: 6,
+    children: [/*#__PURE__*/_jsxs("row", {
+      gap: 8,
+      children: [/*#__PURE__*/_jsx("title", {
+        color: "text",
+        children: resIcon(m.resource) + " " + m.name
+      }), /*#__PURE__*/_jsx("spacer", {}), /*#__PURE__*/_jsx("badge", {
+        children: "L " + m.distance
+      })]
+    }), /*#__PURE__*/_jsxs("row", {
+      gap: 12,
+      wrap: true,
+      children: [/*#__PURE__*/_jsx("caption", {
+        color: "muted",
+        children: "Yield " + m.richness + "/worker/min"
+      }), /*#__PURE__*/_jsx("caption", {
+        color: "muted",
+        children: "Workers " + m.totalWorkers + "/" + m.capacity
+      }), /*#__PURE__*/_jsx("caption", {
+        color: "primary",
+        children: "You: " + m.myWorkers
+      })]
+    }), /*#__PURE__*/_jsxs("row", {
+      gap: 8,
+      children: [/*#__PURE__*/_jsx("input", {
+        hint: "free " + fmt(m.freeCapacity),
+        value: val[0],
+        onChange: val[1]
+      }), /*#__PURE__*/_jsx("button", {
+        kind: "filled",
+        onPress: apply,
+        children: "Assign"
+      }), m.myWorkers > 0 ? /*#__PURE__*/_jsx("button", {
+        kind: "outline",
+        onPress: function () {
+          assign(0);
+        },
+        children: "Recall"
+      }) : null]
+    })]
+  });
+}
+function __page__mines() {
+  var g = useGame();
+  var mines = useState([]);
+  function reload() {
+    Api.get("/mines?r=18", function (list) {
+      mines[1](list);
+    });
+  }
+  useEffect(function () {
+    reload();
+  }, []);
+  var rows = [];
+  for (var i = 0; i < mines[0].length; i++) rows.push(/*#__PURE__*/_jsx(MineRow, {
+    mine: mines[0][i],
+    reload: reload
+  }, mines[0][i].id));
+  var worked = g.state.mines || [];
+  var workedRows = [];
+  for (var j = 0; j < worked.length; j++) {
+    var w = worked[j];
+    workedRows.push(/*#__PURE__*/_jsxs("row", {
+      gap: 8,
+      children: [/*#__PURE__*/_jsx("text", {
+        grow: true,
+        color: "text",
+        children: resIcon(w.resource) + " " + w.name
+      }), /*#__PURE__*/_jsx("caption", {
+        color: "muted",
+        children: w.workers + " workers"
+      }), /*#__PURE__*/_jsx("text", {
+        color: "primary",
+        children: signed(w.output) + "/m"
+      })]
+    }, w.mineId));
+  }
+  return /*#__PURE__*/_jsxs("column", {
+    gap: 16,
+    children: [/*#__PURE__*/_jsx(Section, {
+      children: "Mines"
+    }), /*#__PURE__*/_jsxs("card", {
+      gap: 6,
+      children: [/*#__PURE__*/_jsxs("row", {
+        gap: 12,
+        wrap: true,
+        children: [/*#__PURE__*/_jsx("text", {
+          color: "text",
+          children: "👷 Available population: " + fmt(g.state.city.availablePopulation)
+        }), /*#__PURE__*/_jsx("text", {
+          color: "muted",
+          children: "of " + fmt(g.state.city.population) + " (" + fmt(g.state.city.assignedWorkers) + " mining)"
+        })]
+      }), workedRows.length ? workedRows : /*#__PURE__*/_jsx("caption", {
+        color: "muted",
+        children: "Assign workers below to start mining."
+      })]
+    }), /*#__PURE__*/_jsx("caption", {
+      color: "muted",
+      children: "Nearby deposits (closest first). Building workshops and research boost their output."
+    }), rows.length ? rows : /*#__PURE__*/_jsx("caption", {
+      color: "muted",
+      children: "Scanning the wilds\u2026"
+    })]
+  });
+}
+
 // ---- app/page.jsx ----
 // app/page.jsx — the City screen. The 3D city, the construction queue, the
 // building roster and the build/upgrade/downgrade/destruct controls.
@@ -1668,6 +1885,11 @@ function __page__index() {
         label: "Population",
         value: fmt(g.state.city.population),
         sub: "/ " + fmt(econ.populationCap)
+      }), /*#__PURE__*/_jsx(StatTile, {
+        k: "populationCap",
+        label: "Workers free",
+        value: fmt(g.state.city.availablePopulation),
+        sub: fmt(g.state.city.assignedWorkers) + " mining"
       }), /*#__PURE__*/_jsx(StatTile, {
         k: "research",
         label: "Research pts",
@@ -2268,6 +2490,7 @@ function CityMenu(props) {
 function __page__world() {
   var g = useGame();
   var cities = useState([]);
+  var mines = useState([]);
   var selected = useState(null);
   var center = {
     x: g.state.city.x,
@@ -2276,6 +2499,9 @@ function __page__world() {
   useEffect(function () {
     Api.get("/world?cx=" + center.x + "&cy=" + center.y + "&r=40", function (list) {
       cities[1](list);
+    });
+    Api.get("/mines?cx=" + center.x + "&cy=" + center.y + "&r=16", function (list) {
+      mines[1](list);
     });
   }, []);
   var rows = [];
@@ -2299,6 +2525,7 @@ function __page__world() {
     }), /*#__PURE__*/_jsx(WorldScene, {
       center: center,
       cities: cities[0],
+      mines: mines[0],
       myCityId: g.state.city.id,
       selectedId: selected[0] != null ? selected[0].id : null,
       height: 400
@@ -2340,6 +2567,7 @@ function CityRow(props) {
 var __VICTOR_ROUTES = [
   { path: "/market", component: __page__market },
   { path: "/military", component: __page__military },
+  { path: "/mines", component: __page__mines },
   { path: "/", component: __page__index },
   { path: "/profile", component: __page__profile },
   { path: "/research", component: __page__research },

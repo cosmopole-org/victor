@@ -496,11 +496,76 @@ function __vuiElevation(level) {
   return { size: 24, alpha: 0.3, y: 8.0 };
 }
 
+// ---- optional texture skin (e.g. the Casual UI / Kenney UI packs) ----------
+// A guest installs a skin with VUI.useTextures({...}); thereafter buttons,
+// fields and skinned panels render with the pack's nine-patch textures. Every
+// path is looked up with GD.load and silently ignored if missing, so the kit
+// degrades to its flat Material look when the assets are absent.
+var __vuiSkin = null;
+
+// skin = {
+//   button: { normal, hover, pressed, margin, padX, padY },
+//   panel:  { texture, margin }, card: { texture, margin },
+//   field:  { normal, focus, margin },
+// }  — each *value is a res:// path to a nine-patch PNG.
+VUI.useTextures = (skin) => {
+  __vuiSkin = skin;
+};
+VUI.skin = () => {
+  return __vuiSkin;
+};
+
+// Build a StyleBoxTexture from a texture path (returns null if it can't load).
+function __vuiSkinBox(path, o) {
+  o = o ?? {};
+  if (path == null) {
+    return null;
+  }
+  let tex = GD.load(path);
+  if (tex == null || GD.isError(tex)) {
+    return null;
+  }
+  let sb = GD.create("StyleBoxTexture");
+  sb.set("texture", tex);
+  let m = __vuiNum(o.margin, 12);
+  sb.set("texture_margin_left", GFloat(__vuiNum(o.marginL, m)));
+  sb.set("texture_margin_top", GFloat(__vuiNum(o.marginT, m)));
+  sb.set("texture_margin_right", GFloat(__vuiNum(o.marginR, m)));
+  sb.set("texture_margin_bottom", GFloat(__vuiNum(o.marginB, m)));
+  let padX = __vuiNum(o.padX, -1);
+  let padY = __vuiNum(o.padY, -1);
+  if (padX >= 0) {
+    sb.set("content_margin_left", GFloat(padX));
+    sb.set("content_margin_right", GFloat(padX));
+  }
+  if (padY >= 0) {
+    sb.set("content_margin_top", GFloat(padY));
+    sb.set("content_margin_bottom", GFloat(padY));
+  }
+  if (o.modulate != null) {
+    sb.set("modulate_color", o.modulate);
+  }
+  return sb;
+}
+
 // A StyleBoxFlat from options: { bg, radius, radiusTL/TR/BL/BR, border,
 // borderColor, borderB (bottom-only width), pad, padX, padY, padL/T/R/B,
 // shadow (elevation level 1..5 — or raw px when > 5), shadowColor, shadowY }.
 VUI.styleBox = (o) => {
   o = o ?? {};
+  // Skinned panels/cards: use the pack nine-patch, tinted by the bg colour.
+  if (o.skin != null && __vuiSkin != null && __vuiSkin[o.skin] != null) {
+    let sk = __vuiSkin[o.skin];
+    let box = __vuiSkinBox(sk.texture, {
+      margin: sk.margin,
+      padX: __vuiNum(o.padX, __vuiNum(o.pad, -1)),
+      padY: __vuiNum(o.padY, __vuiNum(o.pad, -1)),
+      modulate: o.bg,
+    });
+    if (box != null) {
+      return box;
+    }
+  }
   let sb = GD.create("StyleBoxFlat");
   if (o.bg != null) {
     sb.set("bg_color", o.bg);
@@ -1332,6 +1397,36 @@ VUI.buttonStyle = (b, kind, o) => {
     b.set("theme_override_colors/font_focus_color", color);
     b.set("theme_override_colors/font_disabled_color", t.onSurface.withAlpha(0.38));
   };
+  // Skinned buttons: nine-patch texture tinted per kind. Falls through to the
+  // flat Material look for ghost/outline (kept light) or when the pack is absent.
+  if (
+    __vuiSkin != null &&
+    __vuiSkin.button != null &&
+    kind != "ghost" &&
+    kind != "outline" &&
+    kind != "outlined" &&
+    kind != "text"
+  ) {
+    let sk = __vuiSkin.button;
+    let tint = t.primary;
+    let font = t.onPrimary;
+    if (kind == "tonal") { tint = t.secondaryContainer; font = t.onSecondaryContainer; }
+    else if (kind == "elevated") { tint = t.surfaceContainerLow; font = t.primary; }
+    else if (kind == "danger") { tint = t.error; font = t.onError; }
+    let py = __vuiNum(sk.padY, 10);
+    let n = __vuiSkinBox(sk.normal, { margin: sk.margin, padX: padX, padY: py, modulate: tint });
+    if (n != null) {
+      let h = __vuiSkinBox(sk.hover ?? sk.normal, { margin: sk.margin, padX: padX, padY: py, modulate: __vuiLayer(tint, font, 0.08) });
+      let p = __vuiSkinBox(sk.pressed ?? sk.normal, { margin: sk.margin, padX: padX, padY: py, modulate: __vuiLayer(tint, font, 0.14) });
+      b.set("theme_override_styles/normal", n);
+      b.set("theme_override_styles/hover", h ?? n);
+      b.set("theme_override_styles/pressed", p ?? n);
+      b.set("theme_override_styles/disabled", __vuiSkinBox(sk.normal, { margin: sk.margin, padX: padX, padY: py, modulate: t.onSurface.withAlpha(0.3) }) ?? disabledSb);
+      b.set("theme_override_styles/focus", VUI.styleEmpty());
+      setColors(font);
+      return;
+    }
+  }
   if (kind == "filled") {
     b.set("theme_override_styles/normal", VUI.styleBox({ bg: t.primary, radius: radius, padX: padX }));
     b.set("theme_override_styles/hover", VUI.styleBox({ bg: __vuiLayer(t.primary, t.onPrimary, 0.08), radius: radius, padX: padX }));
@@ -1485,6 +1580,20 @@ VUI.fieldStyle = (e) => {
     e.set("theme_override_fonts/font", __vuiFonts.regular);
   }
   __vuiMinSize(e, 0.0, t.fieldHeight);
+  // Skinned input: pack nine-patch for normal + focus states.
+  if (__vuiSkin != null && __vuiSkin.field != null) {
+    let sk = __vuiSkin.field;
+    let n = __vuiSkinBox(sk.normal, { margin: sk.margin, padX: 16, padY: 8, modulate: t.surfaceContainerHighest });
+    if (n != null) {
+      e.set("theme_override_styles/normal", n);
+      e.set("theme_override_styles/focus", __vuiSkinBox(sk.focus ?? sk.normal, { margin: sk.margin, padX: 16, padY: 8, modulate: t.surface }) ?? n);
+      e.set("theme_override_colors/font_color", t.onSurface);
+      e.set("theme_override_colors/font_placeholder_color", t.onSurfaceVariant.withAlpha(0.7));
+      e.set("theme_override_colors/caret_color", t.primary);
+      e.set("theme_override_colors/selection_color", t.primary.withAlpha(0.3));
+      return;
+    }
+  }
   e.set(
     "theme_override_styles/normal",
     VUI.styleBox({
