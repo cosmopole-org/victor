@@ -358,8 +358,7 @@ VUI.theme = () => {
 // ---------------------------------------------------------------------------
 //
 // VUI.installFonts({ body: "res://…/Roboto.ttf", emoji: "res://…/Emoji.ttf" })
-// loads raw TTF/OTF files over the bridge (no import pipeline needed — they
-// only have to be present in the pack), builds regular / medium / bold
+// loads TTF/OTF fonts over the bridge, builds regular / medium / bold
 // variations (real weight axes when the font is variable, synthetic emphasis
 // otherwise), chains the emoji font as a fallback so emoji glyphs render
 // everywhere, and installs the result as the app-wide Theme default font.
@@ -382,6 +381,29 @@ function __vuiFontVariation(base, weight, embolden) {
   return v;
 }
 
+// Load one TTF/OTF into a FontFile, or null when it can't be read. Exported
+// packs carry imported fonts only as res://.godot/imported/*.fontdata — the
+// raw file is stripped even when the export preset's include filter matches
+// it — so res:// paths must go through the import pipeline (GD.load, which
+// follows the .import remap). Raw-file loading remains the fallback for
+// loose files (user:// downloads, editor runs, packs with unimported fonts).
+function __vuiLoadFontFile(path) {
+  let p = "" + path;
+  if (p.startsWith("res://")) {
+    let r = GD.load(p);
+    let cls = r.call("get_class");
+    if (!GD.isError(cls) && cls == "FontFile") {
+      return r;
+    }
+  }
+  let f = GD.create("FontFile");
+  let err = f.call("load_dynamic_font", [p]);
+  if (GD.isError(err) || err != 0) {
+    return null;
+  }
+  return f;
+}
+
 VUI.installFonts = (o) => {
   o = o ?? {};
   if (__vuiFonts.regular != null) {
@@ -390,18 +412,16 @@ VUI.installFonts = (o) => {
   if (o.body == null) {
     return __vuiFonts;
   }
-  let body = GD.create("FontFile");
-  let err = body.call("load_dynamic_font", [o.body]);
-  if (GD.isError(err)) {
+  let body = __vuiLoadFontFile(o.body);
+  if (body == null) {
     return __vuiFonts;
   }
   body.set("antialiasing", GInt(1)); // grayscale AA
   body.set("hinting", GInt(1)); // light hinting
   body.set("subpixel_positioning", GInt(1));
   if (o.emoji != null) {
-    let emoji = GD.create("FontFile");
-    let eerr = emoji.call("load_dynamic_font", [o.emoji]);
-    if (!GD.isError(eerr)) {
+    let emoji = __vuiLoadFontFile(o.emoji);
+    if (emoji != null) {
       __vuiFonts.emoji = emoji;
       body.set("fallbacks", [emoji]);
     }
