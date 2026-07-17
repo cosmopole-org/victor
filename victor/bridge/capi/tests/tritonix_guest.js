@@ -73,7 +73,11 @@ Api.post = function (path, data, cb, errcb) {
   });
 };
 Api.patch = function (path, data, cb, errcb) {
-  Net.putJson("/api" + path, data || {}, function (res) {
+  Net.request({
+    url: "/api" + path,
+    method: "PATCH",
+    json: data || {}
+  }, function (res) {
     handle(res, cb, errcb);
   });
 };
