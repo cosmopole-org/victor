@@ -1844,7 +1844,7 @@ function __vrCreateContainer(inst, tag, props, t) {
     }
     pc.set(
       "theme_override_styles/panel",
-      VUI.styleBox({ bg: bg, radius: radius, shadow: shadow, border: border, borderColor: borderColor })
+      VUI.styleBox({ bg: bg, radius: radius, shadow: shadow, border: border, borderColor: borderColor, skin: tag })
     );
     let inner = GD.create("VBoxContainer");
     inner.set("theme_override_constants/separation", GInt(__vrPx(__vrNum(props.gap, 12))));
