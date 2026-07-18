@@ -957,10 +957,47 @@ function __vrSameNodes(a, b) {
   return true;
 }
 
+// Handle-id equality. On the web bridge a handle re-marshaled from the engine
+// (e.g. get_parent's return) can carry a generation bit at 2^32, so compare
+// the low 32 bits only.
+function __vrIdEq(a, b) {
+  if (a == null || b == null) {
+    return false;
+  }
+  return a % 4294967296 == b % 4294967296;
+}
+
+// The current parent of a node, or null when it has none / the handle is
+// already freed (a freed handle's op errors — swallowed here on purpose).
+function __vrParentOf(n) {
+  let p = null;
+  try {
+    p = n.call("get_parent", []);
+  } catch (e) {
+    return null;
+  }
+  if (p == null) {
+    return null;
+  }
+  if (GD.isError(p)) {
+    return null;
+  }
+  if (p.id == null) {
+    return null;
+  }
+  return p;
+}
+
 // Reconcile a host instance's container to hold exactly its flattened child
 // nodes, in order. Kept nodes are detached and re-appended (Godot preserves
 // their state); unmounted nodes were already queue-freed. Skips work entirely
 // when the ordered node set is unchanged.
+//
+// Parent-aware on both sides: a node that moved to ANOTHER container this pass
+// must not be ripped out of it (only detach nodes still under this container),
+// and a wanted node still sitting under a previous parent must be detached
+// there first — Godot refuses add_child on a parented node, which used to make
+// whole subtrees silently disappear on screen transitions.
 function __vrSyncFrom(hostInst) {
   if (hostInst == null) {
     return;
@@ -982,9 +1019,16 @@ function __vrSyncFrom(hostInst) {
     return;
   }
   for (let i = 0; i < prev.length; i++) {
-    container.call("remove_child", [prev[i]]);
+    let pp = __vrParentOf(prev[i]);
+    if (pp != null && __vrIdEq(pp.id, container.id)) {
+      container.call("remove_child", [prev[i]]);
+    }
   }
   for (let i = 0; i < want.length; i++) {
+    let wp = __vrParentOf(want[i]);
+    if (wp != null) {
+      wp.call("remove_child", [want[i]]);
+    }
     container.call("add_child", [want[i]]);
   }
   hostInst.attached = want;
@@ -1792,7 +1836,18 @@ function __vrCreateContainer(inst, tag, props, t) {
       inner.set("size_flags_horizontal", GInt(3));
     }
     inner.set("theme_override_constants/separation", GInt(__vrPx(__vrNum(props.gap, 12))));
-    sc.call("add_child", [inner]);
+    // pad on a scroll = content padding INSIDE the scroll area. Handled here
+    // (margin between sc and inner) — the generic pad wrapper below must not
+    // touch scroll: it used to wrap the already-parented inner, whose add
+    // failed and left the scroll body empty.
+    if (props.pad != null) {
+      let sm = __vrPad(inner, __vrNum(props.pad, 0));
+      sm.set("size_flags_horizontal", GInt(3));
+      sm.set("size_flags_vertical", GInt(3));
+      sc.call("add_child", [sm]);
+    } else {
+      sc.call("add_child", [inner]);
+    }
     container = inner;
     outer = sc;
   } else if (tag == "center") {
@@ -1861,8 +1916,9 @@ function __vrCreateContainer(inst, tag, props, t) {
     outer = box;
   }
 
-  // Optional padding wrapper for the simple box containers.
-  if (props.pad != null && (tag != "panel" && tag != "card")) {
+  // Optional padding wrapper for the simple box containers. Scroll handles its
+  // pad internally (its container is already parented to the ScrollContainer).
+  if (props.pad != null && tag != "panel" && tag != "card" && tag != "scroll") {
     let wrap = __vrPad(container, __vrNum(props.pad, 0));
     outer = wrap;
   }
@@ -2278,6 +2334,13 @@ function __vrDriverUpdate(inst, oldProps, props) {
     }
     if (props.placeholder != oldProps.placeholder && props.placeholder != null) {
       inst.node.set("placeholder_text", props.placeholder);
+    }
+    // Keep secrecy in sync on reuse (a reconciled password field must not
+    // leave the next occupant masked, and vice versa).
+    let secret = props.obscure == true || props.type == "password";
+    let oldSecret = oldProps.obscure == true || oldProps.type == "password";
+    if (secret != oldSecret) {
+      inst.node.set("secret", secret);
     }
     return;
   }
