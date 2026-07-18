@@ -89,12 +89,46 @@ Api.del = function (path, cb, errcb) {
 
 // --- high-level flows -------------------------------------------------------
 
-Api.loadConfig = function (cb) {
-  Api.get("/config", function (config) {
-    GameStore.set({
-      config: config
-    });
-    if (cb != null) cb(config);
+// Load the static rulebook. Resilient to a cold-starting server (Render's free
+// tier can take ~50s to wake): a long timeout plus automatic retries, with the
+// boot status surfaced so the splash can show progress / a retry button instead
+// of hanging forever.
+Api.loadConfig = function (cb, attempt) {
+  attempt = attempt || 0;
+  Net.request({
+    url: "/api/config",
+    method: "GET",
+    timeout: 60
+  }, function (res) {
+    var ok = res.ok;
+    var body = null;
+    if (ok) {
+      try {
+        body = res.json();
+      } catch (e) {
+        ok = false;
+      }
+    }
+    if (ok && body != null) {
+      GameStore.set({
+        config: body,
+        bootError: null
+      });
+      if (cb != null) cb(body);
+      return;
+    }
+    if (attempt < 30) {
+      GameStore.set({
+        bootError: "Waking the server… (attempt " + (attempt + 1) + ")"
+      });
+      GTimer.after(3000, function () {
+        Api.loadConfig(cb, attempt + 1);
+      });
+    } else {
+      GameStore.set({
+        bootError: "Cannot reach the server. Tap Retry."
+      });
+    }
   });
 };
 Api.refreshState = function (cb) {
@@ -376,9 +410,20 @@ function VictorApp(props) {
 // Assets are staged at res://assets/ui/ by godot/setup-project.sh during the
 // web export (the Casual UI / Kenney UI pack, mapped to these standard names).
 
+function uiPackPresent() {
+  // Check without triggering a "No loader found" error the way GD.load would.
+  try {
+    var rl = GD.resourceLoader();
+    if (rl == null) return false;
+    return rl.call("exists", ["res://assets/ui/panel.png"]) == true;
+  } catch (e) {
+    return false;
+  }
+}
 function installSkin() {
   if (typeof VUI === "undefined" || VUI == null) return;
   if (VUI.useTextures == null) return; // older engine without the skin hook
+  if (!uiPackPresent()) return; // pack not staged → keep the flat theme, no errors
   VUI.useTextures({
     button: {
       normal: "res://assets/ui/button_normal.png",
@@ -422,6 +467,8 @@ var GameStore = {
     me: null,
     // { displayName, avatar, ... }
     error: null,
+    bootError: null,
+    // status message shown on the loading splash
     toast: null
   },
   listeners: []
@@ -437,11 +484,15 @@ GameStore.set = function (patch) {
   GameStore.notify();
 };
 GameStore.notify = function () {
-  // Iterate a snapshot: a subscriber's re-render may add/remove listeners
-  // mid-notify (screen transitions), which must not corrupt this loop.
-  var ls = GameStore.listeners.slice();
-  for (var i = 0; i < ls.length; i++) {
-    var fn = ls[i];
+  // Iterate a copy so a subscriber's re-render adding/removing listeners
+  // mid-notify (screen transitions) can't corrupt this loop. Built with push
+  // (not Array.slice, whose Elpian builtin requires a start/end and throws on
+  // a 0-arg call — that bug froze the boot splash).
+  var ls = [];
+  var src = GameStore.listeners;
+  for (var i = 0; i < src.length; i++) ls.push(src[i]);
+  for (var k = 0; k < ls.length; k++) {
+    var fn = ls[k];
     if (fn != null) fn(GameStore.data);
   }
 };
@@ -1182,10 +1233,40 @@ function WorldScene(props) {
 // app/layout.jsx — the root layout. Boots the config, gates on authentication
 // and city creation, then wraps every page in the authenticated Shell.
 
+// Mobile-first UI scale. VUI renders on a CanvasLayer, which the window's
+// content_scale_SIZE does not affect and whose DPI-based responsive factor is
+// unreliable on the web. Instead we set content_scale_FACTOR directly from the
+// real window pixel width against a target "design width" — so a phone whose
+// canvas is ~1080px wide renders the UI ~2.7× up (large, touch-friendly),
+// deterministically and independent of DPI detection.
+
+var TARGET_DP_WIDTH = 400.0;
+function applyViewportScale() {
+  try {
+    var root = GD.tree().call("get_root");
+    if (root == null || GD.isError(root)) return;
+    var w = root.getIndexed("size:x");
+    if (w == null || w <= 0) return;
+    var f = w / TARGET_DP_WIDTH;
+    if (f < 1.0) f = 1.0;
+    if (f > 3.5) f = 3.5; // cap so very wide/desktop windows don't over-scale
+    root.set("content_scale_size", new Vector2i(0, 0));
+    root.set("content_scale_factor", GFloat(f));
+  } catch (e) {}
+}
 function __layout__root(props) {
   var g = useGame();
   var booted = useState(false);
   useEffect(function () {
+    applyViewportScale();
+    try {
+      var root = GD.tree().call("get_root");
+      if (root != null && !GD.isError(root)) {
+        root.connect("size_changed", function (a) {
+          applyViewportScale();
+        });
+      }
+    } catch (e) {}
     Api.init();
     Api.loadConfig(function () {
       booted[1](true);
@@ -1199,16 +1280,29 @@ function __layout__root(props) {
     }
   }, [g.token, g.needsCity, g.state, g.me]);
   if (!booted[0] || g.config == null) {
+    var failed = g.bootError != null && g.bootError.indexOf("Cannot reach") == 0;
     return /*#__PURE__*/_jsx("center", {
       children: /*#__PURE__*/_jsxs("column", {
-        gap: 12,
+        gap: 16,
+        pad: 24,
         children: [/*#__PURE__*/_jsx("title", {
           color: "primary",
           children: "\u2694\uFE0F TRITONIX"
         }), /*#__PURE__*/_jsx("caption", {
           color: "muted",
-          children: "Loading the realm\u2026"
-        })]
+          children: g.bootError != null ? g.bootError : "Loading the realm…"
+        }), failed ? /*#__PURE__*/_jsx("button", {
+          kind: "filled",
+          onPress: function () {
+            GameStore.set({
+              bootError: "Reconnecting…"
+            });
+            Api.loadConfig(function () {
+              booted[1](true);
+            });
+          },
+          children: "Retry"
+        }) : null]
       })
     });
   }
