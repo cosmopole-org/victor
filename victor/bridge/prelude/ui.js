@@ -60,7 +60,8 @@
 //                card, stat, listTile
 //   controls   — button, iconButton, fab, field, toggle, checkbox, slider,
 //                progress, dropdown, textarea
-//   structure  — appBar, tabs, bottomNav, dialog, sheet, toast, window
+//   structure  — appBar, tabs, bottomNav, dialog, sheet, toast, window,
+//                webview (external URL in an in-app overlay / OS browser)
 //   motion     — tween, fade, slideY (Godot Tweens over the bridge)
 //
 // ## Conventions
@@ -2601,6 +2602,179 @@ VUI.toast = (msg, o) => {
     }
   });
   return p;
+};
+
+// ===========================================================================
+// VUI webview — open an external URL over the running app.
+// ===========================================================================
+//
+// One API, a ladder of OS-NATIVE surfaces (no bundled browser engine, so the
+// export stays small). In order of preference:
+//
+//   1. WEB export — a real DOM <iframe> layered over the Godot canvas via
+//      the JavaScriptBridge, with a slim title bar (title, open-in-new-tab,
+//      close). Pure DOM: the close button removes it browser-side, so no
+//      callback ever crosses back into the VM, and it survives guest screen
+//      rebuilds until closed.
+//   2. ANDROID — the `ElpianWebView` Godot plugin (bridge/android/webview),
+//      which overlays the platform's system WebView (Chromium) with the same
+//      title bar and grants camera/microphone to the page once the app holds
+//      the runtime permissions.
+//   3. DESKTOP — the `WebView` Control from the godot_wry GDExtension
+//      (WebView2 on Windows, WKWebView on macOS, WebKitGTK on Linux —
+//      the OS webview, a few MB of glue), mounted full-screen on the app
+//      overlay under a VUI title bar. Present only when the export bundles
+//      the addon (bridge/tools/fetch-godot-wry.sh).
+//   4. Anything else — the system browser via OS.shell_open.
+//
+// It is the intended surface for embedded web content the engine cannot
+// render itself: video-conference rooms (BigBlueButton/Jitsi), payment
+// pages, OAuth flows, docs. Each in-app surface carries the media
+// permissions (camera, microphone, fullscreen) conferencing frontends
+// require — subject to the platform webview's own WebRTC support.
+//
+//   VUI.webview({ url: "https://…", title: "My room" })
+//     -> "webview" (DOM iframe) | "native" (Android/desktop webview)
+//      | "browser" (OS browser) | "" (nothing could open)
+//   VUI.closeWebview()  -> closes an open in-app surface (any kind)
+
+function __vuiJsBridgeEval(code) {
+  // Returns the eval result as a string, or null when there is no working
+  // JavaScriptBridge (non-web platform, headless test, mock engine).
+  try {
+    let js = GD.singleton("JavaScriptBridge");
+    let r = js.call("eval", [code]);
+    if (r == null || GD.isError(r)) { return null; }
+    return "" + r;
+  } catch (e) { return null; }
+}
+
+// Open native surface, if any (Android plugin overlay / desktop WebView node).
+var __vuiWebviewNative = { node: null, android: false };
+
+function __vuiEngineHasSingleton(name) {
+  try {
+    let e = GD.singleton("Engine");
+    let r = e.call("has_singleton", [name]);
+    return r == true;
+  } catch (err) { return false; }
+}
+
+function __vuiClassExists(cls) {
+  try {
+    let cdb = GD.singleton("ClassDB");
+    let r = cdb.call("class_exists", [cls]);
+    return r == true;
+  } catch (err) { return false; }
+}
+
+// Android: the ElpianWebView Godot plugin overlays the system WebView on top
+// of the game activity (title bar + close handled natively, like the DOM
+// path — closing never needs to cross back into the VM).
+function __vuiOpenAndroidWebview(url, title) {
+  if (!__vuiEngineHasSingleton("ElpianWebView")) { return false; }
+  try {
+    let p = GD.singleton("ElpianWebView");
+    let r = p.call("open", [url, title]);
+    if (GD.isError(r)) { return false; }
+    __vuiWebviewNative.android = true;
+    return true;
+  } catch (err) { return false; }
+}
+
+// Desktop: godot_wry's `WebView` Control (the OS-native webview). The native
+// view renders on top of the canvas inside its rect, so the VUI title bar
+// lives ABOVE it in a column and stays visible/clickable.
+function __vuiOpenWryWebview(url, title) {
+  if (!__vuiClassExists("WebView")) { return false; }
+  if (__vuiApp.overlay == null) { return false; }
+  let view = null;
+  try { view = GD.create("WebView"); } catch (err) { return false; }
+  if (view == null || GD.isError(view)) { return false; }
+  VUI.closeWebview(); // at most one in-app surface at a time
+  let t = VUI.theme();
+  view.set("full_window_size", false); // respect the Control rect, not the window
+  view.set("autoplay", true);          // conference audio/video without a click
+  view.set("focused_when_created", true);
+  view.set("url", url);
+  let bar = VUI.panel({ bg: t.surfaceContainer, radius: 0, pad: 10, child: VUI.row({ gap: 10, children: [
+    VUI.expand(VUI.text("" + title, { size: t.fontM, weight: "medium" })),
+    VUI.button("Open in browser", { kind: "tonal", onTap: () => {
+      try { GD.singleton("OS").call("shell_open", [url]); } catch (e) { }
+    } }),
+    VUI.button("Close", { kind: "filled", onTap: () => { VUI.closeWebview(); } }),
+  ] }) });
+  let col = VUI.column({ gap: 0, expand: true, children: [bar, VUI.expand(view)] });
+  let holder = GD.create("PanelContainer");
+  holder.set("theme_override_styles/panel", VUI.styleBox({ bg: t.surface, radius: 0 }));
+  __vuiFullRect(holder);
+  holder.call("add_child", [col]);
+  __vuiApp.overlay.call("add_child", [holder]);
+  __vuiWebviewNative.node = holder;
+  return true;
+}
+
+VUI.webview = (o) => {
+  o = o ?? {};
+  let url = "" + (o.url ?? "");
+  if (url == "") { return ""; }
+  let title = "" + (o.title ?? url);
+  // The overlay snippet is self-contained DOM (built with createElement, no
+  // innerHTML) and idempotent: reopening replaces any previous overlay.
+  let code = "(function(){" +
+    "var u=" + JSON.stringify(url) + ",t=" + JSON.stringify(title) + ";" +
+    "if(!document||!document.body){return 0;}" +
+    "var old=document.getElementById('vui-webview');if(old){old.parentNode.removeChild(old);}" +
+    "var w=document.createElement('div');w.id='vui-webview';" +
+    "w.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;display:flex;flex-direction:column;background:#0b0b10;';" +
+    "var b=document.createElement('div');" +
+    "b.style.cssText='height:46px;display:flex;align-items:center;gap:10px;padding:0 12px;background:#15151d;color:#fff;font:500 14px system-ui,sans-serif;flex:none;';" +
+    "var s=document.createElement('span');s.textContent=t;" +
+    "s.style.cssText='flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;';" +
+    "var a=document.createElement('a');a.textContent='Open in new tab';a.href=u;a.target='_blank';a.rel='noopener';" +
+    "a.style.cssText='color:#9aa4ff;text-decoration:none;font-size:13px;flex:none;';" +
+    "var x=document.createElement('button');x.textContent='\\u2715 Close';" +
+    "x.style.cssText='flex:none;border:0;border-radius:8px;padding:8px 14px;background:#343446;color:#fff;font:500 13px system-ui,sans-serif;cursor:pointer;';" +
+    "x.onclick=function(){w.parentNode.removeChild(w);};" +
+    "var f=document.createElement('iframe');f.src=u;" +
+    "f.allow='camera; microphone; display-capture; fullscreen; autoplay; clipboard-write; speaker-selection';" +
+    "f.setAttribute('allowfullscreen','');" +
+    "f.style.cssText='flex:1;width:100%;border:0;background:#fff;';" +
+    "b.appendChild(s);b.appendChild(a);b.appendChild(x);w.appendChild(b);w.appendChild(f);" +
+    "document.body.appendChild(w);return 1;})()";
+  let r = __vuiJsBridgeEval(code);
+  if (r != null && r == "1") { return "webview"; }
+  // Not the web export: try the OS-native in-app webviews.
+  if (__vuiOpenAndroidWebview(url, title)) { return "native"; }
+  if (__vuiOpenWryWebview(url, title)) { return "native"; }
+  // No in-app surface available: hand the URL to the platform browser.
+  try {
+    let os = GD.singleton("OS");
+    let res = os.call("shell_open", [url]);
+    if (!GD.isError(res)) { return "browser"; }
+  } catch (e) { }
+  return "";
+};
+
+VUI.closeWebview = () => {
+  let closed = false;
+  let r = __vuiJsBridgeEval(
+    "(function(){var w=document.getElementById('vui-webview');" +
+    "if(w){w.parentNode.removeChild(w);return 1;}return 0;})()");
+  if (r != null && r == "1") { closed = true; }
+  if (__vuiWebviewNative.android == true) {
+    try {
+      let p = GD.singleton("ElpianWebView");
+      let res = p.call("close", []);
+      if (res == true) { closed = true; }
+    } catch (e) { }
+    __vuiWebviewNative.android = false;
+  }
+  if (__vuiWebviewNative.node != null) {
+    try { __vuiWebviewNative.node.queueFree(); closed = true; } catch (e) { }
+    __vuiWebviewNative.node = null;
+  }
+  return closed;
 };
 
 // ===========================================================================

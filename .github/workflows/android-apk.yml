@@ -126,6 +126,19 @@ jobs:
           touch victor/bridge/project/android/build/.gdignore
           echo "${GODOT_TEMPLATE_DIR}" > victor/bridge/project/android/.build_version
 
+      # The ElpianWebView Android plugin (OS-native webview overlay used by
+      # VUI.webview): build the AAR and drop it where the export addon
+      # (res://addons/elpian_webview_android) injects it into the gradle build.
+      - name: Build the ElpianWebView Android plugin (AAR)
+        working-directory: victor/bridge/android/webview
+        run: gradle --no-daemon assembleRelease
+
+      - name: Install the plugin AAR into the export addon
+        run: |
+          mkdir -p victor/bridge/project/addons/elpian_webview_android/bin
+          cp victor/bridge/android/webview/build/outputs/aar/webview-release.aar \
+             victor/bridge/project/addons/elpian_webview_android/bin/ElpianWebView.release.aar
+
       - name: Generate CI keystore
         run: |
           keytool -genkeypair -v \

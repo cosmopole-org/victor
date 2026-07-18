@@ -67,6 +67,37 @@ let nav = VUI.bottomNav({
 });
 ```
 
+External web content (webview):
+
+```js
+// Open a URL over the running app in the best available OS-NATIVE surface
+// (no bundled browser engine — exports stay small). Ladder, in order:
+//   1. WEB export      — a DOM <iframe> over the canvas (JavaScriptBridge),
+//                        title bar with open-in-new-tab + close, media
+//                        permissions for conferencing (camera/mic/fullscreen)
+//   2. ANDROID         — the ElpianWebView plugin (bridge/android/webview):
+//                        the system WebView (Chromium) overlaid on the game
+//                        activity, camera/mic granted to the page once the
+//                        app holds the runtime permissions
+//   3. DESKTOP         — godot_wry's `WebView` Control (WebView2 / WKWebView
+//                        / WebKitGTK), mounted on the app overlay under a
+//                        VUI title bar; present when the export bundles the
+//                        addon (bridge/tools/fetch-godot-wry.sh)
+//   4. otherwise       — the system browser (OS.shell_open)
+let surface = VUI.webview({ url: "https://example.org/room", title: "My room" });
+// surface: "webview" (DOM) | "native" (Android/desktop) | "browser" | ""
+VUI.closeWebview();   // programmatically close any open in-app surface
+```
+
+The DOM and Android overlays are self-contained (their close buttons act
+platform-side, so no callback crosses back into the VM) and survive guest
+screen rebuilds until closed; the desktop surface is a VUI overlay owning a
+native `WebView` Control. The OpenLearn Moodle client uses this ladder to
+open BigBlueButton video-conference rooms on every platform. WebRTC caveats:
+Windows/macOS/Android webviews support camera + microphone; Linux/WebKitGTK
+varies by distro (the title bar's "Open in browser" is the escape hatch);
+screen *sharing* is desktop-browser territory everywhere.
+
 ## Theming
 
 `VUI.use(VUI.themeDark() | VUI.themeLight())` installs a token set; `VUI.theme()`

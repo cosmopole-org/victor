@@ -1,0 +1,3 @@
+# The plugin AAR is a build product (see bridge/android/webview) — never
+# committed; CI builds and drops it here before the Android export.
+*.aar

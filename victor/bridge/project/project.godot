@@ -11,6 +11,10 @@ run/main_scene="res://tps.tscn"
 config/features=PackedStringArray("4.3")
 boot_splash/bg_color=Color(0.043, 0.055, 0.078, 1)
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/elpian_webview_android/plugin.cfg")
+
 [display]
 
 window/size/viewport_width=1280

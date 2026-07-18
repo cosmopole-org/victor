@@ -19,5 +19,13 @@ project/.godot/
 # Gradle build template installed by the Android CI export
 project/android/
 
+# Third-party godot_wry addon fetched by tools/fetch-godot-wry.sh (desktop
+# native webview for VUI.webview) — a build-time dependency, never committed
+project/addons/godot_wry/
+
+# Android plugin gradle build outputs (bridge/android/webview)
+android/webview/build/
+android/webview/.gradle/
+
 # CI export outputs
 build/

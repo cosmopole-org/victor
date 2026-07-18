@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- WebRTC in the embedded page (BigBlueButton et al) needs the app-level
+         camera/audio permissions; the merged manifest carries them into the
+         exported APK, and the plugin requests them at runtime on first use. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <application>
+        <!-- Godot Android plugin (v2) registration: the engine discovers the
+             plugin class from this meta-data entry in the merged manifest. -->
+        <meta-data
+            android:name="org.godotengine.plugin.v2.ElpianWebView"
+            android:value="org.cosmopole.elpian.webview.ElpianWebView" />
+    </application>
+</manifest>
