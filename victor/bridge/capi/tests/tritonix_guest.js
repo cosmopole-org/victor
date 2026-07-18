@@ -1233,10 +1233,40 @@ function WorldScene(props) {
 // app/layout.jsx — the root layout. Boots the config, gates on authentication
 // and city creation, then wraps every page in the authenticated Shell.
 
+// Mobile-first UI scale. VUI renders on a CanvasLayer, which the window's
+// content_scale_SIZE does not affect and whose DPI-based responsive factor is
+// unreliable on the web. Instead we set content_scale_FACTOR directly from the
+// real window pixel width against a target "design width" — so a phone whose
+// canvas is ~1080px wide renders the UI ~2.7× up (large, touch-friendly),
+// deterministically and independent of DPI detection.
+
+var TARGET_DP_WIDTH = 400.0;
+function applyViewportScale() {
+  try {
+    var root = GD.tree().call("get_root");
+    if (root == null || GD.isError(root)) return;
+    var w = root.getIndexed("size:x");
+    if (w == null || w <= 0) return;
+    var f = w / TARGET_DP_WIDTH;
+    if (f < 1.0) f = 1.0;
+    if (f > 3.5) f = 3.5; // cap so very wide/desktop windows don't over-scale
+    root.set("content_scale_size", new Vector2i(0, 0));
+    root.set("content_scale_factor", GFloat(f));
+  } catch (e) {}
+}
 function __layout__root(props) {
   var g = useGame();
   var booted = useState(false);
   useEffect(function () {
+    applyViewportScale();
+    try {
+      var root = GD.tree().call("get_root");
+      if (root != null && !GD.isError(root)) {
+        root.connect("size_changed", function (a) {
+          applyViewportScale();
+        });
+      }
+    } catch (e) {}
     Api.init();
     Api.loadConfig(function () {
       booted[1](true);
