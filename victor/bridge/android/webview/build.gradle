@@ -1,0 +1,39 @@
+// ElpianWebView — a Godot 4 Android plugin (v2) overlaying the OS-native
+// Android System WebView (Chromium) on top of the game activity, so Elpian
+// guests can open web content (video-conference rooms, OAuth, docs) in-app
+// without bundling a browser engine. Built as an AAR and injected into the
+// gradle export by the res://addons/elpian_webview_android editor plugin.
+//
+// Build:  gradle -p victor/bridge/android/webview assembleRelease
+// Output: build/outputs/aar/webview-release.aar
+//         -> copy to bridge/project/addons/elpian_webview_android/bin/ElpianWebView.release.aar
+
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'org.cosmopole.elpian.webview'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 21
+        targetSdk 34
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    // The Godot Android library this plugin compiles against — same engine
+    // release the exports use (see .github/workflows/android-apk.yml).
+    compileOnly 'org.godotengine:godot:4.3.0.stable'
+}
