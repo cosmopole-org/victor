@@ -133,10 +133,14 @@ Api.loadConfig = function (cb, attempt) {
 };
 Api.refreshState = function (cb) {
   Api.get("/cities/me", function (state) {
-    GameStore.set({
-      state: state,
-      me: state.profile
-    });
+    // Only accept a real city payload — never poison the store with an error
+    // body (that would render a broken Shell).
+    if (state != null && state.city != null) {
+      GameStore.set({
+        state: state,
+        me: state.profile
+      });
+    }
     if (cb != null) cb(state);
   });
 };
@@ -529,9 +533,79 @@ function flash(message, kind) {
   });
 }
 
+// ---- lib/vreact-fix.jsx ----
+// lib/vreact-fix.jsx — runtime hot-fix for VReact's child reconciler.
+//
+// Mirrors the fix in victor/bridge/prelude/react.js (__vrSyncFrom): the old
+// reconciler called add_child on nodes that still had a parent — Godot refuses
+// that, so whole subtrees silently disappeared on screen transitions — and
+// remove_child on freed/moved nodes. Because the prelude is BAKED into the
+// engine binary, a deploy built from an older engine still carries the bug;
+// the guest shares one flat scope with the preludes and a later function
+// definition wins, so redefining __vrSyncFrom here overrides the baked one.
+// Safe to keep once engines carry the fix — this is the same code.
+
+// Handle-id equality: on the web bridge a re-marshaled handle (get_parent's
+// return) can carry a generation bit at 2^32 — compare the low 32 bits.
+function __vrIdEqFix(a, b) {
+  if (a == null || b == null) return false;
+  return a % 4294967296 == b % 4294967296;
+}
+function __vrParentOfFix(n) {
+  var p = null;
+  try {
+    p = n.call("get_parent", []);
+  } catch (e) {
+    return null;
+  }
+  if (p == null) return null;
+  if (GD.isError(p)) return null;
+  if (p.id == null) return null;
+  return p;
+}
+function __vrSyncFrom(hostInst) {
+  if (hostInst == null) return;
+  var container = hostInst.container;
+  if (container == null) return;
+  var want = [];
+  var cs = hostInst.childInstances;
+  for (var i = 0; i < cs.length; i++) {
+    __vrCollect(cs[i], want);
+  }
+  var prev = hostInst.attached;
+  if (prev == null) prev = [];
+  if (__vrSameNodes(prev, want)) return;
+  // Detach only nodes still parented under THIS container (a node that moved
+  // to another container this pass must not be ripped out of it).
+  for (var r = 0; r < prev.length; r++) {
+    var pp = __vrParentOfFix(prev[r]);
+    if (pp != null && __vrIdEqFix(pp.id, container.id)) {
+      container.call("remove_child", [prev[r]]);
+    }
+  }
+  // Attach with reparent semantics: Godot refuses add_child on a parented
+  // node, so detach from any previous parent first.
+  for (var a = 0; a < want.length; a++) {
+    var wp = __vrParentOfFix(want[a]);
+    if (wp != null && !__vrIdEqFix(wp.id, container.id)) {
+      wp.call("remove_child", [want[a]]);
+      container.call("add_child", [want[a]]);
+    } else if (wp == null) {
+      container.call("add_child", [want[a]]);
+    } else {
+      // Already under this container (kept node): re-append for ordering.
+      container.call("remove_child", [want[a]]);
+      container.call("add_child", [want[a]]);
+    }
+  }
+  hostInst.attached = want;
+}
+var __vreactFixInstalled = true;
+
 // ---- components/Auth.jsx ----
 // components/Auth.jsx — the login / register screen and the "name your city"
-// setup step shown after registration.
+// setup step shown after registration. Every failure path surfaces inline —
+// a silent auth screen was the #1 "nothing happens" complaint.
 
 function AuthField(props) {
   return /*#__PURE__*/_jsxs("column", {
@@ -542,7 +616,8 @@ function AuthField(props) {
     }), /*#__PURE__*/_jsx("input", {
       hint: props.hint,
       value: props.value,
-      onChange: props.onChange
+      onChange: props.onChange,
+      obscure: props.obscure
     })]
   });
 }
@@ -551,16 +626,42 @@ function AuthGate() {
   var email = useState("");
   var pass = useState("");
   var name = useState("");
+  var busy = useState(false);
+  var error = useState(null);
   var isRegister = mode[0] == "register";
+  function fail(msg) {
+    busy[1](false);
+    error[1]("" + msg);
+  }
   function submit() {
+    if (busy[0]) return;
+    error[1](null);
+    // Client-side checks mirror the backend so mistakes surface instantly.
+    var em = ("" + email[0]).trim();
+    var pw = "" + pass[0];
+    if (isRegister && ("" + name[0]).trim().length < 2) {
+      fail("Commander name must be at least 2 characters");
+      return;
+    }
+    if (em.indexOf("@") < 1) {
+      fail("Enter a valid email address");
+      return;
+    }
+    if (pw.length < 6) {
+      fail("Password must be at least 6 characters");
+      return;
+    }
+    busy[1](true);
     if (isRegister) {
-      Api.register(email[0], pass[0], name[0], function (r) {
+      Api.register(em, pw, ("" + name[0]).trim(), function (r) {
+        busy[1](false);
         GameStore.set({
           needsCity: true
         });
-      });
+      }, fail);
     } else {
-      Api.login(email[0], pass[0], function (r) {
+      Api.login(em, pw, function (r) {
+        busy[1](false);
         if (r.needsCity) {
           GameStore.set({
             needsCity: true
@@ -568,7 +669,7 @@ function AuthGate() {
         } else {
           Api.refreshState();
         }
-      });
+      }, fail);
     }
   }
   return /*#__PURE__*/_jsx("center", {
@@ -589,23 +690,30 @@ function AuthGate() {
           hint: "Your display name",
           value: name[0],
           onChange: name[1]
-        }) : null, /*#__PURE__*/_jsx(AuthField, {
+        }, "fld-name") : null, /*#__PURE__*/_jsx(AuthField, {
           label: "Email",
           hint: "you@realm.com",
           value: email[0],
           onChange: email[1]
-        }), /*#__PURE__*/_jsx(AuthField, {
+        }, "fld-email"), /*#__PURE__*/_jsx(AuthField, {
           label: "Password",
           hint: "\u2022\u2022\u2022\u2022\u2022\u2022",
           value: pass[0],
-          onChange: pass[1]
-        }), /*#__PURE__*/_jsx("button", {
+          onChange: pass[1],
+          obscure: true
+        }, "fld-pass"), error[0] != null ? /*#__PURE__*/_jsx("text", {
+          color: "danger",
+          wrap: true,
+          children: "⚠ " + error[0]
+        }) : null, /*#__PURE__*/_jsx("button", {
           kind: "filled",
           onPress: submit,
-          children: isRegister ? "Found your dynasty" : "Enter the realm"
+          disabled: busy[0],
+          children: busy[0] ? "Contacting the realm…" : isRegister ? "Found your dynasty" : "Enter the realm"
         }), /*#__PURE__*/_jsx("button", {
           kind: "ghost",
           onPress: function () {
+            error[1](null);
             mode[1](isRegister ? "login" : "register");
           },
           children: isRegister ? "I already have an account" : "Create a new account"
@@ -616,20 +724,32 @@ function AuthGate() {
 }
 function CitySetup() {
   var name = useState("");
+  var busy = useState(false);
+  var error = useState(null);
   function found() {
-    if (name[0].length < 2) {
-      flash("City name must be at least 2 characters", "danger");
+    if (busy[0]) return;
+    error[1](null);
+    var nm = ("" + name[0]).trim();
+    if (nm.length < 2) {
+      error[1]("City name must be at least 2 characters");
       return;
     }
-    Api.action("/cities", {
-      name: name[0]
+    busy[1](true);
+    Api.post("/cities", {
+      name: nm
     }, function (st) {
-      GameStore.set({
-        needsCity: false,
-        state: st,
-        me: st.profile
-      });
-      flash("Welcome to " + st.city.name + "!", "success");
+      busy[1](false);
+      if (st != null && st.city != null) {
+        GameStore.set({
+          needsCity: false,
+          state: st,
+          me: st.profile
+        });
+        flash("Welcome to " + st.city.name + "!", "success");
+      }
+    }, function (msg) {
+      busy[1](false);
+      error[1]("" + msg);
     });
   }
   return /*#__PURE__*/_jsx("center", {
@@ -649,10 +769,15 @@ function CitySetup() {
           hint: "e.g. Rivendell",
           value: name[0],
           onChange: name[1]
-        }), /*#__PURE__*/_jsx("button", {
+        }), error[0] != null ? /*#__PURE__*/_jsx("text", {
+          color: "danger",
+          wrap: true,
+          children: "⚠ " + error[0]
+        }) : null, /*#__PURE__*/_jsx("button", {
           kind: "filled",
           onPress: found,
-          children: "Found city"
+          disabled: busy[0],
+          children: busy[0] ? "Founding…" : "Found city"
         })]
       })
     })
@@ -1009,10 +1134,13 @@ function Shell(props) {
           children: items
         }), /*#__PURE__*/_jsx(ResourceBar, {})]
       })
-    }), /*#__PURE__*/_jsxs("scroll", {
-      gap: 16,
-      pad: 16,
-      children: [props.children, /*#__PURE__*/_jsx(ToastHost, {})]
+    }), /*#__PURE__*/_jsx("scroll", {
+      gap: 0,
+      children: /*#__PURE__*/_jsxs("column", {
+        gap: 16,
+        pad: 16,
+        children: [props.children, /*#__PURE__*/_jsx(ToastHost, {})]
+      })
     })]
   });
 }
