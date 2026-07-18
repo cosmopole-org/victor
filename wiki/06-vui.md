@@ -67,6 +67,25 @@ let nav = VUI.bottomNav({
 });
 ```
 
+External web content (webview):
+
+```js
+// Open a URL over the running app. On the WEB export this layers a real DOM
+// <iframe> over the Godot canvas via the JavaScriptBridge — an in-app webview
+// with a slim title bar (title, open-in-new-tab, close) that carries the
+// media permissions embedded conferencing frontends need (camera, microphone,
+// screen share, fullscreen). On other platforms it falls back to the system
+// browser (OS.shell_open). Returns which surface opened.
+let surface = VUI.webview({ url: "https://example.org/room", title: "My room" });
+// surface: "webview" (DOM overlay) | "browser" (OS browser) | "" (neither)
+VUI.closeWebview();   // programmatically close an open overlay
+```
+
+The overlay is pure DOM: its close button removes it browser-side, so no
+callback crosses back into the VM and it survives guest screen rebuilds until
+closed. The OpenLearn Moodle client uses this to open BigBlueButton
+video-conference rooms.
+
 ## Theming
 
 `VUI.use(VUI.themeDark() | VUI.themeLight())` installs a token set; `VUI.theme()`
