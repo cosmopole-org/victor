@@ -152,6 +152,49 @@ Api.action = function (path, data, cb) {
   });
 };
 
+// ---- lib/clock.jsx ----
+// lib/clock.jsx — time source for the Elpian VM.
+//
+// The VM has NO JavaScript `Date` object (referencing it throws and halts the
+// VM). All timekeeping goes through the Godot `Time` singleton instead:
+//   * monoMs()      — monotonic milliseconds since start (for UI timers/toasts)
+//   * nowMs()       — wall-clock Unix time in ms (to compare with server times)
+//   * parseIsoMs()  — parse a server ISO-8601 timestamp to Unix ms
+
+var __timeObj = null;
+function timeObj() {
+  if (__timeObj == null) {
+    try {
+      __timeObj = GD.time();
+    } catch (e) {
+      __timeObj = null;
+    }
+  }
+  return __timeObj;
+}
+var Clock = {};
+Clock.monoMs = function () {
+  var t = timeObj();
+  if (t == null) return 0;
+  return t.call("get_ticks_msec", []);
+};
+Clock.nowMs = function () {
+  var t = timeObj();
+  if (t == null) return 0;
+  return t.call("get_unix_time_from_system", []) * 1000;
+};
+Clock.parseIsoMs = function (iso) {
+  if (iso == null) return 0;
+  var s = "" + iso;
+  var dot = s.indexOf(".");
+  if (dot >= 0) s = s.substring(0, dot);
+  var z = s.indexOf("Z");
+  if (z >= 0) s = s.substring(0, z);
+  var t = timeObj();
+  if (t == null) return 0;
+  return t.call("get_unix_time_from_datetime_string", [s]) * 1000;
+};
+
 // ---- lib/format.jsx ----
 // lib/format.jsx — display helpers and the game's icon/emoji vocabulary.
 
@@ -176,8 +219,8 @@ function fmtDuration(seconds) {
 }
 function secondsUntil(iso) {
   if (iso == null) return 0;
-  var end = new Date(iso).getTime();
-  return Math.max(0, Math.floor((end - Date.now()) / 1000));
+  var end = Clock.parseIsoMs(iso);
+  return Math.max(0, Math.floor((end - Clock.nowMs()) / 1000));
 }
 var RES_ICON = {
   lumber: "🪵",
@@ -394,8 +437,12 @@ GameStore.set = function (patch) {
   GameStore.notify();
 };
 GameStore.notify = function () {
-  for (var i = 0; i < GameStore.listeners.length; i++) {
-    GameStore.listeners[i](GameStore.data);
+  // Iterate a snapshot: a subscriber's re-render may add/remove listeners
+  // mid-notify (screen transitions), which must not corrupt this loop.
+  var ls = GameStore.listeners.slice();
+  for (var i = 0; i < ls.length; i++) {
+    var fn = ls[i];
+    if (fn != null) fn(GameStore.data);
   }
 };
 GameStore.subscribe = function (fn) {
@@ -426,7 +473,7 @@ function flash(message, kind) {
     toast: {
       message: message,
       kind: kind || "info",
-      at: Date.now()
+      at: Clock.monoMs()
     }
   });
 }
@@ -709,7 +756,7 @@ function ToastHost() {
   var g = useGame();
   var t = g.toast;
   if (t == null) return null;
-  if (Date.now() - t.at > 3500) return null;
+  if (Clock.monoMs() - t.at > 3500) return null;
   var kind = t.kind == "danger" ? "danger" : t.kind == "success" ? "primary" : "surface";
   return /*#__PURE__*/_jsx("panel", {
     bg: kind,
@@ -1014,9 +1061,11 @@ function TerrainTile(props) {
 function CityMarker(props) {
   var c = props.city;
   var ref = useRef(null);
+  var ang = useRef(0.0);
   useFrame(function (d) {
     if (ref.current != null) {
-      ref.current.set("rotation_degrees", new Vector3(0.0, Date.now() / 20 % 360, 0.0));
+      ang.current = (ang.current + d * 50.0) % 360.0;
+      ref.current.set("rotation_degrees", new Vector3(0.0, ang.current, 0.0));
     }
   });
   var col = props.mine ? new Color(1.0, 0.82, 0.3, 1.0) : props.selected ? new Color(1.0, 0.4, 0.4, 1.0) : new Color(0.85, 0.3, 0.3, 1.0);
@@ -2574,4 +2623,4 @@ var __VICTOR_ROUTES = [
   { path: "/war", component: __page__war },
   { path: "/world", component: __page__world },
 ];
-VictorClient.mountApp(_jsx(VictorApp, { routes: __VICTOR_ROUTES, layout: __layout__root, initial: "/" }), { design: [1280, 720], portrait: false, theme: "dark" });
+VictorClient.mountApp(_jsx(VictorApp, { routes: __VICTOR_ROUTES, layout: __layout__root, initial: "/" }), { design: [720, 1280], portrait: true, theme: "dark" });
