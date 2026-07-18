@@ -89,12 +89,46 @@ Api.del = function (path, cb, errcb) {
 
 // --- high-level flows -------------------------------------------------------
 
-Api.loadConfig = function (cb) {
-  Api.get("/config", function (config) {
-    GameStore.set({
-      config: config
-    });
-    if (cb != null) cb(config);
+// Load the static rulebook. Resilient to a cold-starting server (Render's free
+// tier can take ~50s to wake): a long timeout plus automatic retries, with the
+// boot status surfaced so the splash can show progress / a retry button instead
+// of hanging forever.
+Api.loadConfig = function (cb, attempt) {
+  attempt = attempt || 0;
+  Net.request({
+    url: "/api/config",
+    method: "GET",
+    timeout: 60
+  }, function (res) {
+    var ok = res.ok;
+    var body = null;
+    if (ok) {
+      try {
+        body = res.json();
+      } catch (e) {
+        ok = false;
+      }
+    }
+    if (ok && body != null) {
+      GameStore.set({
+        config: body,
+        bootError: null
+      });
+      if (cb != null) cb(body);
+      return;
+    }
+    if (attempt < 30) {
+      GameStore.set({
+        bootError: "Waking the server… (attempt " + (attempt + 1) + ")"
+      });
+      GTimer.after(3000, function () {
+        Api.loadConfig(cb, attempt + 1);
+      });
+    } else {
+      GameStore.set({
+        bootError: "Cannot reach the server. Tap Retry."
+      });
+    }
   });
 };
 Api.refreshState = function (cb) {
@@ -422,6 +456,8 @@ var GameStore = {
     me: null,
     // { displayName, avatar, ... }
     error: null,
+    bootError: null,
+    // status message shown on the loading splash
     toast: null
   },
   listeners: []
@@ -1199,16 +1235,29 @@ function __layout__root(props) {
     }
   }, [g.token, g.needsCity, g.state, g.me]);
   if (!booted[0] || g.config == null) {
+    var failed = g.bootError != null && g.bootError.indexOf("Cannot reach") == 0;
     return /*#__PURE__*/_jsx("center", {
       children: /*#__PURE__*/_jsxs("column", {
-        gap: 12,
+        gap: 16,
+        pad: 24,
         children: [/*#__PURE__*/_jsx("title", {
           color: "primary",
           children: "\u2694\uFE0F TRITONIX"
         }), /*#__PURE__*/_jsx("caption", {
           color: "muted",
-          children: "Loading the realm\u2026"
-        })]
+          children: g.bootError != null ? g.bootError : "Loading the realm…"
+        }), failed ? /*#__PURE__*/_jsx("button", {
+          kind: "filled",
+          onPress: function () {
+            GameStore.set({
+              bootError: "Reconnecting…"
+            });
+            Api.loadConfig(function () {
+              booted[1](true);
+            });
+          },
+          children: "Retry"
+        }) : null]
       })
     });
   }
