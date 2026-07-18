@@ -410,9 +410,20 @@ function VictorApp(props) {
 // Assets are staged at res://assets/ui/ by godot/setup-project.sh during the
 // web export (the Casual UI / Kenney UI pack, mapped to these standard names).
 
+function uiPackPresent() {
+  // Check without triggering a "No loader found" error the way GD.load would.
+  try {
+    var rl = GD.resourceLoader();
+    if (rl == null) return false;
+    return rl.call("exists", ["res://assets/ui/panel.png"]) == true;
+  } catch (e) {
+    return false;
+  }
+}
 function installSkin() {
   if (typeof VUI === "undefined" || VUI == null) return;
   if (VUI.useTextures == null) return; // older engine without the skin hook
+  if (!uiPackPresent()) return; // pack not staged → keep the flat theme, no errors
   VUI.useTextures({
     button: {
       normal: "res://assets/ui/button_normal.png",
@@ -473,11 +484,15 @@ GameStore.set = function (patch) {
   GameStore.notify();
 };
 GameStore.notify = function () {
-  // Iterate a snapshot: a subscriber's re-render may add/remove listeners
-  // mid-notify (screen transitions), which must not corrupt this loop.
-  var ls = GameStore.listeners.slice();
-  for (var i = 0; i < ls.length; i++) {
-    var fn = ls[i];
+  // Iterate a copy so a subscriber's re-render adding/removing listeners
+  // mid-notify (screen transitions) can't corrupt this loop. Built with push
+  // (not Array.slice, whose Elpian builtin requires a start/end and throws on
+  // a 0-arg call — that bug froze the boot splash).
+  var ls = [];
+  var src = GameStore.listeners;
+  for (var i = 0; i < src.length; i++) ls.push(src[i]);
+  for (var k = 0; k < ls.length; k++) {
+    var fn = ls[k];
     if (fn != null) fn(GameStore.data);
   }
 };
