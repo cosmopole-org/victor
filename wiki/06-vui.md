@@ -91,15 +91,23 @@ let surface = VUI.webview({ url: "https://example.org/room", title: "My room" })
 // surface: "webview" (iframe) | "tab" | "native" (Android/desktop) | "browser" | ""
 VUI.closeWebview();   // programmatically close any open in-app surface
 
-// New tabs must be opened inside a user gesture (popup blockers) — when the
-// URL arrives ASYNCHRONOUSLY after the tap, reserve the tab first:
+// New tabs must be opened inside a user gesture (popup blockers). When the
+// destination URL arrives ASYNCHRONOUSLY after the tap, use a SELF-RESOLVING
+// tab: it fetches the (same-origin) JSON endpoint browser-side and navigates
+// itself — this must happen tab-side, because opening a tab backgrounds the
+// Godot page, whose main loop the browser throttles to a halt, so an
+// app-side "fetch then navigate the reserved tab" deadlocks:
 onTap: () => {
-  VUI.webviewPrepare();                    // synchronous, in the gesture
-  Net.get(joinUrlEndpoint, (res) => {
-    if (!res.ok) { VUI.cancelWebviewPrepare(); return; }
-    VUI.webview({ url: res.json().url });  // navigates the reserved tab
-  });
+  let surface = VUI.webviewOpenDeferred({
+    fetchUrl: origin + "/api/join?token=…",  // same-origin JSON endpoint
+    jsonField: "join_url",                   // field holding the destination
+    title: "My room",
+    failMessage: "Could not join",
+  });                                        // -> "tab" | "" (not web/blocked)
+  if (surface != "tab") { /* fall back: fetch + VUI.webview as usual */ }
 }
+// (VUI.webviewPrepare() / VUI.cancelWebviewPrepare() reserve a tab for cases
+// where the app stays responsive, e.g. the URL is already known.)
 ```
 
 The DOM and Android overlays are self-contained (their close buttons act
