@@ -41,6 +41,7 @@ struct Mock {
     // capabilities
     android_plugin: bool,
     wry_class: bool,
+    web_surface: bool, // eval answers like a browser: prepare 1, cross-origin main snippet 2
     // recordings
     next_handle: i64,
     singletons: Vec<String>,
@@ -96,8 +97,26 @@ impl Mock {
                 .to_string();
             match method {
                 "eval" => {
+                    let is_prepare = arg0.contains("about:blank");
+                    let is_cancel = !is_prepare && arg0.contains("__vuiPendingTab")
+                        && !arg0.contains("vui-webview");
+                    let is_main = arg0.contains("vui-webview");
                     self.evals.push(arg0);
-                    return Value::Null; // non-web surface: no DOM to answer
+                    if !self.web_surface {
+                        return Value::Null; // non-web surface: no DOM to answer
+                    }
+                    if is_prepare {
+                        return json!("1"); // tab reserved
+                    }
+                    if is_cancel {
+                        return json!("0"); // nothing pending to cancel
+                    }
+                    if is_main {
+                        // Browser-side the snippet sees a cross-origin URL and
+                        // navigates the reserved tab.
+                        return json!("2");
+                    }
+                    return Value::Null;
                 }
                 "has_singleton" => {
                     return json!(self.android_plugin && arg0 == "ElpianWebView");
@@ -161,9 +180,20 @@ impl Mock {
 }
 
 fn run(name: &str, source: &str, android_plugin: bool, wry_class: bool) -> Mock {
+    run_with(name, source, android_plugin, wry_class, false)
+}
+
+fn run_with(
+    name: &str,
+    source: &str,
+    android_plugin: bool,
+    wry_class: bool,
+    web_surface: bool,
+) -> Mock {
     let mock = Arc::new(Mutex::new(Mock {
         android_plugin,
         wry_class,
+        web_surface,
         ..Mock::default()
     }));
     // Unique VM name per test: the VM registry is process-global and the
@@ -201,6 +231,7 @@ fn run(name: &str, source: &str, android_plugin: bool, wry_class: bool) -> Mock 
             Mock {
                 android_plugin: m.android_plugin,
                 wry_class: m.wry_class,
+                web_surface: m.web_surface,
                 next_handle: m.next_handle,
                 singletons: m.singletons.clone(),
                 evals: m.evals.clone(),
@@ -213,6 +244,41 @@ fn run(name: &str, source: &str, android_plugin: bool, wry_class: bool) -> Mock 
                 texts: m.texts.clone(),
             }
         })
+}
+
+#[test]
+fn webview_web_surface_opens_cross_origin_in_reserved_tab() {
+    let guest_src = format!(
+        r#"
+import 'godot.js';
+import 'ui.js';
+
+let prepped = VUI.webviewPrepare();
+let r = VUI.webview({{ url: "{URL}", title: "Demo room" }});
+let l = GD.create("Label");
+l.set("text", "webview-result:" + r + ":" + (prepped ? "prepped" : "noprep"));
+"#
+    );
+    let m = run_with("webtab", &guest_src, false, false, true);
+    assert!(
+        m.evals.iter().any(|c| c.contains("about:blank")),
+        "webviewPrepare never reserved a tab; evals: {}",
+        m.evals.len()
+    );
+    let main = m
+        .evals
+        .iter()
+        .find(|c| c.contains("vui-webview"))
+        .expect("main webview snippet never evaluated");
+    assert!(
+        main.contains("__vuiPendingTab") && main.contains(URL),
+        "main snippet must navigate the reserved tab to the URL: {main}"
+    );
+    assert!(
+        m.shell_opens.is_empty() && m.plugin_opens.is_empty() && m.webview_nodes.is_empty(),
+        "no other surface should fire when the browser handled it"
+    );
+    assert_eq!(m.texts, vec!["webview-result:tab:prepped".to_string()]);
 }
 
 #[test]

@@ -2611,11 +2611,20 @@ VUI.toast = (msg, o) => {
 // One API, a ladder of OS-NATIVE surfaces (no bundled browser engine, so the
 // export stays small). In order of preference:
 //
-//   1. WEB export — a real DOM <iframe> layered over the Godot canvas via
-//      the JavaScriptBridge, with a slim title bar (title, open-in-new-tab,
-//      close). Pure DOM: the close button removes it browser-side, so no
-//      callback ever crosses back into the VM, and it survives guest screen
-//      rebuilds until closed.
+//   1. WEB export — via the JavaScriptBridge. SAME-ORIGIN content gets a
+//      real DOM <iframe> layered over the Godot canvas with a slim title
+//      bar (title, open-in-new-tab, close); CROSS-ORIGIN content opens in
+//      a NEW TAB instead — browsers block third-party cookies inside
+//      cross-origin iframes, which breaks session-based apps (a framed
+//      BigBlueButton loads but cannot authenticate: "Oops, something went
+//      wrong"). Both are pure DOM: closing never crosses back into the VM.
+//      Because the tab must be opened inside a user gesture to escape
+//      popup blockers, a tap handler that fetches the URL ASYNCHRONOUSLY
+//      calls VUI.webviewPrepare() first (synchronously, in the gesture) to
+//      reserve the tab; VUI.webview() then navigates it when the URL
+//      arrives, and VUI.cancelWebviewPrepare() discards it on error.
+//      `prefer: "overlay" | "tab" | "auto"` (default auto = by origin)
+//      overrides the choice.
 //   2. ANDROID — the `ElpianWebView` Godot plugin (bridge/android/webview),
 //      which overlays the platform's system WebView (Chromium) with the same
 //      title bar and grants camera/microphone to the page once the app holds
@@ -2633,9 +2642,12 @@ VUI.toast = (msg, o) => {
 // permissions (camera, microphone, fullscreen) conferencing frontends
 // require — subject to the platform webview's own WebRTC support.
 //
-//   VUI.webview({ url: "https://…", title: "My room" })
-//     -> "webview" (DOM iframe) | "native" (Android/desktop webview)
-//      | "browser" (OS browser) | "" (nothing could open)
+//   VUI.webviewPrepare()   -> web only: reserve a tab NOW (call in the tap)
+//   VUI.webview({ url: "https://…", title: "My room", prefer: "auto" })
+//     -> "webview" (DOM iframe) | "tab" (browser tab, web export)
+//      | "native" (Android/desktop webview) | "browser" (OS browser)
+//      | "" (nothing could open)
+//   VUI.cancelWebviewPrepare() -> discard an unused reserved tab
 //   VUI.closeWebview()  -> closes an open in-app surface (any kind)
 
 function __vuiJsBridgeEval(code) {
@@ -2648,6 +2660,31 @@ function __vuiJsBridgeEval(code) {
     return "" + r;
   } catch (e) { return null; }
 }
+
+// Reserve a browser tab NOW, while still inside the user gesture, so a later
+// VUI.webview (after an async URL fetch) can navigate it without tripping the
+// popup blocker. No-op off the web export. The placeholder shows a minimal
+// "Opening…" page so the blank tab explains itself.
+VUI.webviewPrepare = () => {
+  let r = __vuiJsBridgeEval(
+    "(function(){try{" +
+    "if(window.__vuiPendingTab&&!window.__vuiPendingTab.closed){return 1;}" +
+    "var w=window.open('about:blank','_blank');if(!w){return 0;}" +
+    "window.__vuiPendingTab=w;" +
+    "try{var d=w.document;d.title='Opening\\u2026';" +
+    "d.body.style.cssText='background:#0b0b10;color:#fff;font:16px system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;';" +
+    "d.body.textContent='Opening\\u2026';}catch(e){}" +
+    "return 1;}catch(e){return 0;}})()");
+  return r != null && r == "1";
+};
+
+// Discard a reserved-but-unused tab (call on the error path of the fetch).
+VUI.cancelWebviewPrepare = () => {
+  let r = __vuiJsBridgeEval(
+    "(function(){var w=window.__vuiPendingTab;window.__vuiPendingTab=null;" +
+    "if(w&&!w.closed){try{w.close();}catch(e){}return 1;}return 0;})()");
+  return r != null && r == "1";
+};
 
 // Open native surface, if any (Android plugin overlay / desktop WebView node).
 var __vuiWebviewNative = { node: null, android: false };
@@ -2719,11 +2756,28 @@ VUI.webview = (o) => {
   let url = "" + (o.url ?? "");
   if (url == "") { return ""; }
   let title = "" + (o.title ?? url);
-  // The overlay snippet is self-contained DOM (built with createElement, no
-  // innerHTML) and idempotent: reopening replaces any previous overlay.
+  let prefer = "" + (o.prefer ?? "auto"); // "auto" | "tab" | "overlay"
+  if (prefer != "tab" && prefer != "overlay") { prefer = "auto"; }
+  // One self-contained browser-side snippet decides the web surface:
+  //   returns 2 — opened in a tab (cross-origin content: third-party-cookie
+  //               blocking breaks session apps like BigBlueButton inside a
+  //               cross-origin iframe, so those get a top-level tab, using
+  //               the gesture-reserved __vuiPendingTab when present);
+  //   returns 1 — DOM <iframe> overlay (same-origin content, an explicit
+  //               prefer:"overlay", or a popup-blocked tab fallback);
+  //   returns 0 — no DOM to work with.
+  // The overlay is built with createElement (no innerHTML) and idempotent:
+  // reopening replaces any previous overlay.
   let code = "(function(){" +
-    "var u=" + JSON.stringify(url) + ",t=" + JSON.stringify(title) + ";" +
+    "var u=" + JSON.stringify(url) + ",t=" + JSON.stringify(title) + ",m=" + JSON.stringify(prefer) + ";" +
     "if(!document||!document.body){return 0;}" +
+    "var wantTab=(m==='tab');" +
+    "if(m==='auto'){try{wantTab=(new URL(u,location.href)).origin!==location.origin;}catch(e){}}" +
+    "if(wantTab){" +
+    "var p=window.__vuiPendingTab;window.__vuiPendingTab=null;" +
+    "if(p&&!p.closed){try{p.location.replace(u);p.focus();return 2;}catch(e){try{p.close();}catch(e2){}}}" +
+    "var nw=window.open(u,'_blank');if(nw){return 2;}" +
+    "}" +
     "var old=document.getElementById('vui-webview');if(old){old.parentNode.removeChild(old);}" +
     "var w=document.createElement('div');w.id='vui-webview';" +
     "w.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;display:flex;flex-direction:column;background:#0b0b10;';" +
@@ -2743,6 +2797,7 @@ VUI.webview = (o) => {
     "b.appendChild(s);b.appendChild(a);b.appendChild(x);w.appendChild(b);w.appendChild(f);" +
     "document.body.appendChild(w);return 1;})()";
   let r = __vuiJsBridgeEval(code);
+  if (r != null && r == "2") { return "tab"; }
   if (r != null && r == "1") { return "webview"; }
   // Not the web export: try the OS-native in-app webviews.
   if (__vuiOpenAndroidWebview(url, title)) { return "native"; }
