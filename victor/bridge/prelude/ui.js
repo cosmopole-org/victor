@@ -2642,11 +2642,18 @@ VUI.toast = (msg, o) => {
 // permissions (camera, microphone, fullscreen) conferencing frontends
 // require — subject to the platform webview's own WebRTC support.
 //
-//   VUI.webviewPrepare()   -> web only: reserve a tab NOW (call in the tap)
 //   VUI.webview({ url: "https://…", title: "My room", prefer: "auto" })
 //     -> "webview" (DOM iframe) | "tab" (browser tab, web export)
 //      | "native" (Android/desktop webview) | "browser" (OS browser)
 //      | "" (nothing could open)
+//   VUI.webviewOpenDeferred({ fetchUrl, jsonField, title, failMessage })
+//     -> web only, call INSIDE the tap: opens a tab that fetches the JSON
+//        endpoint itself and navigates to jsonField's value — the pattern
+//        for destination URLs that arrive asynchronously ("tab" | "").
+//        Preferred over prepare+webview: the app tab is throttled to a
+//        halt the moment the new tab takes focus, so an app-side fetch
+//        can never finish; the self-resolving tab does not care.
+//   VUI.webviewPrepare()   -> web only: reserve a tab NOW (call in the tap)
 //   VUI.cancelWebviewPrepare() -> discard an unused reserved tab
 //   VUI.closeWebview()  -> closes an open in-app surface (any kind)
 
@@ -2684,6 +2691,51 @@ VUI.cancelWebviewPrepare = () => {
     "(function(){var w=window.__vuiPendingTab;window.__vuiPendingTab=null;" +
     "if(w&&!w.closed){try{w.close();}catch(e){}return 1;}return 0;})()");
   return r != null && r == "1";
+};
+
+// Open a SELF-RESOLVING tab, synchronously inside the tap gesture: the tab
+// fetches `fetchUrl` (a same-origin JSON endpoint) browser-side and navigates
+// itself to the value of `jsonField`. This is the right shape whenever the
+// destination URL must be fetched AFTER the tap, because the reserve-then-
+// navigate pattern deadlocks on the web export: opening a tab backgrounds the
+// Godot page, whose main loop the browser throttles to a halt — the app-side
+// fetch never completes and the reserved tab waits forever (and the app looks
+// frozen). Here the tab needs nothing further from the app.
+//
+// On failure the tab shows `failMessage` plus the endpoint's message/
+// warnings. Returns "tab" when the tab launched, "" otherwise (non-web
+// surface, popup blocked) — callers then fall back to the async
+// fetch + VUI.webview flow, which is fine off the web (native surfaces and
+// shell_open need no user-gesture tab).
+VUI.webviewOpenDeferred = (o) => {
+  o = o ?? {};
+  let fetchUrl = "" + (o.fetchUrl ?? "");
+  if (fetchUrl == "") { return ""; }
+  let jsonField = "" + (o.jsonField ?? "url");
+  let title = "" + (o.title ?? "Opening…");
+  let failMsg = "" + (o.failMessage ?? "Could not open");
+  // The tab's config rides direct property assignment on the child window —
+  // the injected <script> below is a CONSTANT string, so nothing user-
+  // supplied is ever spliced into markup.
+  let code = "(function(){try{" +
+    "var w=window.open('about:blank','_blank');if(!w){return 0;}" +
+    "w.__vuiCfg={u:" + JSON.stringify(fetchUrl) + ",f:" + JSON.stringify(jsonField) +
+    ",t:" + JSON.stringify(title) + ",e:" + JSON.stringify(failMsg) + "};" +
+    "var d=w.document;d.open();" +
+    "d.write('<!doctype html><html><head><meta charset=\"utf-8\"></head>" +
+    "<body style=\"background:#0b0b10;color:#fff;font:16px system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;\">" +
+    "<div id=\"m\">Opening\\u2026</div>" +
+    "<scr'+'ipt>(function(){var c=window.__vuiCfg||{};document.title=c.t||\"Opening\";" +
+    "function fail(m){document.getElementById(\"m\").textContent=(c.e||\"Failed\")+(m?(\": \"+m):\"\");}" +
+    "fetch(c.u,{headers:{Accept:\"application/json\"}}).then(function(r){return r.json();}).then(function(j){" +
+    "var u=j&&j[c.f];if(u){location.replace(u);return;}" +
+    "var m=(j&&(j.message||j.error))||\"\";" +
+    "if(!m&&j&&j.warnings&&j.warnings.length&&j.warnings[0].message){m=j.warnings[0].message;}" +
+    "fail(m);}).catch(function(err){fail(\"\"+err);});})();</scr'+'ipt></body></html>');" +
+    "d.close();return 1;}catch(e){return 0;}})()";
+  let r = __vuiJsBridgeEval(code);
+  if (r != null && r == "1") { return "tab"; }
+  return "";
 };
 
 // Open native surface, if any (Android plugin overlay / desktop WebView node).

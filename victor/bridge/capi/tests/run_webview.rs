@@ -97,16 +97,19 @@ impl Mock {
                 .to_string();
             match method {
                 "eval" => {
-                    let is_prepare = arg0.contains("about:blank");
-                    let is_cancel = !is_prepare && arg0.contains("__vuiPendingTab")
+                    let is_deferred = arg0.contains("__vuiCfg");
+                    let is_prepare = !is_deferred && arg0.contains("about:blank");
+                    let is_cancel = !is_deferred
+                        && !is_prepare
+                        && arg0.contains("__vuiPendingTab")
                         && !arg0.contains("vui-webview");
                     let is_main = arg0.contains("vui-webview");
                     self.evals.push(arg0);
                     if !self.web_surface {
                         return Value::Null; // non-web surface: no DOM to answer
                     }
-                    if is_prepare {
-                        return json!("1"); // tab reserved
+                    if is_deferred || is_prepare {
+                        return json!("1"); // tab launched / reserved
                     }
                     if is_cancel {
                         return json!("0"); // nothing pending to cancel
@@ -279,6 +282,40 @@ l.set("text", "webview-result:" + r + ":" + (prepped ? "prepped" : "noprep"));
         "no other surface should fire when the browser handled it"
     );
     assert_eq!(m.texts, vec!["webview-result:tab:prepped".to_string()]);
+}
+
+#[test]
+fn webview_deferred_tab_resolves_url_browser_side() {
+    let guest_src = r#"
+import 'godot.js';
+import 'ui.js';
+
+let r = VUI.webviewOpenDeferred({
+  fetchUrl: "https://app.example/api/join?token=t1",
+  jsonField: "join_url",
+  title: "Demo room",
+  failMessage: "Could not join",
+});
+let l = GD.create("Label");
+l.set("text", "webview-result:" + r);
+"#;
+    let m = run_with("deferred", guest_src, false, false, true);
+    let snippet = m
+        .evals
+        .iter()
+        .find(|c| c.contains("__vuiCfg"))
+        .expect("deferred-tab snippet never evaluated");
+    assert!(
+        snippet.contains("https://app.example/api/join?token=t1")
+            && snippet.contains("join_url")
+            && snippet.contains("location.replace"),
+        "snippet must carry the fetch URL + field and self-navigate: {snippet}"
+    );
+    assert!(
+        m.shell_opens.is_empty() && m.plugin_opens.is_empty() && m.webview_nodes.is_empty(),
+        "no other surface should fire"
+    );
+    assert_eq!(m.texts, vec!["webview-result:tab".to_string()]);
 }
 
 #[test]
