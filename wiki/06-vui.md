@@ -72,9 +72,12 @@ External web content (webview):
 ```js
 // Open a URL over the running app in the best available OS-NATIVE surface
 // (no bundled browser engine — exports stay small). Ladder, in order:
-//   1. WEB export      — a DOM <iframe> over the canvas (JavaScriptBridge),
-//                        title bar with open-in-new-tab + close, media
-//                        permissions for conferencing (camera/mic/fullscreen)
+//   1. WEB export      — same-origin content: a DOM <iframe> over the canvas
+//                        (JavaScriptBridge) with a title bar; CROSS-ORIGIN
+//                        content: a NEW TAB — third-party-cookie blocking
+//                        breaks session apps (BigBlueButton) inside a
+//                        cross-origin iframe. Override with
+//                        prefer: "tab" | "overlay" | "auto" (default).
 //   2. ANDROID         — the ElpianWebView plugin (bridge/android/webview):
 //                        the system WebView (Chromium) overlaid on the game
 //                        activity, camera/mic granted to the page once the
@@ -85,8 +88,18 @@ External web content (webview):
 //                        addon (bridge/tools/fetch-godot-wry.sh)
 //   4. otherwise       — the system browser (OS.shell_open)
 let surface = VUI.webview({ url: "https://example.org/room", title: "My room" });
-// surface: "webview" (DOM) | "native" (Android/desktop) | "browser" | ""
+// surface: "webview" (iframe) | "tab" | "native" (Android/desktop) | "browser" | ""
 VUI.closeWebview();   // programmatically close any open in-app surface
+
+// New tabs must be opened inside a user gesture (popup blockers) — when the
+// URL arrives ASYNCHRONOUSLY after the tap, reserve the tab first:
+onTap: () => {
+  VUI.webviewPrepare();                    // synchronous, in the gesture
+  Net.get(joinUrlEndpoint, (res) => {
+    if (!res.ok) { VUI.cancelWebviewPrepare(); return; }
+    VUI.webview({ url: res.json().url });  // navigates the reserved tab
+  });
+}
 ```
 
 The DOM and Android overlays are self-contained (their close buttons act
