@@ -33,6 +33,7 @@
   },
   "files": [
     "src",
+    "plugins",
     "assets/guest",
     "web/elpian_rn.wasm",
     "README.md",
