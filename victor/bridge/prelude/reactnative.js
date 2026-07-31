@@ -233,6 +233,45 @@ class RN {
   static safe(props) {
     return __rnCreate("RNSafeArea", props);
   } // SafeAreaView
+  static keyboardAvoiding(props) {
+    return __rnCreate("KeyboardAvoidingView", props);
+  }
+  static modal(props) {
+    return __rnCreate("Modal", props);
+  } // Modal
+  static pressable(props) {
+    return __rnCreate("Pressable", props);
+  }
+  static touchable(props) {
+    return __rnCreate("TouchableOpacity", props);
+  }
+  static touchableHighlight(props) {
+    return __rnCreate("TouchableHighlight", props);
+  }
+  static touchableWithoutFeedback(props) {
+    return __rnCreate("TouchableWithoutFeedback", props);
+  }
+  static touchableNativeFeedback(props) {
+    return __rnCreate("TouchableNativeFeedback", props);
+  }
+  static inputAccessory(props) {
+    return __rnCreate("InputAccessoryView", props);
+  }
+  static drawer(props) {
+    return __rnCreate("DrawerLayoutAndroid", props);
+  }
+
+  // Lists (virtualized) — build them by add()ing children; the host maps the
+  // child list onto the list's data set.
+  static flatList(props) {
+    return __rnCreate("FlatList", props);
+  }
+  static sectionList(props) {
+    return __rnCreate("SectionList", props);
+  }
+  static virtualizedList(props) {
+    return __rnCreate("VirtualizedList", props);
+  }
 
   // Leaves -----------------------------------------------------------------
   static text(value, props) {
@@ -246,21 +285,47 @@ class RN {
   }
   static button(props) {
     return __rnCreate("RNButton", props);
-  } // Pressable + label
+  } // ergonomic Pressable + label
+  static rawButton(props) {
+    return __rnCreate("Button", props);
+  } // the bare RN <Button/>
   static input(props) {
     return __rnCreate("RNInput", props);
   } // TextInput
   static image(props) {
     return __rnCreate("RNImage", props);
   } // Image
+  static imageBackground(props) {
+    return __rnCreate("ImageBackground", props);
+  }
   static _switch(props) {
     return __rnCreate("RNSwitch", props);
   } // Switch
   static slider(props) {
     return __rnCreate("RNSlider", props);
-  }
+  } // community slider (graceful fallback if not installed)
   static spinner(props) {
     return __rnCreate("RNActivityIndicator", props);
+  } // ActivityIndicator
+  static statusBar(props) {
+    return __rnCreate("StatusBar", props);
+  }
+  static refreshControl(props) {
+    return __rnCreate("RefreshControl", props);
+  }
+
+  // Animated host views (props still marshal as plain values).
+  static animatedView(props) {
+    return __rnCreate("Animated.View", props);
+  }
+  static animatedText(props) {
+    return __rnCreate("Animated.Text", props);
+  }
+  static animatedImage(props) {
+    return __rnCreate("Animated.Image", props);
+  }
+  static animatedScroll(props) {
+    return __rnCreate("Animated.ScrollView", props);
   }
 
   // 3D — a Godot Scene3D embedded as a widget. Everything inside is built with
@@ -367,14 +432,26 @@ function __rnCreateByTag(type, props) {
   if (type == "row") return RN.row(props);
   if (type == "scroll") return RN.scroll(props);
   if (type == "safe") return RN.safe(props);
+  if (type == "keyboardAvoiding") return RN.keyboardAvoiding(props);
+  if (type == "modal") return RN.modal(props);
+  if (type == "pressable") return RN.pressable(props);
+  if (type == "touchable") return RN.touchable(props);
+  if (type == "touchableHighlight") return RN.touchableHighlight(props);
+  if (type == "touchableWithoutFeedback") return RN.touchableWithoutFeedback(props);
+  if (type == "flatList") return RN.flatList(props);
+  if (type == "sectionList") return RN.sectionList(props);
+  if (type == "virtualizedList") return RN.virtualizedList(props);
   if (type == "text") return RN.textNode(props);
   if (type == "button") return RN.button(props);
   if (type == "input") return RN.input(props);
   if (type == "image") return RN.image(props);
+  if (type == "imageBackground") return RN.imageBackground(props);
   if (type == "switch") return RN._switch(props);
   if (type == "slider") return RN.slider(props);
+  if (type == "spinner") return RN.spinner(props);
+  if (type == "statusBar") return RN.statusBar(props);
   if (type == "scene3d") return RN.scene3d(props);
-  // Unknown tag -> raw host class of the same name.
+  // Unknown tag -> raw host class of the same name (any registered component).
   return RN.create(type, props);
 }
 

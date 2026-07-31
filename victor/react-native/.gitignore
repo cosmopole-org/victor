@@ -11,3 +11,8 @@ elpian_rn.wasm
 
 # Native build artifacts
 native/elpian-rn/target/
+
+# Expo prebuild output (Continuous Native Generation — regenerated from app.json
+# by `expo prebuild`; the CI APK build produces and then discards these).
+/android/
+/ios/

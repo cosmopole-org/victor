@@ -194,3 +194,36 @@ fn scene3d_widget_requests_a_godot_mount() {
         "expected a scene3d_mount request",
     );
 }
+
+/// The shipped rich example (`assets/guest/showcase.js`) must compile in the
+/// js2elpian subset and run end-to-end: this boots it with the preludes
+/// composed and asserts it mounts its 2D tree and requests its embedded Godot
+/// 3D scene — so a subset regression in the example fails here, not only in a
+/// device build.
+#[test]
+fn boots_the_rich_showcase_example() {
+    let source = include_str!("../../../assets/guest/showcase.js");
+    let (calls, logs) = run_and_record_with_log(source);
+    let ops = all_ops(&calls);
+
+    // Its 2D surface: a scroll view, a Modal and a FlatList were created.
+    for cls in ["RNScroll", "Modal", "FlatList", "RNScene3D"] {
+        assert!(
+            has_op(&ops, |o| o.get("new").and_then(|v| v.as_str()) == Some(cls)),
+            "expected a {cls} create op; got {ops:?}",
+        );
+    }
+    // The embedded Godot scene was mounted and an app root was marked.
+    assert!(
+        has_op(&ops, |o| o.get("method").and_then(|v| v.as_str()) == Some("scene3d_mount")),
+        "expected the Scene3D to request a Godot mount",
+    );
+    assert!(
+        has_op(&ops, |o| o.get("root").is_some()),
+        "expected the app root to be mounted",
+    );
+    assert!(
+        logs.iter().any(|l| l.contains("showcase up")),
+        "expected the showcase print line; got {logs:?}",
+    );
+}

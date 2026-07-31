@@ -18,6 +18,23 @@ and Godot is a widget in it.**
   (View/Text/Pressable/…)                        (Camera/Lights/Meshes/Physics)
 ```
 
+## Complete coverage + efficient patching
+
+- **Every React Native element, by construction.** The renderer has no
+  per-component `switch`: it resolves the host class reflectively against the
+  full `react-native` surface (`rnComponents.ts` names the whole set;
+  `components.ts` resolves each to a real component, `Animated.*` included), and
+  passes **every** prop and **every** event through generically. Adding an
+  element is a metadata line, so coverage can't drift. `registerComponent()`
+  plugs in community/custom widgets. `test/components.test.ts` asserts the set is
+  complete.
+- **A change re-renders one widget, not the page.** The retained store keeps a
+  per-node revision + per-node subscribers; each widget is a `React.memo`'d
+  `<WidgetView/>` subscribed (`useSyncExternalStore`) to just its own node. A
+  prop patch bumps only that node → only that component re-renders; a child-list
+  edit bumps only the parent; a burst of writes coalesces to one re-render per
+  node. `test/patching.test.ts` asserts it.
+
 ## Why this design
 
 - **The VM is unchanged.** `elpian_rn.wasm` reuses `elpian-godot-capi`'s
@@ -48,9 +65,11 @@ react-native/
       runtime.ts            frame loop + event routing
       loadWasm[.web].ts     platform module loader
     render/                 React Native renderer:
-      renderNode.tsx          WidgetNode -> RN component
+      rnComponents.ts         the complete RN element set (metadata; Node-testable)
+      components.ts           reflective name -> RN component + registerComponent()
+      renderNode.tsx          memoized per-widget <WidgetView/> (targeted patching)
       VictorHost.tsx          the top-level host component
-      style.ts                prop -> RN style
+      style.ts                prop -> RN style (+ STYLE_KEYS)
     scene3d/                Scene3dSurface.tsx + the RnScene3dEngine contract
     index.ts              public API (createWasmRuntime, VictorHost, …)
   App.tsx                 Expo entry: load VM, boot guest, render host
@@ -79,9 +98,11 @@ real VM:
 ```sh
 cargo test -p elpian-rn                        # Rust: prelude → VM → rn.op pipeline
 cd react-native
-node --experimental-strip-types test/host.test.ts    # op interpreter + sandbox
-node --experimental-strip-types test/style.test.ts    # prop → style
-node --experimental-strip-types test/wasm.test.ts     # REAL VM wasm end-to-end
+node --experimental-strip-types test/host.test.ts        # op interpreter + sandbox
+node --experimental-strip-types test/style.test.ts       # prop → style
+node --experimental-strip-types test/components.test.ts  # complete RN element coverage
+node --experimental-strip-types test/patching.test.ts    # targeted re-render (no whole-tree)
+node --experimental-strip-types test/wasm.test.ts        # REAL VM wasm end-to-end
 ```
 
 ## Writing a guest
@@ -107,9 +128,24 @@ function main() {
 main();
 ```
 
-See `assets/guest/app.js` for the full example. Prefer the React programming
-model? The same `rn.op` backend can drive VReact — see the roadmap in
-`wiki/13-react-native.md`.
+See `assets/guest/app.js` for the minimal example and
+**`assets/guest/showcase.js`** for a rich one — a scrollable page (header,
+counter, text-input echo, `Switch`, `Slider`, `FlatList`, `Modal`,
+`ActivityIndicator`, buttons) whose 2D controls **drive an embedded Godot
+`Scene3D`** live (the switch toggles the key light, the slider rotates the mesh
+group, buttons spawn/clear spheres). It is the Expo app's boot program
+(`App.tsx` → `src/example/showcaseSource.ts`) and is compiled + run end-to-end
+by the Rust test `boots_the_rich_showcase_example`.
+
+## Android APK
+
+`.github/workflows/react-native-android-apk.yml` builds this app into an
+installable Android APK (Expo prebuild → `gradlew assembleDebug`) and commits it
+to the repo root as `elpian-react-native-demo.apk`. Because Hermes has no
+WebAssembly, the APK boots the RN shell and shows the graceful placeholder until
+the native JSI `VmBackend` + native Godot view seams are installed; Expo **web**
+runs the real VM today. (The separate `android-apk.yml` builds the native Godot
+host demo — a different app.)
 
 ## Platform notes
 

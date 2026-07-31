@@ -70,6 +70,8 @@ jobs:
         run: |
           node --experimental-strip-types test/host.test.ts
           node --experimental-strip-types test/style.test.ts
+          node --experimental-strip-types test/components.test.ts
+          node --experimental-strip-types test/patching.test.ts
 
       - name: Host — real-VM wasm end-to-end
         working-directory: victor/react-native
