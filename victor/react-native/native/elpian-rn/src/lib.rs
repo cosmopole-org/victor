@@ -44,6 +44,7 @@ pub struct RnRuntime {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
 extern "C" {
     /// Implemented by the JavaScript host. Reads `(name, args_json)` out of wasm
     /// memory and returns a length-prefixed reply buffer (or null to decline,
