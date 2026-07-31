@@ -5,6 +5,17 @@
 //
 // Framework-agnostic on purpose (no `react-native` import) so it is unit-
 // testable under `node --experimental-strip-types`.
+//
+// PERFORMANCE — targeted patching, not whole-tree re-render. The store keeps a
+// **per-node revision** and per-node subscriber set, and every mutation records
+// only the node(s) it actually touched in a `dirty` set. `flush()` bumps the
+// revision of just those nodes and notifies just their subscribers. Combined
+// with a memoized per-widget component on the renderer side (`WidgetView`), a
+// prop change on one widget re-renders that one widget — never the page. A
+// change to a node's *child list* dirties the parent (its children changed),
+// so structural edits patch the parent's child slots without touching siblings
+// or descendants. The single global `version` bumps only for app-level changes
+// (root swap / toast), which the top-level host observes.
 
 import type { Wire } from "./protocol.ts";
 
@@ -29,30 +40,83 @@ export type ChangeListener = () => void;
 
 /**
  * The single source of truth for the 2D tree. Mutated by the host dispatcher as
- * ops arrive; observed by `<VictorHost/>` which re-renders on version bumps.
+ * ops arrive; observed by `<VictorHost/>` (app-level) and one `<WidgetView/>`
+ * per node (targeted) which re-render on the relevant version bump.
  */
 export class WidgetStore {
   private nodes = new Map<number, WidgetNode>();
   private rootId = 0;
   private toastMessage: string | null = null;
+
+  // App-level observation (root/toast).
   private ver = 0;
   private listeners = new Set<ChangeListener>();
+  private appDirty = false;
 
-  // ---- observation ------------------------------------------------------
+  // Per-node observation (targeted patching).
+  private revs = new Map<number, number>();
+  private nodeListeners = new Map<number, Set<ChangeListener>>();
+  private dirty = new Set<number>();
+
+  // ---- app-level observation -------------------------------------------
   subscribe(fn: ChangeListener): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
-  /** Monotonic version — cheap identity for React's useSyncExternalStore. */
+  /** Monotonic app-level version — bumps only on root/toast changes. */
   version(): number {
     return this.ver;
   }
 
-  /** Coalesced notify: callers batch a burst of ops then `flush()` once. */
+  // ---- per-node observation --------------------------------------------
+  /** Subscribe to changes of a single node (used by its `<WidgetView/>`). */
+  subscribeNode(id: number, fn: ChangeListener): () => void {
+    let set = this.nodeListeners.get(id);
+    if (!set) {
+      set = new Set();
+      this.nodeListeners.set(id, set);
+    }
+    set.add(fn);
+    return () => {
+      const s = this.nodeListeners.get(id);
+      if (s) {
+        s.delete(fn);
+        if (s.size === 0) this.nodeListeners.delete(id);
+      }
+    };
+  }
+
+  /** A node's revision — a cheap identity for React's `useSyncExternalStore`. */
+  nodeVersion(id: number): number {
+    return this.revs.get(id) ?? 0;
+  }
+
+  /** Mark a node as needing a re-render on the next flush. */
+  private markDirty(id: number): void {
+    if (id) this.dirty.add(id);
+  }
+
+  /**
+   * Coalesced notify: the dispatcher applies a burst of ops then calls `flush()`
+   * once per frame. We bump the revision of each touched node and notify only
+   * its subscribers; the app-level listeners fire only when root/toast changed.
+   */
   flush(): void {
-    this.ver++;
-    for (const fn of this.listeners) fn();
+    if (this.dirty.size) {
+      const touched = [...this.dirty];
+      this.dirty.clear();
+      for (const id of touched) {
+        this.revs.set(id, (this.revs.get(id) ?? 0) + 1);
+        const set = this.nodeListeners.get(id);
+        if (set) for (const fn of set) fn();
+      }
+    }
+    if (this.appDirty) {
+      this.appDirty = false;
+      this.ver++;
+      for (const fn of this.listeners) fn();
+    }
   }
 
   // ---- reads (renderer side) -------------------------------------------
@@ -89,13 +153,17 @@ export class WidgetStore {
 
   setProp(id: number, key: string, value: Wire): void {
     const n = this.nodes.get(id);
-    if (n) n.props[key] = value;
+    if (n) {
+      n.props[key] = value;
+      this.markDirty(id);
+    }
   }
 
   setProps(id: number, map: Record<string, Wire>): void {
     const n = this.nodes.get(id);
     if (!n) return;
     for (const k of Object.keys(map)) n.props[k] = map[k];
+    this.markDirty(id);
   }
 
   addChild(parentId: number, childId: number, index?: number): void {
@@ -112,6 +180,9 @@ export class WidgetStore {
       p.children.splice(index, 0, childId);
     }
     c.parent = parentId;
+    // Only the parent's child-slot list changed — patch the parent, not the
+    // child subtree (its own revision is untouched, so it is reused as-is).
+    this.markDirty(parentId);
   }
 
   removeChild(parentId: number, childId: number): void {
@@ -121,6 +192,7 @@ export class WidgetStore {
     if (i >= 0) p.children.splice(i, 1);
     const c = this.nodes.get(childId);
     if (c && c.parent === parentId) c.parent = 0;
+    this.markDirty(parentId);
   }
 
   clearChildren(parentId: number): void {
@@ -131,16 +203,23 @@ export class WidgetStore {
       if (c) c.parent = 0;
     }
     p.children = [];
+    this.markDirty(parentId);
   }
 
   connect(id: number, event: string, cb: number): void {
     const n = this.nodes.get(id);
-    if (n) n.events[event] = cb;
+    if (n) {
+      n.events[event] = cb;
+      this.markDirty(id);
+    }
   }
 
   disconnect(id: number, event: string): void {
     const n = this.nodes.get(id);
-    if (n) delete n.events[event];
+    if (n) {
+      delete n.events[event];
+      this.markDirty(id);
+    }
   }
 
   /** Look up the callback bound to (widget, event), or 0 if none. */
@@ -155,15 +234,22 @@ export class WidgetStore {
     // Recursively drop the subtree so handles don't leak.
     for (const cid of [...n.children]) this.free(cid);
     this.nodes.delete(id);
-    if (this.rootId === id) this.rootId = 0;
+    this.revs.delete(id);
+    if (this.rootId === id) {
+      this.rootId = 0;
+      this.appDirty = true;
+    }
   }
 
   setRoot(id: number): void {
+    if (this.rootId === id) return;
     this.rootId = id;
+    this.appDirty = true;
   }
 
   toast(message: string): void {
     this.toastMessage = message;
+    this.appDirty = true;
   }
 
   /** Is `id` a live widget contained in the subtree rooted at `sandbox`? */

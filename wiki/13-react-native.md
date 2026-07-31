@@ -89,12 +89,82 @@ Same wire shape as the Godot op protocol so the manager's namespacing applies:
 { ref: id, free: id }                                    drop a widget
 ```
 
-Widget classes the renderer maps (`src/render/renderNode.tsx`): `RNView`
-(+ `direction` for row/column), `RNScroll`, `RNText`, `RNButton`, `RNInput`,
-`RNImage`, `RNSwitch`, `RNActivityIndicator`, `RNScene3D`. Events surface as
-`press`, `changeText`, `submit`, `valueChange` — routed back through
+### Complete component coverage (by construction)
+
+The renderer does **not** hard-code a per-widget `switch`. It resolves the host
+class **reflectively** against the *entire* React Native component surface — the
+same "complete by construction" principle as the Godot ClassDB bridge (`05`) and
+the Skia bridge (`08`):
+
+- `src/render/rnComponents.ts` — framework-agnostic metadata naming **every**
+  React Native element and its render `kind` (Node-testable; no `react-native`
+  import). `test/components.test.ts` asserts the whole set is present, so the
+  renderer can never fall behind React Native's component list.
+- `src/render/components.ts` — `componentFor(name)` resolves each name to the
+  real `react-native` component (including `Animated.*`), degrading gracefully
+  to a `View`/`Text` fallback for a component absent on the current platform
+  (e.g. `DrawerLayoutAndroid` on web). `registerComponent(name, Component)` is
+  the open extension point for community/custom widgets
+  (`@react-native-community/slider`, `react-native-webview`, `react-native-maps`, …).
+- `src/render/renderNode.tsx` — a generic builder: it passes **every** prop the
+  guest set through by name, translates the convenience/style keys into a
+  `style` object (any RN style property is expressible via `style={{…}}`), and
+  reconstructs **every** connected event as its `on<Event>` handler. So any RN
+  prop and any event work, not a curated few.
+
+Elements covered: the containers (`View`/`SafeAreaView`/`KeyboardAvoidingView`/
+`Modal`/`Pressable`/`Touchable*`/`InputAccessoryView`/`DrawerLayoutAndroid`), the
+scrollers/lists (`ScrollView`/`FlatList`/`SectionList`/`VirtualizedList`/
+`VirtualizedSectionList`), the leaves (`Text`/`TextInput`/`Image`/
+`ImageBackground`/`Switch`/`Button`/`ActivityIndicator`/`StatusBar`/
+`RefreshControl`), the whole `Animated.*` family, plus the Victor widgets
+`RNScene3D` (embedded Godot) and the ergonomic `RNButton`. Virtualized lists
+render the node's retained children as their data set, so you build a list by
+`add()`-ing children like any other container. The legacy `RN`-prefixed class
+names (`RNView`, `RNText`, …) remain as aliases. Events surface as `press`,
+`changeText`, `valueChange`, `submitEditing`, `scroll`, … — routed back through
 `__godotDispatch`, the same callback path the Godot host uses, so they are
 multi-VM-correct.
+
+### Efficient patching — one widget re-renders, never the page
+
+The tree is **retained**, and updates are **targeted**, not whole-tree
+re-renders. The store (`src/core/widgetStore.ts`) keeps a **per-node revision**
+and a per-node subscriber set; each op marks only the node(s) it touched dirty,
+and `flush()` (once per frame) bumps just those revisions and notifies just
+their subscribers. Each widget is its own `React.memo`'d `<WidgetView/>` that
+subscribes (`useSyncExternalStore`) to only its node's revision, so:
+
+- patching one prop re-renders **that one widget** — siblings, ancestors and the
+  app root are untouched (their revisions never changed, and memo bails out);
+- a child-list edit dirties **only the parent**, which re-renders its child
+  slots while every unaffected subtree is reused as-is;
+- a burst of writes in one frame coalesces into a **single** re-render per node.
+
+The app-level `version` bumps only for root-swap / toast. `test/patching.test.ts`
+asserts all of this (a leaf change bumps only its node; a structural edit bumps
+only the parent; writes coalesce) directly against the store, framework-free.
+
+## Mini-app management (the installable package)
+
+`victor-react-native` publishes as an npm/Expo package whose headline API is a
+**mini-app manager**: `<VictorMiniApps width height apps=[…]/>` hosts a set of
+Elpian programs, each rendering its own React Native tree (with optional embedded
+Godot 3D), reconciled by `id`. `VictorEngine.load(wasmBytes)` compiles the VM
+module once; each mini app is a fresh **isolated instance** (`createRuntime()` →
+`ElpianRuntime` over `WasmBackend.fromModule`).
+
+Why one instance per mini app rather than one shared instance with a VM subtree
+each: the `js2elpian` front-end keeps **process-global compile-time state**, so
+two *independently-compiled* programs in the same wasm instance corrupt each
+other (a later compile breaks an earlier program's `invoke`-by-name — verified).
+Separate instances share the compiled `WebAssembly.Module` (cheap synchronous
+`new WebAssembly.Instance`) but get their own memory and globals, which is both
+correct and the strongest sandbox — a mini app literally cannot address another's
+memory. (A single-instance multi-VM-subtree mode becomes possible if the
+front-end's interning is made per-compilation or stable append-only.)
+`test/miniapps.test.ts` boots two mini apps from one module and asserts isolation
+end-to-end on the real VM.
 
 ## Gotchas (learned here)
 
@@ -115,8 +185,10 @@ multi-VM-correct.
 
 Verified end-to-end today (`test/wasm.test.ts` runs the real VM wasm): guest
 boot, widget mount, embedded 3D ops, and an event → guest logic → prop update
-round-trip. The declarative `h()` layer in `reactnative.js` diffs a description
-tree; wiring VReact (`08-vreact.md`) onto the `rn.op` backend so the full React
-hook model targets React Native components is the natural next step. Native
+round-trip. Component coverage is the **entire** React Native element set by
+construction (`test/components.test.ts`), and updates are **targeted** — one
+widget re-renders per change, not the tree (`test/patching.test.ts`). The
+declarative `h()` layer in `reactnative.js` diffs a description tree. Native
 (iOS/Android/desktop) uses the documented JSI `VmBackend` + native Godot view
-seams; Expo web runs the real wasm now.
+seams; Expo web (via `react-native-web`) runs the real wasm now, which is also
+the web build target — one Expo codebase for native and web.

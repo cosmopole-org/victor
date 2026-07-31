@@ -7,7 +7,7 @@ import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-nat
 
 import { createWasmRuntime, VictorHost } from "./src/index.ts";
 import type { ElpianRuntime } from "./src/index.ts";
-import { EXAMPLE_GUEST_SOURCE } from "./src/example/guestSource.ts";
+import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
 
 export default function App(): React.ReactElement {
@@ -22,7 +22,7 @@ export default function App(): React.ReactElement {
         rt = await createWasmRuntime(bytes, {
           onLog: (line) => console.log("[guest]", line),
         });
-        rt.start(EXAMPLE_GUEST_SOURCE, { lang: "js" });
+        rt.start(SHOWCASE_GUEST_SOURCE, { lang: "js" });
         setRuntime(rt);
       } catch (e) {
         setError(String(e));

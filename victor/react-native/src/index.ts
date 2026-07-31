@@ -26,9 +26,28 @@ export {
 } from "./vm/backend.ts";
 export { ElpianRuntime, type RuntimeOptions } from "./vm/runtime.ts";
 
+// Mini-app management — run many isolated Elpian mini apps in one shared VM
+// instance, each rendering its own React Native tree.
+export { VictorEngine } from "./miniapps/engine.ts";
+export {
+  VictorMiniApps,
+  type VictorMiniAppsProps,
+  type MiniAppDef,
+  type MiniAppsLayout,
+} from "./miniapps/VictorMiniApps.tsx";
+
 export { VictorHost, type VictorHostProps } from "./render/VictorHost.tsx";
-export { renderNode, type RenderContext } from "./render/renderNode.tsx";
-export { toStyle } from "./render/style.ts";
+export { renderNode, WidgetView, type RenderContext } from "./render/renderNode.tsx";
+export { toStyle, STYLE_KEYS } from "./render/style.ts";
+export { componentFor, registerComponent } from "./render/components.ts";
+export {
+  RN_COMPONENTS,
+  RN_ALIASES,
+  specFor,
+  canonicalName,
+  type ComponentSpec,
+  type WidgetKind,
+} from "./render/rnComponents.ts";
 
 import { WasmBackend, type HostCall } from "./vm/backend.ts";
 import { ElpianRuntime, type RuntimeOptions } from "./vm/runtime.ts";

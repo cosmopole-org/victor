@@ -4,7 +4,7 @@
 // back into the VM. This is the React Native analogue of the Godot `ElpianVM`
 // node: the VM owns all logic; this component only presents it.
 
-import React, { useSyncExternalStore } from "react";
+import React, { useMemo, useSyncExternalStore } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import type { ElpianRuntime } from "../vm/runtime.ts";
@@ -32,11 +32,18 @@ export function VictorHost(props: VictorHostProps): React.ReactElement {
   const root = store.root();
   const toast = store.takeToast();
 
-  const ctx: RenderContext = {
-    store,
-    engine,
-    fire: (id, event, arg) => runtime.fireEvent(id, event, arg),
-  };
+  // Stable across app-level re-renders so each memoized <WidgetView/> can bail
+  // out on {id, ctx} shallow-compare — the key to re-rendering only the widget
+  // that actually changed rather than the whole tree.
+  const ctx: RenderContext = useMemo(
+    () => ({
+      store,
+      engine,
+      fire: (id: number, event: string, arg?: unknown) =>
+        runtime.fireEvent(id, event, arg),
+    }),
+    [store, engine, runtime],
+  );
 
   return (
     <View style={styles.root}>

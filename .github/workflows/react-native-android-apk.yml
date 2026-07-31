@@ -1,0 +1,115 @@
+# Build the Victor **React Native (2D) + Godot (3D)** demo as an installable
+# Android APK and commit it to the repository root as
+# `elpian-react-native-demo.apk`.
+#
+# The app is the Expo host in `victor/react-native/` running the rich showcase
+# guest (`assets/guest/showcase.js`): a React Native widget tree whose 2D
+# controls drive an embedded Godot `Scene3D`, all on the Elpian VM.
+#
+# Pipeline: install deps -> `expo prebuild` (Continuous Native Generation emits
+# the android/ Gradle project from app.json) -> `gradlew assembleDebug` (the
+# debug variant is signed with Android's auto debug keystore, so the APK
+# installs without managing a keystore) -> copy to the repo root and commit it
+# back to the triggering branch ([skip ci] guards the loop).
+#
+# NOTE ON ON-DEVICE RUNTIME: React Native's Hermes engine has no WebAssembly, so
+# this APK boots the RN shell but shows the graceful "VM backend not installed"
+# screen until the native JSI `VmBackend` + native Godot view seams
+# (documented in the package README) are filled in. Expo **web** already runs
+# the real VM `.wasm`. This workflow exists to produce the installable native
+# shell and keep it building.
+
+name: React Native Android APK
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "victor/react-native/**"
+      - "victor/bridge/prelude/reactnative.js"
+      - ".github/workflows/react-native-android-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rn-android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      EXPO_NO_TELEMETRY: "1"
+    defaults:
+      run:
+        working-directory: victor/react-native
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Host sanity — pure TS + coverage + patching suites
+        run: |
+          node --experimental-strip-types test/host.test.ts
+          node --experimental-strip-types test/style.test.ts
+          node --experimental-strip-types test/components.test.ts
+          node --experimental-strip-types test/patching.test.ts
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Prebuild the native Android project (CNG)
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Build the debug APK
+        working-directory: victor/react-native/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Collect the APK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build-rn"
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "$GITHUB_WORKSPACE/build-rn/elpian-react-native-demo.apk"
+          ls -la "$GITHUB_WORKSPACE/build-rn"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: elpian-react-native-demo-apk
+          path: build-rn/elpian-react-native-demo.apk
+
+      - name: Commit APK to repository root
+        working-directory: ${{ github.workspace }}
+        run: |
+          # Drop everything the prebuild/gradle build generated (android/, any
+          # touched lockfiles) so the tree is clean before committing just the
+          # APK — `git pull --rebase` refuses to run on a dirty tree.
+          git checkout -- . || true
+          git clean -fdq victor/react-native/android victor/react-native/node_modules || true
+          cp build-rn/elpian-react-native-demo.apk ./elpian-react-native-demo.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add elpian-react-native-demo.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged; nothing to commit."
+            exit 0
+          fi
+          git commit -m "ci: update React Native demo APK [skip ci]"
+          git pull --rebase origin "${{ github.ref_name }}"
+          git push origin "HEAD:${{ github.ref_name }}"
