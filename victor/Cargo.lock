@@ -44,6 +44,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "elpian-rn"
+version = "0.1.0"
+dependencies = [
+ "elpian-godot-capi",
+ "serde_json",
+]
+
+[[package]]
 name = "elpian-vm"
 version = "0.1.0"
 dependencies = [

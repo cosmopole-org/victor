@@ -1,0 +1,20 @@
+[package]
+name = "elpian-rn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bridge that runs the Elpian VM multi-VM tree under a React Native / Expo host. Reuses elpian-godot-capi's VmManager unchanged (multi-VM hierarchy, capabilities, resource limits) and exposes a wasm32 surface whose single host-call seam is serviced by the JavaScript host. No JIT: the VM stays a pausing bytecode interpreter, so the same binary is App-Store-legal and runs on the web."
+
+[lib]
+name = "elpian_rn"
+# cdylib -> a .wasm module for the RN/Expo host; rlib -> host-side Rust tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The whole multi-VM manager (spawn / pause / resume / terminate, per-VM
+# capabilities + resource limits, sandboxed handle namespacing) is reused as-is
+# from the Godot C-ABI crate. The React Native host services the same op
+# protocol the C++ GodotController does, only against a widget/Scene3d object
+# model instead of ClassDB.
+elpian-godot-capi = { path = "../../../bridge/capi" }
+serde_json = "1.0"

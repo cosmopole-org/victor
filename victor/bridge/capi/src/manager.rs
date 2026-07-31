@@ -456,6 +456,31 @@ impl HookEnv {
                 }
                 self.shared.forward("flutter.batch", &[ops])
             }
+            // The React Native UI seam is the third twin of the Godot seam: an
+            // `rn.op`/`rn.batch` op array crosses to the JavaScript host, which
+            // drives a real React Native / Expo widget tree (2D) and embedded
+            // Godot `Scene3D` worlds (3D). It speaks the identical wire
+            // vocabulary — `{"ref": id}` handles, `"cb"` callback ids — so the
+            // same `sanitize_op` applies: handles/callables are namespaced into
+            // the calling VM's id space and the op is stamped with the VM's
+            // sandbox root (`__sbx`). A sandboxed child VM can therefore only
+            // touch widgets inside its own assigned subtree, exactly as for
+            // native Godot nodes, and widget events route back to the owning VM.
+            "rn.op" => {
+                let mut op = args.first().cloned().unwrap_or(Value::Null);
+                sanitize_op(&mut op, self.vm, self.shared.sandbox_of(self.vm));
+                self.shared.forward("rn.op", &[op])
+            }
+            "rn.batch" => {
+                let mut ops = args.first().cloned().unwrap_or(Value::Null);
+                let sandbox = self.shared.sandbox_of(self.vm);
+                if let Value::Array(list) = &mut ops {
+                    for op in list {
+                        sanitize_op(op, self.vm, sandbox);
+                    }
+                }
+                self.shared.forward("rn.batch", &[ops])
+            }
             other => self.shared.forward(other, args),
         }
     }
