@@ -11,10 +11,17 @@
 # controls drive an embedded Godot `Scene3D`, all on the Elpian VM.
 #
 # Pipeline: install deps -> `expo prebuild` (Continuous Native Generation emits
-# the android/ Gradle project from app.json) -> `gradlew assembleDebug` (the
-# debug variant is signed with Android's auto debug keystore, so the APK
-# installs without managing a keystore) -> copy to the repo root and commit it
-# back to the triggering branch ([skip ci] guards the loop).
+# the android/ Gradle project from app.json) -> `gradlew assembleRelease` ->
+# copy to the repo root and commit it back to the triggering branch ([skip ci]
+# guards the loop).
+#
+# WHY RELEASE (not debug): a debug APK keeps React Native's dev support on and
+# loads `index.android.bundle` from a running Metro server over the network, so
+# a sideloaded debug APK shows the red "Unable to load script" screen with no
+# Metro reachable. The release variant embeds the JS bundle (Hermes bytecode)
+# and turns dev support off, so it runs standalone. The generated project signs
+# `release` with `signingConfigs.debug` (the auto-generated debug keystore), so
+# the APK still installs without managing any signing secret.
 #
 # NOTE ON ON-DEVICE RUNTIME: React Native's Hermes engine has no WebAssembly, so
 # this APK boots the RN shell but shows the graceful "VM backend not installed"
@@ -81,26 +88,28 @@ jobs:
       - name: Prebuild the native Android project (CNG)
         run: npx expo prebuild --platform android --no-install
 
-      - name: Build the debug APKs (one per ABI)
+      - name: Build the release APKs (one per ABI)
         working-directory: victor/react-native/android
-        # The withAbiSplits config plugin enables Gradle's per-ABI split, so
-        # assembleDebug emits one architecture-specific APK per ABI instead of
-        # a single ~118 MB universal APK that overflows GitHub's 100 MB limit.
-        run: ./gradlew assembleDebug --no-daemon
+        # Release embeds the JS bundle and disables dev support, so the APK runs
+        # without Metro; it is signed with the debug keystore so it still
+        # installs secret-free. The withAbiSplits config plugin enables Gradle's
+        # per-ABI split, so one architecture-specific APK is emitted per ABI
+        # instead of a single ~118 MB universal APK over GitHub's 100 MB limit.
+        run: ./gradlew assembleRelease --no-daemon
 
       - name: Collect the APKs
         run: |
           mkdir -p "$GITHUB_WORKSPACE/build-rn"
           shopt -s nullglob
           found=0
-          for apk in android/app/build/outputs/apk/debug/app-*-debug.apk; do
-            abi="$(basename "$apk" | sed -E 's/^app-(.+)-debug\.apk$/\1/')"
+          for apk in android/app/build/outputs/apk/release/app-*-release.apk; do
+            abi="$(basename "$apk" | sed -E 's/^app-(.+)-release\.apk$/\1/')"
             cp "$apk" "$GITHUB_WORKSPACE/build-rn/elpian-react-native-demo-${abi}.apk"
             found=1
           done
           if [ "$found" -ne 1 ]; then
-            echo "No per-ABI APKs found — did the ABI split get disabled?" >&2
-            ls -la android/app/build/outputs/apk/debug/ || true
+            echo "No per-ABI release APKs found — did the ABI split or signing get disabled?" >&2
+            ls -la android/app/build/outputs/apk/release/ || true
             exit 1
           fi
           ls -la "$GITHUB_WORKSPACE/build-rn"
