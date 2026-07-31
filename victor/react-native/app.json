@@ -20,6 +20,16 @@
       "adaptiveIcon": {
         "backgroundColor": "#0f172a"
       }
-    }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "1.9.25"
+          }
+        }
+      ]
+    ]
   }
 }
