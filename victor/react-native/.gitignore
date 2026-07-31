@@ -1,0 +1,13 @@
+# Expo / React Native
+node_modules/
+.expo/
+dist/
+web-build/
+*.log
+
+# The built VM module (produced by `npm run build:wasm`)
+web/elpian_rn.wasm
+elpian_rn.wasm
+
+# Native build artifacts
+native/elpian-rn/target/

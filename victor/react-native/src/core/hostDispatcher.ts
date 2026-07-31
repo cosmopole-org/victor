@@ -1,0 +1,241 @@
+// The host dispatcher — this host's answer to the C++ `GodotController`. It is
+// the single seam the wasm VM calls out to (`host_call`) and it interprets the
+// op protocol against two object models: the React Native widget tree
+// (`rn.op`) and the embedded Godot engine (`godot.op`). Governance is preserved
+// for free: the manager has already namespaced handles/callbacks and stamped
+// each op with the caller's sandbox root (`__sbx`), so we simply honor it.
+//
+// Framework-agnostic (no `react-native` import) → unit-testable under Node.
+
+import {
+  isCb,
+  isRef,
+  type Op,
+  type Wire,
+  wireError,
+} from "./protocol.ts";
+import { WidgetStore } from "./widgetStore.ts";
+import type { Scene3dEngine } from "./scene3dEngine.ts";
+
+/** Called to push a guest function invocation back into the VM. */
+export type InvokeSink = (fnName: string, argJson: string) => void;
+
+export class HostDispatcher {
+  readonly store = new WidgetStore();
+  readonly log: string[] = [];
+  private engine: Scene3dEngine;
+  private invokeSink: InvokeSink = () => {};
+  /** Overridable commit strategy — the runtime debounces to one flush/frame. */
+  commit: () => void;
+
+  constructor(engine: Scene3dEngine) {
+    this.engine = engine;
+    this.commit = () => this.store.flush();
+  }
+
+  setInvokeSink(fn: InvokeSink): void {
+    this.invokeSink = fn;
+  }
+
+  // --- the wasm host_call contract: (name, argsJson) -> replyJson | null ---
+  handle(name: string, argsJson: string): string | null {
+    let args: Wire[];
+    try {
+      args = JSON.parse(argsJson) as Wire[];
+    } catch {
+      return null;
+    }
+    switch (name) {
+      case "log": {
+        this.log.push(String(args[0] ?? ""));
+        return null;
+      }
+      case "rn.op": {
+        const r = this.execRn(args[0] as Op);
+        this.commit();
+        return r === null || r === undefined ? null : JSON.stringify(r);
+      }
+      case "rn.batch": {
+        const ops = (args[0] as Op[]) ?? [];
+        const results = ops.map((o) => this.execRn(o));
+        this.commit();
+        return JSON.stringify(results);
+      }
+      case "godot.op": {
+        const r = this.execGodot(args[0] as Op);
+        return r === null || r === undefined ? null : JSON.stringify(r);
+      }
+      case "godot.batch": {
+        const ops = (args[0] as Op[]) ?? [];
+        const results = ops.map((o) => this.execGodot(o));
+        return JSON.stringify(results);
+      }
+      default:
+        return null;
+    }
+  }
+
+  // --- widget-tree op interpreter ---------------------------------------
+  private execRn(op: Op): Wire {
+    if (!op || typeof op !== "object") return null;
+    const sbx = op.__sbx ?? 0;
+
+    if (op.chk !== undefined) return this.store.containedIn(op.chk, sbx);
+    if (op.grant !== undefined) return this.store.addOwner(op.grant, op.sbx ?? 0);
+
+    if (op.new !== undefined && op.def !== undefined) {
+      this.store.create(op.def, op.new, sbx);
+      return op.def;
+    }
+    if (op.self === true) {
+      // A sandboxed VM's "self" is its assigned root widget; the root VM has no
+      // single widget self (it mounts one via `root`).
+      return sbx ? { ref: sbx } : null;
+    }
+    if (op.root !== undefined) {
+      // The mounted handle rides on `ref` (namespaced by the manager); older
+      // callers that put the id directly on `root` are still honored.
+      const rid =
+        op.ref !== undefined
+          ? op.ref
+          : typeof op.root === "number"
+            ? op.root
+            : 0;
+      if (rid) this.store.setRoot(rid);
+      return null;
+    }
+    if (op.toast !== undefined) {
+      this.store.toast(op.toast);
+      return null;
+    }
+
+    if (op.ref !== undefined) {
+      const ref = op.ref;
+      if (!this.reachable(ref, sbx)) {
+        return wireError(`rn.op: widget ${ref} is outside this VM's sandbox`);
+      }
+      if (op.set !== undefined) {
+        this.store.setProp(ref, op.set, this.unwrap(op.value));
+        return null;
+      }
+      if (op.props !== undefined) {
+        this.applyProps(ref, op.props);
+        return null;
+      }
+      if (op.get !== undefined) {
+        return this.store.get(ref)?.props[op.get] ?? null;
+      }
+      if (op.connect !== undefined && op.cb !== undefined) {
+        this.store.connect(ref, op.connect, op.cb);
+        return null;
+      }
+      if (op.disconnect !== undefined) {
+        this.store.disconnect(ref, op.disconnect);
+        return null;
+      }
+      if (op.free !== undefined) {
+        this.store.free(ref);
+        return null;
+      }
+      if (op.method !== undefined) {
+        return this.execMethod(ref, op.method, op.args ?? []);
+      }
+    }
+    return null;
+  }
+
+  private execMethod(ref: number, method: string, args: Wire[]): Wire {
+    switch (method) {
+      case "add_child": {
+        const child = childId(args[0]);
+        if (child) this.store.addChild(ref, child);
+        return null;
+      }
+      case "insert_child": {
+        const child = childId(args[0]);
+        const index = typeof args[1] === "number" ? args[1] : undefined;
+        if (child) this.store.addChild(ref, child, index);
+        return null;
+      }
+      case "remove_child": {
+        const child = childId(args[0]);
+        if (child) this.store.removeChild(ref, child);
+        return null;
+      }
+      case "clear_children": {
+        this.store.clearChildren(ref);
+        return null;
+      }
+      case "scene3d_mount": {
+        // The guest allocated the Godot mount-node handle and passed it in;
+        // bind the surface to it and register it as a 3D node so later
+        // godot.op calls on the same handle resolve.
+        const mountNode = childId(args[0]);
+        this.engine.mountSurface(ref, mountNode);
+        return null;
+      }
+      default:
+        return null;
+    }
+  }
+
+  // Props that are event callbacks (`onPress: {cb}`) register as events; the
+  // rest are stored verbatim for the renderer.
+  private applyProps(ref: number, props: Record<string, Wire>): void {
+    for (const key of Object.keys(props)) {
+      const value = props[key];
+      if (key.length > 2 && key.startsWith("on") && isCb(value)) {
+        this.store.connect(ref, eventName(key), value.cb);
+      } else {
+        this.store.setProp(ref, key, this.unwrap(value));
+      }
+    }
+  }
+
+  private unwrap(v: Wire | undefined): Wire {
+    return v === undefined ? null : v;
+  }
+
+  private reachable(ref: number, sbx: number): boolean {
+    if (sbx === 0) return true;
+    if (this.store.containedIn(ref, sbx)) return true;
+    return this.store.get(ref)?.owners.includes(sbx) ?? false;
+  }
+
+  // --- 3D op interpreter (forward to the embedded Godot engine) ----------
+  private execGodot(op: Op): Wire {
+    if (!op || typeof op !== "object") return null;
+    const sbx = op.__sbx ?? 0;
+    // Sandbox probes may target a widget (a 2D child VM's assigned node) or a
+    // 3D node; resolve against the widget tree first, else the engine.
+    if (op.chk !== undefined) {
+      if (this.store.has(op.chk)) return this.store.containedIn(op.chk, sbx);
+      return this.engine.op(op);
+    }
+    if (op.grant !== undefined) {
+      if (this.store.has(op.grant)) return this.store.addOwner(op.grant, op.sbx ?? 0);
+      return this.engine.op(op);
+    }
+    return this.engine.op(op);
+  }
+
+  // --- event delivery (renderer -> VM) -----------------------------------
+  /** Fire a widget event: route it to the owning VM's guest closure. */
+  fireEvent(widgetId: number, event: string, arg: Wire): void {
+    const cb = this.store.callbackFor(widgetId, event);
+    if (!cb) return;
+    // Mirror the Godot signal path: __godotDispatch([cbId, arg]) — the manager
+    // decodes the namespaced cb id and routes to the VM that owns it.
+    this.invokeSink("__godotDispatch", JSON.stringify([cb, arg ?? null]));
+  }
+}
+
+function childId(v: Wire): number {
+  return isRef(v) ? v.ref : typeof v === "number" ? v : 0;
+}
+
+/** "onChangeText" -> "changeText", "onPress" -> "press". */
+function eventName(onName: string): string {
+  const rest = onName.slice(2);
+  return rest.slice(0, 1).toLowerCase() + rest.slice(1);
+}

@@ -50,6 +50,7 @@ code, the same program is legal on iOS and runs on the web.
 | [`10-building-and-ci.md`](10-building-and-ci.md) | Build the extension for each target and understand the CI workflows (Android APK, web/Pages, real-Flutter). |
 | [`11-recipes.md`](11-recipes.md) | Copy working patterns: a 2D app, a 3D scene, a mixed 2D/3D app, a game loop, a multi-VM app. |
 | [`12-gotchas.md`](12-gotchas.md) | **The mistakes to never make.** Read this before writing code. |
+| [`13-react-native.md`](13-react-native.md) | Run Victor as a **React Native / Expo** app — the VM drives a real 2D React Native widget tree with embedded 3D Godot `Scene3D` widgets, keeping the multi-VM governance. |
 
 ## How an agent should use this skill
 

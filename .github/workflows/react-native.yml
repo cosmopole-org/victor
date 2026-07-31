@@ -1,0 +1,76 @@
+# CI for the React Native / Expo host (victor/react-native).
+#
+# Three cheap gates, no emulator required:
+#   1. Rust: compile + run the prelude→VM→rn.op pipeline tests (native).
+#   2. Rust: build the VM to wasm32 (the artifact the host actually loads).
+#   3. Host: run the pure-TS suites AND the real-VM wasm end-to-end test
+#      (Node's --experimental-strip-types runs the .ts directly, no bundler).
+#
+# The wasm end-to-end test drives the module built in step 2 through the real
+# reactnative.js prelude and the real host dispatcher.
+
+name: React Native host
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "victor/elpian-vm/**"
+      - "victor/js2elpian/**"
+      - "victor/dart/**"
+      - "victor/bridge/capi/**"
+      - "victor/bridge/prelude/reactnative.js"
+      - "victor/react-native/**"
+      - ".github/workflows/react-native.yml"
+  pull_request:
+    paths:
+      - "victor/bridge/capi/**"
+      - "victor/bridge/prelude/reactnative.js"
+      - "victor/react-native/**"
+      - ".github/workflows/react-native.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: victor
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (with wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: victor
+
+      - name: Rust — pipeline tests (prelude → VM → rn.op)
+        run: cargo test -p elpian-rn --test pipeline
+
+      - name: Rust — build the VM to WebAssembly
+        run: |
+          cargo build -p elpian-rn --target wasm32-unknown-unknown --release
+          mkdir -p react-native/web
+          cp target/wasm32-unknown-unknown/release/elpian_rn.wasm react-native/web/elpian_rn.wasm
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Host — pure TS suites
+        working-directory: victor/react-native
+        run: |
+          node --experimental-strip-types test/host.test.ts
+          node --experimental-strip-types test/style.test.ts
+
+      - name: Host — real-VM wasm end-to-end
+        working-directory: victor/react-native
+        run: node --experimental-strip-types test/wasm.test.ts

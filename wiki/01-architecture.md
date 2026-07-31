@@ -115,9 +115,9 @@ victor/
 wiki/                you are here
 ```
 
-## The two UI stories (choose deliberately)
+## The three UI stories (choose deliberately)
 
-Victor has two ways to render UI, and they are NOT the same:
+Victor has three ways to render UI, and they are NOT the same:
 
 1. **Native (VUI / VReact / raw Godot Controls).** Renders directly on Godot
    `Control` nodes. **Works on every target** (desktop, Android, web) with no
@@ -129,9 +129,18 @@ Victor has two ways to render UI, and they are NOT the same:
    export), and **hard on Android** (needs a from-source engine build). The `FL`
    API degrades to VUI when the engine is absent. See `07-flutter-bridge.md`.
 
+3. **React Native / Expo (the `RN` bridge).** The VM drives a **real React
+   Native widget tree** for 2D and keeps **Godot** for 3D as an embedded
+   `Scene3D` widget — the Godot host inverted. A Victor app becomes a
+   cross-platform (mobile/desktop/web) React Native app with all of Godot's 3D.
+   The same multi-VM manager runs in `elpian_rn.wasm`, so governance is
+   identical. See `13-react-native.md` and `victor/react-native/`.
+
 **Rule of thumb:** for something you want to ship on Android/web today, use VUI
 or VReact. Use `FL` only if you specifically need the real Flutter framework and
-you control the build. The canvas + event surfaces are available on both.
+you control the build. Use the `RN` bridge to ship a Victor app as a React
+Native / Expo app while keeping Godot for 3D. The canvas + event surfaces are
+available on the native stories.
 
 ## Where to go next
 
