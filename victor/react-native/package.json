@@ -69,6 +69,7 @@
     }
   },
   "dependencies": {
+    "expo-asset": "~11.0.5",
     "expo-status-bar": "~2.0.0"
   },
   "devDependencies": {
