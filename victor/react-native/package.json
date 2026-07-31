@@ -1,27 +1,83 @@
 {
   "name": "victor-react-native",
   "version": "0.1.0",
-  "description": "React Native / Expo host for the Victor engine: the Elpian VM drives a cross-platform 2D React Native widget tree with embedded 3D Godot Scene3D worlds.",
+  "description": "Run the Elpian VM as a cross-platform Expo engine: a mini-app management system that hosts many isolated Elpian JS programs, each rendering its own React Native (2D) widget tree with embedded Godot (3D) Scene3D worlds — no JIT, App-Store-legal, web + native.",
   "license": "BSD-3-Clause",
+  "keywords": [
+    "expo",
+    "react-native",
+    "elpian",
+    "godot",
+    "mini-apps",
+    "sandbox",
+    "vm",
+    "cross-platform",
+    "no-jit"
+  ],
+  "homepage": "https://github.com/cosmopole-org/victor/tree/main/victor/react-native",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cosmopole-org/victor.git",
+    "directory": "victor/react-native"
+  },
   "main": "index.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "react-native": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./wasm": "./web/elpian_rn.wasm",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "assets/guest",
+    "web/elpian_rn.wasm",
+    "README.md",
+    "app.json",
+    "metro.config.js",
+    "babel.config.js",
+    "index.js",
+    "App.tsx"
+  ],
+  "sideEffects": [
+    "./index.js",
+    "./App.tsx"
+  ],
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test:host": "node --experimental-strip-types test/host.test.ts && node --experimental-strip-types test/style.test.ts",
-    "build:wasm": "cd ../ && cargo build -p elpian-rn --target wasm32-unknown-unknown --release && cp target/wasm32-unknown-unknown/release/elpian_rn.wasm react-native/web/elpian_rn.wasm"
+    "test": "node --experimental-strip-types test/host.test.ts && node --experimental-strip-types test/style.test.ts && node --experimental-strip-types test/components.test.ts && node --experimental-strip-types test/patching.test.ts",
+    "test:wasm": "node --experimental-strip-types test/miniapps.test.ts && node --experimental-strip-types test/wasm.test.ts",
+    "build:wasm": "cd ../ && cargo build -p elpian-rn --target wasm32-unknown-unknown --release && cp target/wasm32-unknown-unknown/release/elpian_rn.wasm react-native/web/elpian_rn.wasm",
+    "prepack": "npm run build:wasm"
+  },
+  "peerDependencies": {
+    "expo": ">=51",
+    "react": ">=18",
+    "react-native": ">=0.74"
+  },
+  "peerDependenciesMeta": {
+    "expo": {
+      "optional": true
+    }
   },
   "dependencies": {
-    "expo": "~52.0.0",
-    "expo-status-bar": "~2.0.0",
-    "react": "18.3.1",
-    "react-native": "0.76.3"
+    "expo-status-bar": "~2.0.0"
   },
   "devDependencies": {
+    "expo": "~52.0.0",
+    "react": "18.3.1",
+    "react-native": "0.76.3",
     "@types/react": "~18.3.12",
     "typescript": "~5.6.3"
   },
-  "private": true
+  "publishConfig": {
+    "access": "public"
+  }
 }

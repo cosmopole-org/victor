@@ -145,6 +145,27 @@ The app-level `version` bumps only for root-swap / toast. `test/patching.test.ts
 asserts all of this (a leaf change bumps only its node; a structural edit bumps
 only the parent; writes coalesce) directly against the store, framework-free.
 
+## Mini-app management (the installable package)
+
+`victor-react-native` publishes as an npm/Expo package whose headline API is a
+**mini-app manager**: `<VictorMiniApps width height apps=[…]/>` hosts a set of
+Elpian programs, each rendering its own React Native tree (with optional embedded
+Godot 3D), reconciled by `id`. `VictorEngine.load(wasmBytes)` compiles the VM
+module once; each mini app is a fresh **isolated instance** (`createRuntime()` →
+`ElpianRuntime` over `WasmBackend.fromModule`).
+
+Why one instance per mini app rather than one shared instance with a VM subtree
+each: the `js2elpian` front-end keeps **process-global compile-time state**, so
+two *independently-compiled* programs in the same wasm instance corrupt each
+other (a later compile breaks an earlier program's `invoke`-by-name — verified).
+Separate instances share the compiled `WebAssembly.Module` (cheap synchronous
+`new WebAssembly.Instance`) but get their own memory and globals, which is both
+correct and the strongest sandbox — a mini app literally cannot address another's
+memory. (A single-instance multi-VM-subtree mode becomes possible if the
+front-end's interning is made per-compilation or stable append-only.)
+`test/miniapps.test.ts` boots two mini apps from one module and asserts isolation
+end-to-end on the real VM.
+
 ## Gotchas (learned here)
 
 - **String indexing is `charAt`, not `s[i]`.** In the `js2elpian` subset

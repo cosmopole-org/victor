@@ -18,6 +18,101 @@ and Godot is a widget in it.**
   (View/Text/Pressable/…)                        (Camera/Lights/Meshes/Physics)
 ```
 
+## Install (as a package) & run mini apps
+
+Add it to any Expo / React Native project and use it as a **mini-app management
+system**: a sized view into which you drop mini apps, each defined by its own
+Elpian-based JS program. Victor runs every mini app as its own **isolated VM**
+(separate instance — separate memory and globals) rendering its own React Native
+tree, and reconciles them by `id` (add boots a VM, remove frees it, changing a
+program restarts just that one).
+
+```sh
+npm install victor-react-native
+# peers you already have in an Expo app: expo, react, react-native
+```
+
+```tsx
+import { VictorMiniApps } from "victor-react-native";
+
+// The VM module (elpian_rn.wasm) as bytes. On web, fetch the shipped asset;
+// pass whatever returns an ArrayBuffer for your platform.
+const loadWasm = () =>
+  fetch(require("victor-react-native/wasm")).then((r) => r.arrayBuffer());
+
+const clock = `
+  import 'reactnative.js';
+  var t = null; var n = 0;
+  function tick(){ n = n + 1; t.set("text", "tick " + n); }
+  function main(){
+    var c = RN.column({ flex:1, bg:"#0b1220", padding:16, justify:"center" });
+    t = RN.text("tick 0", { color:"#38bdf8", fontSize:28, textAlign:"center" });
+    c.add(t);
+    c.add(RN.button({ title:"+1", onPress: function(e){ tick(); } }));
+    RN.mount(c);
+  }
+  main();
+`;
+
+const counter = `
+  import 'reactnative.js';
+  var n = 0; var label = null;
+  function main(){
+    var c = RN.column({ flex:1, bg:"#111827", padding:16, gap:8, justify:"center" });
+    label = RN.text("count: 0", { color:"#e2e8f0", fontSize:22, textAlign:"center" });
+    c.add(label);
+    c.add(RN.row({ gap:8 }));
+    c.add(RN.button({ title:"increment", onPress: function(e){ n = n + 1; label.set("text","count: "+n); } }));
+    RN.mount(c);
+  }
+  main();
+`;
+
+export function MiniAppBoard() {
+  return (
+    <VictorMiniApps
+      width="100%"
+      height={480}
+      wasm={loadWasm}          // or engine={preloadedVictorEngine}
+      layout="grid"
+      columns={2}
+      gap={8}
+      apps={[
+        { id: "clock",   source: clock },
+        { id: "counter", source: counter },
+      ]}
+      onLog={(appId, line) => console.log(appId, line)}
+    />
+  );
+}
+```
+
+Each mini app's program is ordinary JavaScript compiled by `js2elpian` and run
+on the VM (see “Writing a guest” below and `assets/guest/showcase.js` for a rich
+one that also embeds a Godot 3D scene). Mini apps are isolated by construction: a
+separate VM instance per app means one mini app can neither read nor touch
+another's state or widgets. `layout` is `"column" | "row" | "grid" | "stack"`;
+per-app `width`/`height`/`flex` override the cell size.
+
+Lower-level control (one embedded mini app, manual lifecycle):
+
+```tsx
+import { VictorEngine, VictorHost } from "victor-react-native";
+
+const engine = await VictorEngine.load(await loadWasm()); // compile once
+const app = engine.createRuntime({ onLog: console.log });
+app.start(source, { lang: "js" });
+// render: <VictorHost runtime={app} />
+// later:  app.stop();   // frees just this mini app's VM
+```
+
+> Import resolution uses the package `exports` map (`.` → the TypeScript
+> library entry), so consumers get the library, while this repo's own Expo demo
+> still boots from `index.js`. React Native 0.74+/Expo 51+ honor package
+> exports. **On-device note:** Hermes has no WebAssembly, so today mini apps run
+> live on **Expo web**; the native JSI `VmBackend` seam is where a device
+> runtime plugs in (see “Platform notes”).
+
 ## Complete coverage + efficient patching
 
 - **Every React Native element, by construction.** The renderer has no

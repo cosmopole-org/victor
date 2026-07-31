@@ -103,6 +103,40 @@ export class WasmBackend implements VmBackend {
     return new WasmBackend(ex);
   }
 
+  /**
+   * Instantiate from an already-**compiled** `WebAssembly.Module`, synchronously.
+   * Compiling once (`WebAssembly.compile`) and instantiating per call shares the
+   * compiled code across instances while giving each its own linear memory / VM
+   * state — the isolation the mini-app manager relies on (a mini app cannot see
+   * another's globals; the js2elpian front-end's process-global compile state is
+   * per-instance, so independently-compiled programs never collide). See
+   * `../miniapps/engine.ts`.
+   */
+  static fromModule(module: WebAssembly.Module, host: HostCall): WasmBackend {
+    let ex: RnExports | null = null;
+    const readStr = (ptr: number, len: number): string =>
+      SHARED_DECODER.decode(new Uint8Array(ex!.memory.buffer, ptr, len));
+    const importObject = {
+      env: {
+        host_call: (
+          namePtr: number,
+          nameLen: number,
+          argsPtr: number,
+          argsLen: number,
+        ): number => {
+          const name = readStr(namePtr, nameLen);
+          const argsJson = readStr(argsPtr, argsLen);
+          const reply = host(name, argsJson);
+          if (reply === null || reply === undefined) return 0;
+          return writePrefixed(ex!, reply);
+        },
+      },
+    };
+    const instance = new WebAssembly.Instance(module, importObject);
+    ex = instance.exports as unknown as RnExports;
+    return new WasmBackend(ex);
+  }
+
   create(source: string, lang: string, prepend: boolean, _host: HostCall): void {
     const src = this.write(source);
     const lg = this.write(lang);

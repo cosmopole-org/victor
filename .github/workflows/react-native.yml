@@ -75,4 +75,6 @@ jobs:
 
       - name: Host — real-VM wasm end-to-end
         working-directory: victor/react-native
-        run: node --experimental-strip-types test/wasm.test.ts
+        run: |
+          node --experimental-strip-types test/wasm.test.ts
+          node --experimental-strip-types test/miniapps.test.ts
