@@ -83,6 +83,7 @@ jobs:
           node --experimental-strip-types test/patching.test.ts
           node --experimental-strip-types test/nativeBackend.test.ts
           node --experimental-strip-types test/godotEngine.test.ts
+          node --experimental-strip-types test/widgetRenderer.test.ts
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
