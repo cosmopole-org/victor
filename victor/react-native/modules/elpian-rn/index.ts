@@ -1,33 +1,42 @@
 // Local Expo module that installs the native Elpian VM JSI binding
-// (global.__ElpianRN). Importing it ensures the module is linked; calling
-// ensureInstalled() nudges the native side to install the binding if bridgeless
-// startup handed it the JS runtime too late for OnCreate.
+// (global.__ElpianRN). Importing it links the module; installNative() nudges the
+// native side to install the binding (bridgeless startup can hand it the JS
+// runtime after OnCreate) and returns a status string for diagnostics.
 import { requireNativeModule } from "expo";
 
 interface ElpianRnNativeModule {
-  install(): boolean;
+  install(): string;
 }
 
 let nativeModule: ElpianRnNativeModule | null = null;
+let requireError: string | null = null;
 try {
   nativeModule = requireNativeModule("ElpianRn") as ElpianRnNativeModule;
-} catch {
+} catch (e) {
+  requireError = String(e);
   nativeModule = null; // not present (web / Expo Go) — callers fall back
 }
 
 /**
- * Ensure `global.__ElpianRN` is installed. The native module installs it at
- * OnCreate; if the runtime wasn't ready yet (bridgeless), this retries. Returns
- * true when the binding is available.
+ * Install `global.__ElpianRN` if it isn't already, returning a diagnostic
+ * status: "ok" (or already installed), "module-not-found: …", or the native
+ * reason it failed (loadLibrary / no-runtime-pointer / nativeInstall).
  */
-export function ensureInstalled(): boolean {
+export function installNative(): string {
   const g = globalThis as { __ElpianRN?: unknown };
-  if (g.__ElpianRN) return true;
+  if (g.__ElpianRN) return "ok";
+  if (!nativeModule) return `module-not-found: ${requireError ?? "unavailable"}`;
   try {
-    return nativeModule?.install() ?? false;
-  } catch {
-    return false;
+    return nativeModule.install();
+  } catch (e) {
+    return `install-threw: ${String(e)}`;
   }
+}
+
+/** True once the native binding is installed. */
+export function ensureInstalled(): boolean {
+  installNative();
+  return !!(globalThis as { __ElpianRN?: unknown }).__ElpianRN;
 }
 
 export default nativeModule;
