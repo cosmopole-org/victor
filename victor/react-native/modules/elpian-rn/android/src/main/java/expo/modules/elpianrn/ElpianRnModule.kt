@@ -14,41 +14,35 @@ class ElpianRnModule : Module() {
     Name("ElpianRn")
 
     OnCreate {
-      try {
-        // Load the Rust VM first so the dynamic linker resolves it when the JSI
-        // glue (which imports its C ABI) loads.
-        System.loadLibrary("elpian_rn")
-        System.loadLibrary("elpianrn_jsi")
-      } catch (t: Throwable) {
-        Log.e(TAG, "failed to load native libraries", t)
-        return@OnCreate
-      }
-      // AppContext.reactContext is typed as android Context; the RN runtime
-      // pointer lives on com.facebook.react.bridge.ReactContext (Expo obtains it
-      // the same way, for both bridge and bridgeless).
-      val jsiPtr = (appContext.reactContext as? ReactContext)?.javaScriptContextHolder?.get() ?: 0L
-      if (jsiPtr == 0L) {
-        // Bridgeless startup can hand us the runtime late; JS retries via
-        // install() once it is up (see the module's index.ts).
-        Log.w(TAG, "JS runtime not ready at OnCreate; awaiting install()")
-        return@OnCreate
-      }
-      nativeInstall(jsiPtr)
+      // Best-effort early install; JS calls install() again once the runtime is
+      // definitely up (bridgeless can hand it to us late). Ignore the result.
+      tryInstall()
     }
 
-    // Fallback the JS side calls if the OnCreate install was too early: returns
-    // true once __ElpianRN is installed.
-    Function("install") {
-      // AppContext.reactContext is typed as android Context; the RN runtime
-      // pointer lives on com.facebook.react.bridge.ReactContext (Expo obtains it
-      // the same way, for both bridge and bridgeless).
-      val jsiPtr = (appContext.reactContext as? ReactContext)?.javaScriptContextHolder?.get() ?: 0L
-      if (jsiPtr != 0L) {
-        nativeInstall(jsiPtr)
-        true
-      } else {
-        false
-      }
+    // JS-callable install: loads the native libs and installs global.__ElpianRN,
+    // returning a status string so the app can surface exactly what happened.
+    // "ok" = installed; anything else is the reason it did not.
+    Function("install") { tryInstall() }
+  }
+
+  private fun tryInstall(): String {
+    try {
+      System.loadLibrary("elpian_rn")
+      System.loadLibrary("elpianrn_jsi")
+    } catch (t: Throwable) {
+      Log.e(TAG, "loadLibrary failed", t)
+      return "loadLibrary: ${t.message}"
+    }
+    val reactContext = appContext.reactContext as? ReactContext
+      ?: return "no-react-context"
+    val jsiPtr = reactContext.javaScriptContextHolder?.get() ?: 0L
+    if (jsiPtr == 0L) return "no-runtime-pointer(bridgeless=${reactContext.isBridgeless})"
+    return try {
+      nativeInstall(jsiPtr)
+      "ok"
+    } catch (t: Throwable) {
+      Log.e(TAG, "nativeInstall failed", t)
+      "nativeInstall: ${t.message}"
     }
   }
 

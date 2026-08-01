@@ -10,7 +10,7 @@ import type { ElpianRuntime, RnScene3dEngine } from "./src/index.ts";
 import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
 import { createGodotScene3dEngine } from "./src/scene3d/GodotScene3dEngine.tsx";
-import { ensureInstalled as ensureElpianRnInstalled } from "./modules/elpian-rn";
+import { installNative as installElpianRn } from "./modules/elpian-rn";
 
 export default function App(): React.ReactElement {
   const [runtime, setRuntime] = useState<ElpianRuntime | null>(null);
@@ -27,9 +27,19 @@ export default function App(): React.ReactElement {
     (async () => {
       try {
         // Native (Android/iOS): install + use the JSI backend (runs the VM
-        // directly — no wasm). Web/Expo: fall back to elpian_rn.wasm.
-        ensureElpianRnInstalled();
-        const wasmBytes = NativeVmBackend.isAvailable() ? undefined : await loadWasmBytes();
+        // directly — no wasm). Web/Expo Go: the native module is absent, so fall
+        // back to elpian_rn.wasm.
+        const nativeStatus = installElpianRn();
+        let wasmBytes: BufferSource | undefined;
+        if (NativeVmBackend.isAvailable()) {
+          wasmBytes = undefined; // native VM installed — no wasm needed
+        } else if (nativeStatus.startsWith("module-not-found")) {
+          wasmBytes = await loadWasmBytes(); // web / Expo Go
+        } else {
+          // The native module is in the binary but the VM did not install:
+          // surface the exact reason instead of the generic wasm error.
+          throw new Error(`native VM backend failed to install — ${nativeStatus}`);
+        }
         rt = await createRuntime({
           wasmBytes,
           scene3d: engine ?? undefined,
