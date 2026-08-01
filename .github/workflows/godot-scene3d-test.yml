@@ -1,0 +1,50 @@
+# Headless proof that Victor's embedded-Godot Scene3D works: build the Elpian
+# GDExtension, boot the real ElpianVM node with a JS guest that constructs a 3D
+# scene through the godot.js/G3 prelude, and assert real Godot 3D nodes land in
+# the live SceneTree — all headless (no GPU/display), so it runs on CI.
+#
+# This guards the engine side of a React Native <Scene3D/>: the VM emits
+# godot.op, the reflective GodotController services it against Godot's ClassDB.
+# (The Android embedding of Godot into the RN view is a separate, device-tested
+# seam — it needs a real GPU and a libgodot library export.)
+name: Godot Scene3D headless test
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "victor/bridge/**"
+      - ".github/workflows/godot-scene3d-test.yml"
+  pull_request:
+    paths:
+      - "victor/bridge/**"
+      - ".github/workflows/godot-scene3d-test.yml"
+  workflow_dispatch:
+
+jobs:
+  scene3d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + godot-cpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            victor/target
+            victor/bridge/extension/godot-cpp
+          key: godot-scene3d-${{ runner.os }}-${{ hashFiles('victor/Cargo.lock') }}
+
+      - name: Install build tools (scons)
+        run: pipx install scons || pip install scons
+
+      - name: Build extension + run the headless Scene3D proof
+        run: ./run_headless_scene3d_test.sh
+        working-directory: victor/bridge/extension

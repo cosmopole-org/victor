@@ -5,21 +5,32 @@
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { createWasmRuntime, VictorHost } from "./src/index.ts";
-import type { ElpianRuntime } from "./src/index.ts";
+import { createRuntime, NativeVmBackend, VictorHost } from "./src/index.ts";
+import type { ElpianRuntime, RnScene3dEngine } from "./src/index.ts";
 import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
+import { createGodotScene3dEngine } from "./src/scene3d/GodotScene3dEngine.tsx";
 
 export default function App(): React.ReactElement {
   const [runtime, setRuntime] = useState<ElpianRuntime | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // The embedded-Godot engine, when a device build bundles it. One instance
+  // drives both the guest's 3D ops (as the runtime's scene3d engine) and the
+  // on-screen viewport (as <VictorHost/>'s render engine). null → Scene3D shows
+  // the placeholder and the 2D app runs unchanged.
+  const [engine] = useState<RnScene3dEngine | null>(() => createGodotScene3dEngine());
+
   useEffect(() => {
     let rt: ElpianRuntime | null = null;
     (async () => {
       try {
-        const bytes = await loadWasmBytes();
-        rt = await createWasmRuntime(bytes, {
+        // Native (Android/iOS): the JSI backend runs the VM directly — no wasm.
+        // Web/Expo: fall back to fetching and instantiating elpian_rn.wasm.
+        const wasmBytes = NativeVmBackend.isAvailable() ? undefined : await loadWasmBytes();
+        rt = await createRuntime({
+          wasmBytes,
+          scene3d: engine ?? undefined,
           onLog: (line) => console.log("[guest]", line),
         });
         rt.start(SHOWCASE_GUEST_SOURCE, { lang: "js" });
@@ -29,7 +40,7 @@ export default function App(): React.ReactElement {
       }
     })();
     return () => rt?.stop();
-  }, []);
+  }, [engine]);
 
   if (error) {
     return (
@@ -60,7 +71,7 @@ export default function App(): React.ReactElement {
     );
   }
 
-  return <VictorHost runtime={runtime} />;
+  return <VictorHost runtime={runtime} engine={engine ?? undefined} />;
 }
 
 const styles = StyleSheet.create({

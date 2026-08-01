@@ -72,6 +72,45 @@ pub fn set_native_host(f: Box<dyn FnMut(&str, &str) -> Option<String>>) {
     NATIVE_HOST.with(|h| *h.borrow_mut() = Some(f));
 }
 
+// ---------------------------------------------------------------------------
+// the native C-ABI host seam (Android / iOS JSI embedders)
+// ---------------------------------------------------------------------------
+//
+// On device there is no wasm `host_call` import to link against: React Native
+// links this crate as a native `.so`/static lib, and the JSI module installs a
+// C function that services every host call by synchronously calling back into
+// JavaScript. `host_call` is synchronous (the guest blocks on the reply — e.g.
+// a `godot.op` returns a node handle), so the transport must be JSI, not the
+// async RN bridge. The signature and length-prefixed reply convention are the
+// exact mirror of the wasm import above.
+
+/// The C callback a native embedder registers with [`elpian_rn_set_host`].
+/// Receives `(name, args_json)` as UTF-8 pointer/length pairs and returns a
+/// length-prefixed reply buffer allocated with [`elpian_rn_alloc`] (which this
+/// crate frees), or null to decline (the guest sees `null`).
+#[cfg(not(target_arch = "wasm32"))]
+pub type HostCallFn = extern "C" fn(
+    name_ptr: *const u8,
+    name_len: usize,
+    args_ptr: *const u8,
+    args_len: usize,
+) -> *mut u8;
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    static C_HOST: RefCell<Option<HostCallFn>> = const { RefCell::new(None) };
+}
+
+/// Register (or, with a null pointer, clear) the native host callback. Called
+/// once by the JSI module on the JS thread before creating a runtime; the VM
+/// runs on that same thread, so a thread-local store is correct and lock-free.
+/// `Option<HostCallFn>` is FFI-safe: it is a nullable function pointer.
+#[cfg(not(target_arch = "wasm32"))]
+#[no_mangle]
+pub extern "C" fn elpian_rn_set_host(cb: Option<HostCallFn>) {
+    C_HOST.with(|h| *h.borrow_mut() = cb);
+}
+
 /// Cross the seam once: hand `(name, args)` to the host and parse its reply.
 fn dispatch(name: &str, args: &[Value]) -> Option<Value> {
     let args_json = Value::Array(args.to_vec()).to_string();
@@ -91,6 +130,24 @@ fn dispatch(name: &str, args: &[Value]) -> Option<Value> {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // A registered native C host (the JSI module on device) takes priority;
+        // the boxed closure hook is only used by host-side Rust tests that call
+        // `set_native_host`.
+        if let Some(cb) = C_HOST.with(|h| *h.borrow()) {
+            let reply_ptr = cb(
+                name.as_ptr(),
+                name.len(),
+                args_json.as_ptr(),
+                args_json.len(),
+            );
+            if reply_ptr.is_null() {
+                return None;
+            }
+            let reply = read_prefixed(reply_ptr);
+            free_prefixed(reply_ptr);
+            return serde_json::from_str(&reply).ok();
+        }
+
         let reply = NATIVE_HOST.with(|h| {
             h.borrow_mut()
                 .as_mut()

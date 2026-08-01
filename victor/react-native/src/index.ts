@@ -18,12 +18,26 @@ export {
 } from "./core/scene3dEngine.ts";
 export type { RnScene3dEngine } from "./scene3d/engine.ts";
 export { Scene3dSurface } from "./scene3d/Scene3dSurface.tsx";
+export {
+  getElpianGodotNative,
+  type ElpianGodotNative,
+} from "./scene3d/godotBinding.ts";
+export { GodotScene3dEngineCore } from "./scene3d/godotEngineCore.ts";
+export {
+  GodotScene3dEngine,
+  createGodotScene3dEngine,
+} from "./scene3d/GodotScene3dEngine.tsx";
 
 export {
   type VmBackend,
   type HostCall,
   WasmBackend,
 } from "./vm/backend.ts";
+export {
+  NativeVmBackend,
+  getElpianRnNative,
+  type ElpianRnNative,
+} from "./vm/nativeBackend.ts";
 export { ElpianRuntime, type RuntimeOptions } from "./vm/runtime.ts";
 
 // Mini-app management — run many isolated Elpian mini apps in one shared VM
@@ -50,6 +64,7 @@ export {
 } from "./render/rnComponents.ts";
 
 import { WasmBackend, type HostCall } from "./vm/backend.ts";
+import { NativeVmBackend } from "./vm/nativeBackend.ts";
 import { ElpianRuntime, type RuntimeOptions } from "./vm/runtime.ts";
 
 /**
@@ -72,4 +87,37 @@ export async function createWasmRuntime(
   const runtime = new ElpianRuntime(backend, opts);
   host = (n, a) => runtime.dispatcher.handle(n, a);
   return runtime;
+}
+
+/**
+ * Instantiate the VM through the **native** JSI backend (`libelpian_rn`),
+ * synchronously — the on-device path where Hermes has no WebAssembly. The host
+ * dispatcher is bound when `runtime.start(source)` calls `backend.create`, so
+ * unlike {@link createWasmRuntime} there is no wasm module to fetch. Throws if
+ * the native library/JSI module is not installed; gate with
+ * `NativeVmBackend.isAvailable()`.
+ */
+export function createNativeRuntime(opts: RuntimeOptions = {}): ElpianRuntime {
+  return new ElpianRuntime(new NativeVmBackend(), opts);
+}
+
+/**
+ * Pick the best available backend: the native JSI VM when installed (device),
+ * otherwise the wasm VM from `wasmBytes` (web/Expo). `wasmBytes` may be omitted
+ * on platforms known to be native; it is required for the wasm fallback.
+ */
+export async function createRuntime(
+  opts: RuntimeOptions & { wasmBytes?: BufferSource } = {},
+): Promise<ElpianRuntime> {
+  const { wasmBytes, ...runtimeOpts } = opts;
+  if (NativeVmBackend.isAvailable()) {
+    return createNativeRuntime(runtimeOpts);
+  }
+  if (!wasmBytes) {
+    throw new Error(
+      "No VM backend available: the native JSI backend is not installed and no " +
+        "wasmBytes were supplied for the wasm fallback.",
+    );
+  }
+  return createWasmRuntime(wasmBytes, runtimeOpts);
 }
