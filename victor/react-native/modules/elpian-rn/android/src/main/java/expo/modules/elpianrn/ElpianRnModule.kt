@@ -1,6 +1,7 @@
 package expo.modules.elpianrn
 
 import android.util.Log
+import com.facebook.react.bridge.ReactContext
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
@@ -22,7 +23,10 @@ class ElpianRnModule : Module() {
         Log.e(TAG, "failed to load native libraries", t)
         return@OnCreate
       }
-      val jsiPtr = appContext.reactContext?.javaScriptContextHolder?.get() ?: 0L
+      // AppContext.reactContext is typed as android Context; the RN runtime
+      // pointer lives on com.facebook.react.bridge.ReactContext (Expo obtains it
+      // the same way, for both bridge and bridgeless).
+      val jsiPtr = (appContext.reactContext as? ReactContext)?.javaScriptContextHolder?.get() ?: 0L
       if (jsiPtr == 0L) {
         // Bridgeless startup can hand us the runtime late; JS retries via
         // install() once it is up (see the module's index.ts).
@@ -35,7 +39,10 @@ class ElpianRnModule : Module() {
     // Fallback the JS side calls if the OnCreate install was too early: returns
     // true once __ElpianRN is installed.
     Function("install") {
-      val jsiPtr = appContext.reactContext?.javaScriptContextHolder?.get() ?: 0L
+      // AppContext.reactContext is typed as android Context; the RN runtime
+      // pointer lives on com.facebook.react.bridge.ReactContext (Expo obtains it
+      // the same way, for both bridge and bridgeless).
+      val jsiPtr = (appContext.reactContext as? ReactContext)?.javaScriptContextHolder?.get() ?: 0L
       if (jsiPtr != 0L) {
         nativeInstall(jsiPtr)
         true
