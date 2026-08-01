@@ -52,6 +52,13 @@ export {
 
 export { VictorHost, type VictorHostProps } from "./render/VictorHost.tsx";
 export { renderNode, WidgetView, type RenderContext } from "./render/renderNode.tsx";
+export {
+  type WidgetSink,
+  type WidgetRenderer,
+} from "./core/widgetSink.ts";
+export { WIDGET_CATALOG, type NativeWidgetMap } from "./render/widgetCatalog.ts";
+export { DomWidgetRenderer, type DomHost } from "./render/domWidgetRenderer.ts";
+export { mountDom, type MountDomOptions } from "./render/mountDom.ts";
 export { toStyle, STYLE_KEYS } from "./render/style.ts";
 export { componentFor, registerComponent } from "./render/components.ts";
 export {

@@ -89,6 +89,9 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Web DOM renderer test (needs jsdom)
+        run: node --experimental-strip-types test/domWidgetRenderer.test.ts
+
       - name: Prebuild the native Android project (CNG)
         run: npx expo prebuild --platform android --no-install
 
