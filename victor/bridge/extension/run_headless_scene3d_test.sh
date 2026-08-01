@@ -47,17 +47,32 @@ if [ -z "$GODOT" ]; then
 fi
 echo "    using: $("$GODOT" --headless --version)"
 
-echo "==> 5/5 import (registers the GDExtension) + run the headless test"
+echo "==> 5/6 import (registers the GDExtension) + run the synthetic Scene3D test"
 # The first headless --import writes .godot/extension_list.cfg so the extension
 # loads for a plain --script run.
 ( cd "$PROJECT_DIR" && timeout 120 "$GODOT" --headless --path . --import >/dev/null 2>&1 || true )
 OUT="$( cd "$PROJECT_DIR" && timeout 120 "$GODOT" --headless --path . \
         --script res://headless_scene3d_test.gd 2>&1 )"
 echo "$OUT"
+echo "$OUT" | grep -q "HEADLESS_SCENE3D_RESULT: PASS" || {
+  echo "FAIL: headless Scene3D proof did not pass." >&2
+  exit 1
+}
+echo "OK: Godot serviced the 3D op protocol and built a real Scene3D."
 
-if echo "$OUT" | grep -q "HEADLESS_SCENE3D_RESULT: PASS"; then
-  echo "OK: Godot serviced the 3D op protocol and built a real Scene3D."
+echo "==> 6/6 capture the REAL showcase 3D op stream and replay it into Godot"
+# Phase A: run the shipped assets/guest/showcase.js on the real Elpian VM and
+# dump the exact godot.op stream its RN.Scene3D emits.
+( cd "$REPO_ROOT/victor" && cargo run -q -p elpian-rn --example capture_godot_ops ) \
+  > "$PROJECT_DIR/showcase_ops.json"
+# Phase B: replay that real stream through the reflective controller and assert
+# the app's actual 3D scene is built.
+REPLAY="$( cd "$PROJECT_DIR" && timeout 120 "$GODOT" --headless --path . \
+           --script res://headless_replay_showcase3d.gd 2>&1 )"
+echo "$REPLAY"
+if echo "$REPLAY" | grep -q "HEADLESS_REPLAY_RESULT: PASS"; then
+  echo "OK: the showcase app's real godot.op stream built a live Godot 3D scene."
   exit 0
 fi
-echo "FAIL: headless Scene3D proof did not pass." >&2
+echo "FAIL: showcase 3D replay proof did not pass." >&2
 exit 1
