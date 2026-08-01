@@ -9,4 +9,11 @@ fn main() {
     if target.starts_with("wasm32") {
         println!("cargo:rustc-link-arg=--import-undefined");
     }
+    // Android: give the cdylib a SONAME so anything linking against it (the
+    // elpianrn_jsi JSI glue) records a plain `libelpian_rn.so` DT_NEEDED rather
+    // than the on-disk path CMake hands the linker. Without a SONAME the APK's
+    // flat lib dir can't satisfy the dependency and dlopen fails at runtime.
+    if target.contains("android") {
+        println!("cargo:rustc-link-arg=-Wl,-soname,libelpian_rn.so");
+    }
 }
