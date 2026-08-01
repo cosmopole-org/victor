@@ -68,7 +68,7 @@ function installFakeNative(): { calls: string[] } {
       calls.push(`takeLog:${rt}`);
       const out = log.slice();
       log.length = 0;
-      return out;
+      return JSON.stringify(out); // native returns a JSON string
     },
     stats(rt) {
       calls.push(`stats:${rt}`);

@@ -104,14 +104,18 @@ jobs:
       - name: Cross-compile the Elpian VM (libelpian_rn.so, per ABI)
         working-directory: victor/react-native/native/elpian-rn
         # Build the same Rust VM the wasm path uses, as a native Android shared
-        # library the JSI module (modules/elpian-rn) loads. cargo-ndk emits
-        # jniLibs/<abi>/libelpian_rn.so, which Gradle then packages into the APK.
+        # library the JSI module (modules/elpian-rn) links + loads. Stage all
+        # cargo-ndk output, then copy ONLY libelpian_rn.so into the module's
+        # jniLibs (its CMake imports it and Gradle packages it into the APK).
         run: |
-          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 \
-            -o "$GITHUB_WORKSPACE/victor/react-native/android/app/src/main/jniLibs" \
-            build --release
-          find "$GITHUB_WORKSPACE/victor/react-native/android/app/src/main/jniLibs" \
-            -name 'libelpian_rn.so' -exec ls -la {} \;
+          STAGE="$RUNNER_TEMP/elpian-jnilibs"
+          JNILIBS="$GITHUB_WORKSPACE/victor/react-native/modules/elpian-rn/android/src/main/jniLibs"
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 -o "$STAGE" build --release
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            mkdir -p "$JNILIBS/$abi"
+            cp "$STAGE/$abi/libelpian_rn.so" "$JNILIBS/$abi/libelpian_rn.so"
+          done
+          find "$JNILIBS" -name 'libelpian_rn.so' -exec ls -la {} \;
 
       - name: Build the release APKs (one per ABI)
         working-directory: victor/react-native/android
