@@ -5,7 +5,7 @@
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { createWasmRuntime, VictorHost } from "./src/index.ts";
+import { createRuntime, NativeVmBackend, VictorHost } from "./src/index.ts";
 import type { ElpianRuntime } from "./src/index.ts";
 import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
@@ -18,8 +18,11 @@ export default function App(): React.ReactElement {
     let rt: ElpianRuntime | null = null;
     (async () => {
       try {
-        const bytes = await loadWasmBytes();
-        rt = await createWasmRuntime(bytes, {
+        // Native (Android/iOS): the JSI backend runs the VM directly — no wasm.
+        // Web/Expo: fall back to fetching and instantiating elpian_rn.wasm.
+        const wasmBytes = NativeVmBackend.isAvailable() ? undefined : await loadWasmBytes();
+        rt = await createRuntime({
+          wasmBytes,
           onLog: (line) => console.log("[guest]", line),
         });
         rt.start(SHOWCASE_GUEST_SOURCE, { lang: "js" });
