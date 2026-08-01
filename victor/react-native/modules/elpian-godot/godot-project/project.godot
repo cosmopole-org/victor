@@ -1,0 +1,7 @@
+config_version=5
+[application]
+config/name="Elpian Godot Embed"
+run/main_scene="res://OpSink.tscn"
+config/features=PackedStringArray("4.3")
+[rendering]
+renderer/rendering_method="mobile"
