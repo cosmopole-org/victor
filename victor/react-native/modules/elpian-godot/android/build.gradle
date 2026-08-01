@@ -1,0 +1,58 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+group = 'expo.modules.elpiangodot'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+    project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "expo.modules.elpiangodot"
+  compileSdkVersion rootProject.hasProperty("compileSdkVersion") ? rootProject.compileSdkVersion : 34
+
+  defaultConfig {
+    minSdkVersion rootProject.hasProperty("minSdkVersion") ? rootProject.minSdkVersion : 24
+    externalNativeBuild {
+      cmake {
+        cppFlags "-std=c++17", "-fexceptions", "-frtti"
+        arguments "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path "CMakeLists.txt"
+    }
+  }
+
+  packagingOptions {
+    // The Godot engine lib (from the AAR) and our prebuilt GDExtension are
+    // packaged as-is; libc++_shared is provided by several modules.
+    doNotStrip "**/libgodot_android.so"
+    doNotStrip "**/libelpian_godot.android.*.so"
+    pickFirst "**/libc++_shared.so"
+  }
+
+  buildFeatures {
+    prefab true
+  }
+}
+
+repositories {
+  flatDir { dirs 'libs' }
+}
+
+dependencies {
+  // React Native jsi (prefab) for the JSI glue.
+  implementation "com.facebook.react:react-android"
+  // Fragment hosting for the embedded GodotFragment.
+  implementation "androidx.fragment:fragment-ktx:1.6.2"
+  // Godot's embeddable Android runtime (GodotFragment/Godot + libgodot_android.so).
+  implementation(name: 'godot-lib.template_release', ext: 'aar')
+}

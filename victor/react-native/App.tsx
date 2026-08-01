@@ -11,6 +11,7 @@ import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
 import { createGodotScene3dEngine } from "./src/scene3d/GodotScene3dEngine.tsx";
 import { installNative as installElpianRn } from "./modules/elpian-rn";
+import { installGodot } from "./modules/elpian-godot";
 
 export default function App(): React.ReactElement {
   const [runtime, setRuntime] = useState<ElpianRuntime | null>(null);
@@ -20,7 +21,12 @@ export default function App(): React.ReactElement {
   // drives both the guest's 3D ops (as the runtime's scene3d engine) and the
   // on-screen viewport (as <VictorHost/>'s render engine). null → Scene3D shows
   // the placeholder and the 2D app runs unchanged.
-  const [engine] = useState<RnScene3dEngine | null>(() => createGodotScene3dEngine());
+  const [engine] = useState<RnScene3dEngine | null>(() => {
+    // Install the embedded-Godot JSI binding (no-op on web/Expo Go), then build
+    // the engine if it's present; otherwise Scene3D keeps the placeholder.
+    installGodot();
+    return createGodotScene3dEngine();
+  });
 
   useEffect(() => {
     let rt: ElpianRuntime | null = null;
