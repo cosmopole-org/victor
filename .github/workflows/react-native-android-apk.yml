@@ -90,6 +90,33 @@ jobs:
       - name: Prebuild the native Android project (CNG)
         run: npx expo prebuild --platform android --no-install
 
+      - name: Set up Rust for Android
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - name: Install cargo-ndk + Android NDK
+        run: |
+          cargo install cargo-ndk --locked
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;26.1.10909125" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - name: Cross-compile the Elpian VM (libelpian_rn.so, per ABI)
+        working-directory: victor/react-native/native/elpian-rn
+        # Build the same Rust VM the wasm path uses, as a native Android shared
+        # library the JSI module (modules/elpian-rn) links + loads. Stage all
+        # cargo-ndk output, then copy ONLY libelpian_rn.so into the module's
+        # jniLibs (its CMake imports it and Gradle packages it into the APK).
+        run: |
+          STAGE="$RUNNER_TEMP/elpian-jnilibs"
+          JNILIBS="$GITHUB_WORKSPACE/victor/react-native/modules/elpian-rn/android/src/main/jniLibs"
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86 -t x86_64 -o "$STAGE" build --release
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            mkdir -p "$JNILIBS/$abi"
+            cp "$STAGE/$abi/libelpian_rn.so" "$JNILIBS/$abi/libelpian_rn.so"
+          done
+          find "$JNILIBS" -name 'libelpian_rn.so' -exec ls -la {} \;
+
       - name: Build the release APKs (one per ABI)
         working-directory: victor/react-native/android
         # Release embeds the JS bundle and disables dev support, so the APK runs

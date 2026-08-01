@@ -29,7 +29,8 @@ export interface ElpianRnNative {
   run(rt: number): void;
   pump(rt: number, deltaMs: number): void;
   invoke(rt: number, fnName: string, argJson: string): void;
-  takeLog(rt: number): string[];
+  /** JSON array of the fresh `print` lines ("" or "[]" when none). */
+  takeLog(rt: number): string;
   stats(rt: number): string;
   lastError(rt: number): string;
   free(rt: number): void;
@@ -85,7 +86,14 @@ export class NativeVmBackend implements VmBackend {
   }
 
   takeLog(): string[] {
-    return this.native.takeLog(this.rt) ?? [];
+    const json = this.native.takeLog(this.rt);
+    if (!json) return [];
+    try {
+      const parsed = JSON.parse(json);
+      return Array.isArray(parsed) ? (parsed as string[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   stats(): unknown {

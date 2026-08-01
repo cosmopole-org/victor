@@ -10,6 +10,7 @@ import type { ElpianRuntime, RnScene3dEngine } from "./src/index.ts";
 import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
 import { createGodotScene3dEngine } from "./src/scene3d/GodotScene3dEngine.tsx";
+import { ensureInstalled as ensureElpianRnInstalled } from "./modules/elpian-rn";
 
 export default function App(): React.ReactElement {
   const [runtime, setRuntime] = useState<ElpianRuntime | null>(null);
@@ -25,8 +26,9 @@ export default function App(): React.ReactElement {
     let rt: ElpianRuntime | null = null;
     (async () => {
       try {
-        // Native (Android/iOS): the JSI backend runs the VM directly — no wasm.
-        // Web/Expo: fall back to fetching and instantiating elpian_rn.wasm.
+        // Native (Android/iOS): install + use the JSI backend (runs the VM
+        // directly — no wasm). Web/Expo: fall back to elpian_rn.wasm.
+        ensureElpianRnInstalled();
         const wasmBytes = NativeVmBackend.isAvailable() ? undefined : await loadWasmBytes();
         rt = await createRuntime({
           wasmBytes,

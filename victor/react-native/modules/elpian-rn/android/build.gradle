@@ -1,0 +1,50 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+group = 'expo.modules.elpianrn'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+    project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "expo.modules.elpianrn"
+  compileSdkVersion rootProject.hasProperty("compileSdkVersion") ? rootProject.compileSdkVersion : 34
+
+  defaultConfig {
+    minSdkVersion rootProject.hasProperty("minSdkVersion") ? rootProject.minSdkVersion : 24
+    externalNativeBuild {
+      cmake {
+        // libelpian_rn is a plain C ABI; the JSI glue is C++17.
+        cppFlags "-std=c++17", "-fexceptions", "-frtti"
+        arguments "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path "CMakeLists.txt"
+    }
+  }
+
+  // The prebuilt Rust VM (built by the CI cross-compile step into jniLibs) is
+  // packaged as-is; do not let AGP strip it.
+  packagingOptions {
+    doNotStrip "**/libelpian_rn.so"
+  }
+
+  buildFeatures {
+    prefab true
+  }
+}
+
+dependencies {
+  // React Native's jsi + reactnative prefab supply <jsi/jsi.h> and the runtime
+  // the JSI glue links against.
+  implementation "com.facebook.react:react-android"
+}
