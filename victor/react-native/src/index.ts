@@ -18,6 +18,15 @@ export {
 } from "./core/scene3dEngine.ts";
 export type { RnScene3dEngine } from "./scene3d/engine.ts";
 export { Scene3dSurface } from "./scene3d/Scene3dSurface.tsx";
+export {
+  getElpianGodotNative,
+  type ElpianGodotNative,
+} from "./scene3d/godotBinding.ts";
+export { GodotScene3dEngineCore } from "./scene3d/godotEngineCore.ts";
+export {
+  GodotScene3dEngine,
+  createGodotScene3dEngine,
+} from "./scene3d/GodotScene3dEngine.tsx";
 
 export {
   type VmBackend,
