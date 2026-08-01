@@ -14,10 +14,12 @@ import type { WidgetRenderer } from "../core/widgetSink.ts";
 export interface ElpianWidgetsNative {
   /** Enqueue one widget op (a JSON message) for the UI-thread controller. */
   op(messageJson: string): void;
-  /** Register the handler the native side calls for a widget event. */
-  setEventHandler(fn: (widgetId: number, event: string, argJson: string) => void): void;
-  /** Commit a batch (optional; the controller may apply eagerly). */
-  flush?(): void;
+  /**
+   * Drain widget events the native controller queued (a JSON array of
+   * `[widgetId, event, arg]`), applied on the JS thread each frame. Polling
+   * avoids any native→JS cross-thread call.
+   */
+  pollEvents(): string;
   /** The registered native view component that hosts the widget tree. */
   viewName?: string;
 }
@@ -39,18 +41,11 @@ export interface NativeWidgetHost {
 
 export class NativeWidgetRenderer implements WidgetRenderer {
   private native: ElpianWidgetsNative;
+  private host: NativeWidgetHost;
 
   constructor(host: NativeWidgetHost, native: ElpianWidgetsNative = requireNative()) {
     this.native = native;
-    this.native.setEventHandler((id, event, argJson) => {
-      let arg: Wire = null;
-      try {
-        arg = argJson ? (JSON.parse(argJson) as Wire) : null;
-      } catch {
-        arg = null;
-      }
-      host.fire(id, event, arg);
-    });
+    this.host = host;
   }
 
   static isAvailable(): boolean {
@@ -101,8 +96,27 @@ export class NativeWidgetRenderer implements WidgetRenderer {
   addOwner(): boolean {
     return true;
   }
+  /** Applied each frame by the runtime: drain native widget events into the VM. */
   flush(): void {
-    this.native.flush?.();
+    let json: string;
+    try {
+      json = this.native.pollEvents();
+    } catch {
+      return;
+    }
+    if (!json) return;
+    let events: unknown;
+    try {
+      events = JSON.parse(json);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(events)) return;
+    for (const ev of events) {
+      if (Array.isArray(ev) && typeof ev[0] === "number" && typeof ev[1] === "string") {
+        this.host.fire(ev[0], ev[1], (ev[2] ?? null) as Wire);
+      }
+    }
   }
 }
 

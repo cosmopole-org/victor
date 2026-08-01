@@ -25,25 +25,27 @@ function test(name: string, fn: () => void): void {
 interface Fake {
   native: ElpianWidgetsNative;
   msgs: Array<Record<string, Wire>>;
-  emit: (id: number, event: string, argJson: string) => void;
+  queueEvent: (id: number, event: string, arg: Wire) => void;
 }
 
 function fakeWidgets(): Fake {
   const msgs: Array<Record<string, Wire>> = [];
-  let handler: ((id: number, event: string, argJson: string) => void) | null = null;
+  let events: Array<[number, string, Wire]> = [];
   const native: ElpianWidgetsNative = {
     op(json) {
       msgs.push(JSON.parse(json) as Record<string, Wire>);
     },
-    setEventHandler(fn) {
-      handler = fn;
+    pollEvents() {
+      const out = JSON.stringify(events);
+      events = [];
+      return out;
     },
     viewName: "VictorSurfaceView",
   };
   return {
     native,
     msgs,
-    emit: (id, event, argJson) => handler?.(id, event, argJson),
+    queueEvent: (id, event, arg) => events.push([id, event, arg]),
   };
 }
 
@@ -82,13 +84,14 @@ test("rn.op forwards create/set/connect/add/root to the native controller", () =
   assert.ok(has((m) => m.t === "toast" && m.m === "done"), "toast");
 });
 
-test("a native widget event routes back into the VM", () => {
+test("native widget events are drained on flush() and routed into the VM", () => {
   const fake = fakeWidgets();
   const fired: Array<[number, string, Wire]> = [];
-  // eslint-disable-next-line no-new
-  new NativeWidgetRenderer({ fire: (id, e, a) => fired.push([id, e, a ?? null]) }, fake.native);
-  fake.emit(2, "changeText", JSON.stringify("bob"));
-  assert.deepStrictEqual(fired.at(-1), [2, "changeText", "bob"], "native event → VM");
+  const r = new NativeWidgetRenderer({ fire: (id, e, a) => fired.push([id, e, a ?? null]) }, fake.native);
+  fake.queueEvent(2, "changeText", "bob");
+  fake.queueEvent(3, "press", null);
+  r.flush(); // the runtime calls this each frame
+  assert.deepStrictEqual(fired, [[2, "changeText", "bob"], [3, "press", null]], "events → VM");
 });
 
 test("without a binding, constructing throws a clear error", () => {

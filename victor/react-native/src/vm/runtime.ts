@@ -30,19 +30,20 @@ export class ElpianRuntime {
   private lastTs = 0;
   private rafId: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private widgets?: WidgetRenderer;
 
   constructor(backend: VmBackend, opts: RuntimeOptions = {}) {
     this.backend = backend;
     this.onLog = opts.onLog;
+    this.widgets = opts.widgets;
     this.dispatcher = new HostDispatcher(
       opts.scene3d ?? new MockScene3dEngine(),
       opts.widgets,
     );
-    // Coalesce: ops mark the tree dirty; the frame loop commits once per frame
-    // (React batches the re-render). Before the loop starts, commit eagerly.
+    // Coalesce: ops mark the tree dirty; the frame loop commits once per frame.
     this.dispatcher.commit = () => {
       if (this.running) this.dirty = true;
-      else this.dispatcher.store.flush();
+      else this.commitNow();
     };
     // Widget events route back into the VM through invoke().
     this.dispatcher.setInvokeSink((fn, arg) => this.backend.invoke(fn, arg));
@@ -106,12 +107,22 @@ export class ElpianRuntime {
     }
   }
 
+  private commitNow(): void {
+    if (this.widgets) this.widgets.flush();
+    else this.dispatcher.store.flush();
+  }
+
   private frame(ts: number): void {
     const dt = Math.max(0, ts - this.lastTs);
     this.lastTs = ts;
     this.backend.pump(dt);
     this.drainLog();
-    if (this.dirty) {
+    // A native/DOM renderer flushes every frame (it also polls native widget
+    // events); the React store flushes only when the tree changed.
+    if (this.widgets) {
+      this.widgets.flush();
+      this.dirty = false;
+    } else if (this.dirty) {
       this.dirty = false;
       this.dispatcher.store.flush();
     }
