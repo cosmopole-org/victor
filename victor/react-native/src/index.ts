@@ -59,6 +59,12 @@ export {
 export { WIDGET_CATALOG, type NativeWidgetMap } from "./render/widgetCatalog.ts";
 export { DomWidgetRenderer, type DomHost } from "./render/domWidgetRenderer.ts";
 export { mountDom, type MountDomOptions } from "./render/mountDom.ts";
+export {
+  NativeWidgetRenderer,
+  getElpianWidgetsNative,
+  type ElpianWidgetsNative,
+  type NativeWidgetHost,
+} from "./render/nativeWidgetRenderer.ts";
 export { toStyle, STYLE_KEYS } from "./render/style.ts";
 export { componentFor, registerComponent } from "./render/components.ts";
 export {

@@ -9,6 +9,7 @@
 
 import type { Wire } from "../core/protocol.ts";
 import type { WidgetRenderer } from "../core/widgetSink.ts";
+import { specFor } from "./rnComponents.ts";
 
 /** The JSI binding the native widget module installs. */
 export interface ElpianWidgetsNative {
@@ -57,7 +58,9 @@ export class NativeWidgetRenderer implements WidgetRenderer {
   }
 
   create(id: number, className: string): void {
-    this.send({ t: "create", id, cls: className });
+    // Resolve the kind here (shared catalog) so the native controller maps just
+    // 15 kinds → native widgets, without duplicating the catalog.
+    this.send({ t: "create", id, cls: className, k: specFor(className)?.kind ?? "view" });
   }
   setProp(id: number, key: string, value: Wire): void {
     this.send({ t: "set", id, k: key, v: value });

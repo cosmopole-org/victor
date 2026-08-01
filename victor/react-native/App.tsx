@@ -5,17 +5,22 @@
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { createRuntime, NativeVmBackend, VictorHost } from "./src/index.ts";
-import type { ElpianRuntime, RnScene3dEngine } from "./src/index.ts";
+import { createRuntime, NativeVmBackend, NativeWidgetRenderer, VictorHost } from "./src/index.ts";
+import type { ElpianRuntime, RnScene3dEngine, WidgetRenderer } from "./src/index.ts";
 import { SHOWCASE_GUEST_SOURCE } from "./src/example/showcaseSource.ts";
 import { loadWasmBytes } from "./src/vm/loadWasm.ts";
 import { createGodotScene3dEngine } from "./src/scene3d/GodotScene3dEngine.tsx";
 import { installNative as installElpianRn } from "./modules/elpian-rn";
 import { installGodot } from "./modules/elpian-godot";
+import { installWidgets } from "./modules/elpian-widgets";
+import { VictorSurface } from "./modules/elpian-widgets/VictorSurface.tsx";
 
 export default function App(): React.ReactElement {
   const [runtime, setRuntime] = useState<ElpianRuntime | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // True once the native widget toolkit is driving the UI (no React below the
+  // single host view); false → the React <VictorHost/> renders the tree.
+  const [nativeWidgets, setNativeWidgets] = useState(false);
 
   // The embedded-Godot engine, when a device build bundles it. One instance
   // drives both the guest's 3D ops (as the runtime's scene3d engine) and the
@@ -46,12 +51,27 @@ export default function App(): React.ReactElement {
           // surface the exact reason instead of the generic wasm error.
           throw new Error(`native VM backend failed to install — ${nativeStatus}`);
         }
+
+        // Install the native widget toolkit. When present (device build), the VM's
+        // widget ops drive a real android.view.View tree inside <VictorSurface/>
+        // with zero React below it; the fire host late-binds to the runtime we
+        // build just below (only invoked once it's running, so rt is set by then).
+        installWidgets();
+        let widgets: WidgetRenderer | undefined;
+        if (NativeWidgetRenderer.isAvailable()) {
+          widgets = new NativeWidgetRenderer({
+            fire: (id, ev, arg) => rt?.fireEvent(id, ev, arg),
+          });
+        }
+
         rt = await createRuntime({
           wasmBytes,
+          widgets,
           scene3d: engine ?? undefined,
           onLog: (line) => console.log("[guest]", line),
         });
         rt.start(SHOWCASE_GUEST_SOURCE, { lang: "js" });
+        if (widgets) setNativeWidgets(true);
         setRuntime(rt);
       } catch (e) {
         setError(String(e));
@@ -89,10 +109,17 @@ export default function App(): React.ReactElement {
     );
   }
 
+  // Native widget toolkit active: the VM builds the whole tree inside this one
+  // host view (no React below it). Otherwise the React <VictorHost/> renders the
+  // retained WidgetStore (web / Expo Go / platforms without the native toolkit).
+  if (nativeWidgets) {
+    return <VictorSurface style={styles.fill} />;
+  }
   return <VictorHost runtime={runtime} engine={engine ?? undefined} />;
 }
 
 const styles = StyleSheet.create({
+  fill: { flex: 1 },
   center: {
     flexGrow: 1,
     alignItems: "center",
