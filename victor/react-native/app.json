@@ -30,7 +30,8 @@
           }
         }
       ],
-      "./plugins/withAbiSplits"
+      "./plugins/withAbiSplits",
+      "./plugins/withGodotRepo"
     ]
   }
 }
