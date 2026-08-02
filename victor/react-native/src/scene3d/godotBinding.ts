@@ -23,6 +23,8 @@ export interface ElpianGodotNative {
    * the view — surfaces then show the placeholder.
    */
   viewName?: string;
+  /** Diagnostics: JSON `{pushed, polls, drained}` of the op transport. */
+  stats?(): string;
 }
 
 declare global {

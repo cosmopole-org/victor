@@ -25,10 +25,18 @@ namespace {
 std::mutex g_mutex;
 std::vector<std::string> g_queue; // each entry is one JSON message object
 jsi::Runtime *g_runtime = nullptr;
+// Diagnostics: ops pushed by RN, times the Godot OpSink drained, ops it drained.
+// If pushed>0 but polls==0, the Godot side never ran the drain (OpSink/GDExtension
+// not up); if polls>0 and drained==pushed, ops reached Godot and any blank scene
+// is inside the engine (exec_op_json / render), not the transport.
+long long g_pushed = 0;
+long long g_polls = 0;
+long long g_drained = 0;
 
 void enqueue(std::string message) {
   std::lock_guard<std::mutex> lock(g_mutex);
   g_queue.push_back(std::move(message));
+  g_pushed++;
 }
 
 std::string utf8(jsi::Runtime &rt, const jsi::Value &v) {
@@ -88,6 +96,18 @@ void install(jsi::Runtime &rt) {
   // The registered native view component that shows the Godot viewport.
   api.setProperty(rt, "viewName", jsi::String::createFromAscii(rt, "ElpianGodotView"));
 
+  // stats(): a JSON string of transport counters for the on-device overlay.
+  api.setProperty(
+      rt, "stats",
+      host_fn(rt, "stats", 0,
+              [](jsi::Runtime &rt, const jsi::Value &, const jsi::Value *, size_t) -> jsi::Value {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                std::string s = "{\"pushed\":" + std::to_string(g_pushed) +
+                                ",\"polls\":" + std::to_string(g_polls) +
+                                ",\"drained\":" + std::to_string(g_drained) + "}";
+                return jsi::String::createFromUtf8(rt, s);
+              }));
+
   rt.global().setProperty(rt, "__ElpianGodot", api);
 }
 
@@ -96,6 +116,7 @@ void install(jsi::Runtime &rt) {
 // "" when none.
 std::string drain_queue() {
   std::lock_guard<std::mutex> lock(g_mutex);
+  g_polls++; // the Godot OpSink called us — proves the drain loop is alive
   if (g_queue.empty()) return {};
   std::string out;
   out.reserve(g_queue.size() * 32 + 2);
@@ -105,6 +126,7 @@ std::string drain_queue() {
     out += g_queue[i];
   }
   out.push_back(']');
+  g_drained += static_cast<long long>(g_queue.size());
   g_queue.clear();
   return out;
 }
