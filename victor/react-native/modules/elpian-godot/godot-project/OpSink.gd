@@ -94,7 +94,10 @@ func _apply(m: Dictionary) -> void:
 		var h := int(m["mount"])
 		if not _seeded.has(h):
 			_seeded[h] = true
-			_sink.call("exec_op_json", JSON.stringify({"new": "Node3D", "def": h}))
+			# The guest creates the mount Node3D (handle h) eagerly on the godot
+			# stream (see reactnative.js RN.scene3d), so it and its whole 3D
+			# subtree already exist here — just re-parent it into the scene so it
+			# renders. (Creating it again would orphan the guest's subtree.)
 			_sink.call("exec_op_json", JSON.stringify({"ref": SELF_HANDLE, "method": "add_child", "args": [{"ref": h}]}))
 	elif m.has("op"):
 		_sink.call("exec_op_json", JSON.stringify(m["op"]))
