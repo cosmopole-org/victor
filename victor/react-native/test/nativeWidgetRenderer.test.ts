@@ -121,6 +121,21 @@ test("mini apps are isolated: ops route by appId and polls don't cross", () => {
   assert.deepStrictEqual(firedB, [[1, "press"]], "b drains its own event");
 });
 
+test("events fire back into the VM on the sink path (callback not in store)", () => {
+  const fake = fakeWidgets();
+  const r = new NativeWidgetRenderer({ fire: () => {} }, fake.native);
+  const d = new HostDispatcher(new MockScene3dEngine(), r);
+  const invokes: Array<[string, string]> = [];
+  d.setInvokeSink((fn, arg) => invokes.push([fn, arg]));
+
+  rn(d, { new: "RNButton", def: 5 });
+  rn(d, { ref: 5, props: { onPress: { cb: 42 } } }); // connect routes to the sink
+
+  // The store never saw the callback (sink path); fireEvent must still resolve it.
+  d.fireEvent(5, "press", null);
+  assert.deepStrictEqual(invokes, [["__godotDispatch", JSON.stringify([42, null])]]);
+});
+
 test("without a binding, constructing throws a clear error", () => {
   delete (globalThis as { __ElpianWidgets?: ElpianWidgetsNative }).__ElpianWidgets;
   assert.throws(() => new NativeWidgetRenderer({ fire: () => {} }), /native widget backend .* not installed/);

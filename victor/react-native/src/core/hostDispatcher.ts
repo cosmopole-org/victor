@@ -34,6 +34,12 @@ export class HostDispatcher {
    */
   private readonly sink: WidgetSink;
   private readonly widgets?: WidgetRenderer;
+  /**
+   * Event callbacks by `${widgetId}:${event}` → cb id. Tracked here (not only in
+   * the store) so events fire back into the VM on the native/DOM sink path too,
+   * where `connect` goes to the platform renderer and never touches the store.
+   */
+  private readonly eventCbs = new Map<string, number>();
   /** Overridable commit strategy — the runtime debounces to one flush/frame. */
   commit: () => void;
 
@@ -138,14 +144,17 @@ export class HostDispatcher {
       }
       if (op.connect !== undefined && op.cb !== undefined) {
         this.sink.connect(ref, op.connect, op.cb);
+        this.eventCbs.set(cbKey(ref, op.connect), op.cb);
         return null;
       }
       if (op.disconnect !== undefined) {
         this.sink.disconnect(ref, op.disconnect);
+        this.eventCbs.delete(cbKey(ref, op.disconnect));
         return null;
       }
       if (op.free !== undefined) {
         this.sink.free(ref);
+        this.forgetCallbacks(ref);
         return null;
       }
       if (op.method !== undefined) {
@@ -196,7 +205,9 @@ export class HostDispatcher {
     for (const key of Object.keys(props)) {
       const value = props[key];
       if (key.length > 2 && key.startsWith("on") && isCb(value)) {
-        this.sink.connect(ref, eventName(key), value.cb);
+        const ev = eventName(key);
+        this.sink.connect(ref, ev, value.cb);
+        this.eventCbs.set(cbKey(ref, ev), value.cb);
       } else {
         this.sink.setProp(ref, key, this.unwrap(value));
       }
@@ -205,6 +216,14 @@ export class HostDispatcher {
 
   private unwrap(v: Wire | undefined): Wire {
     return v === undefined ? null : v;
+  }
+
+  /** Drop every event callback bound to a freed widget. */
+  private forgetCallbacks(ref: number): void {
+    const prefix = `${ref}:`;
+    for (const key of this.eventCbs.keys()) {
+      if (key.startsWith(prefix)) this.eventCbs.delete(key);
+    }
   }
 
   private reachable(ref: number, sbx: number): boolean {
@@ -233,7 +252,9 @@ export class HostDispatcher {
   // --- event delivery (renderer -> VM) -----------------------------------
   /** Fire a widget event: route it to the owning VM's guest closure. */
   fireEvent(widgetId: number, event: string, arg: Wire): void {
-    const cb = this.store.callbackFor(widgetId, event);
+    const cb =
+      this.eventCbs.get(cbKey(widgetId, event)) ||
+      this.store.callbackFor(widgetId, event);
     if (!cb) return;
     // Mirror the Godot signal path: __godotDispatch([cbId, arg]) — the manager
     // decodes the namespaced cb id and routes to the VM that owns it.
@@ -243,6 +264,11 @@ export class HostDispatcher {
 
 function childId(v: Wire): number {
   return isRef(v) ? v.ref : typeof v === "number" ? v : 0;
+}
+
+/** Registry key for an event callback: `${widgetId}:${event}`. */
+function cbKey(ref: number, event: string): string {
+  return `${ref}:${event}`;
 }
 
 /** "onChangeText" -> "changeText", "onPress" -> "press". */

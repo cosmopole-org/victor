@@ -25,6 +25,13 @@ class VictorSurfaceView(context: Context, appContext: AppContext) :
   // A lone app (the showcase) uses "main".
   var appId: String = "main"
 
+  // We build the child View tree ourselves (from the VM op stream) AFTER RN has
+  // laid out this ExpoView, so each addView triggers requestLayout. Without this,
+  // ExpoView drops those requestLayouts (RN owns layout) and the tree renders at
+  // zero size → a blank white surface. Opting into Android layout makes ExpoView
+  // force measure+layout after requestLayout so our tree actually lays out.
+  override val shouldUseAndroidLayout: Boolean = true
+
   init {
     addView(
       root,
