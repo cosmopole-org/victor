@@ -5,17 +5,14 @@
 // Installs a fake `globalThis.__ElpianGodot` binding (the shape the on-device
 // embedded-Godot module exposes) and drives 3D ops through the real
 // HostDispatcher into GodotScene3dEngineCore. This proves the RN→Godot seam:
-// godot.op/godot.batch the guest emits are forwarded to the native binding and
-// its handle replies flow back, and scene3d_mount binds a surface. The device
-// build swaps this fake for the real libgodot module (whose op servicing is the
-// GodotController proven headless in bridge/extension); the JS contract here is
-// identical.
+// godot.op/godot.batch are enqueued for the embedded engine, the guest's
+// allocated handle is echoed back synchronously, and scene3d_mount forwards the
+// surface's Godot mount node. The device build swaps this fake for the real
+// embedded engine (whose op servicing is the GodotController proven headless).
 
 import assert from "node:assert";
 import { HostDispatcher } from "../src/core/hostDispatcher.ts";
-import {
-  GodotScene3dEngineCore,
-} from "../src/scene3d/godotEngineCore.ts";
+import { GodotScene3dEngineCore } from "../src/scene3d/godotEngineCore.ts";
 import { getElpianGodotNative, type ElpianGodotNative } from "../src/scene3d/godotBinding.ts";
 
 let passed = 0;
@@ -33,24 +30,9 @@ interface FakeState {
 
 function installFakeGodot(): FakeState {
   const state: FakeState = { ops: [], mounts: [], released: [] };
-  let handle = 5000;
-  const mint = (op: Record<string, unknown>): number =>
-    typeof op.def === "number" ? op.def : ++handle;
-
   const fake: ElpianGodotNative = {
     op(opJson) {
-      const op = JSON.parse(opJson) as Record<string, unknown>;
-      state.ops.push(op);
-      return op.new ? JSON.stringify(mint(op)) : "null";
-    },
-    batch(opsJson) {
-      const ops = JSON.parse(opsJson) as Array<Record<string, unknown>>;
-      return JSON.stringify(
-        ops.map((op) => {
-          state.ops.push(op);
-          return op.new ? mint(op) : null;
-        }),
-      );
+      state.ops.push(JSON.parse(opJson) as Record<string, unknown>);
     },
     mountSurface(surfaceId, mountNode) {
       state.mounts.push([surfaceId, mountNode]);
@@ -77,25 +59,23 @@ test("isAvailable reflects whether the Godot binding is installed", () => {
   uninstallFakeGodot();
 });
 
-test("godot.op is routed to the native binding and its handle reply flows back", () => {
+test("godot.op is enqueued for the engine and the guest's handle is echoed", () => {
   const state = installFakeGodot();
   try {
-    const engine = new GodotScene3dEngineCore();
-    const d = new HostDispatcher(engine);
-
-    // A guest building a 3D node: the reply is the node handle it will reuse.
+    const d = new HostDispatcher(new GodotScene3dEngineCore());
+    // A guest building a 3D node: the reply is the handle it allocated.
     const reply = d.handle("godot.op", JSON.stringify([{ new: "Node3D", def: 10 }]));
     assert.strictEqual(reply, "10");
     assert.ok(
-      state.ops.some((o) => o.new === "Node3D"),
-      "the native binding should have received the Node3D op",
+      state.ops.some((o) => o.new === "Node3D" && o.def === 10),
+      "the op should have been enqueued for the embedded engine",
     );
   } finally {
     uninstallFakeGodot();
   }
 });
 
-test("godot.batch services many ops in one crossing, one reply each", () => {
+test("godot.batch enqueues every op and echoes each handle", () => {
   const state = installFakeGodot();
   try {
     const d = new HostDispatcher(new GodotScene3dEngineCore());
@@ -110,12 +90,10 @@ test("godot.batch services many ops in one crossing, one reply each", () => {
   }
 });
 
-test("scene3d_mount binds the Scene3D surface to its Godot mount node", () => {
+test("scene3d_mount forwards the Scene3D surface's Godot mount node", () => {
   const state = installFakeGodot();
   try {
     const d = new HostDispatcher(new GodotScene3dEngineCore());
-    // The guest allocates the Scene3D widget and its Godot mount-node handle,
-    // then requests the mount — exactly what the reactnative.js prelude emits.
     d.handle("rn.op", JSON.stringify([{ new: "RNScene3D", def: 1 }]));
     d.handle("rn.op", JSON.stringify([{ ref: 1, method: "scene3d_mount", args: [{ ref: 777 }] }]));
     assert.deepStrictEqual(state.mounts, [[1, 777]]);

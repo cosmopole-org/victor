@@ -242,12 +242,43 @@ the native JSI `VmBackend` + native Godot view seams are installed; Expo **web**
 runs the real VM today. (The separate `android-apk.yml` builds the native Godot
 host demo — a different app.)
 
+## One widget set, every platform (zero React glue)
+
+The VM emits one op stream against **one canonical widget set** (the
+`WidgetSink` interface in `src/core/widgetSink.ts`); a per-platform *renderer*
+turns those ops into that platform's **own** native widgets, with no React
+reconciler, state, or rendering in the path — the VM mutates the native tree
+directly:
+
+| Platform | VM backend | Widget renderer | 3D `Scene3D` |
+| --- | --- | --- | --- |
+| **Web** | `elpian_rn.wasm` | `DomWidgetRenderer` → real DOM (`mountDom`) | `WebGodotEngine` → Godot HTML5 |
+| **Android** | JSI `NativeVmBackend` (`libelpian_rn.so`) | `NativeWidgetRenderer` → `android.view.View` (FlexboxLayout) | embedded Godot view |
+| **iOS** | JSI `NativeVmBackend` (`libelpian_rn.a`) | `NativeWidgetRenderer` → `UIView` (UIStackView) | embedded Godot view |
+| **Desktop** | the web build | `DomWidgetRenderer` in a shell | `WebGodotEngine` |
+
+One guest program naming widget kinds (`view`, `text`, `scroll`, `input`,
+`switch`, `slider`, `button`, `scene3d`, …) renders on all of them — the shared
+`WIDGET_CATALOG` (`src/render/widgetCatalog.ts`) maps each kind to the right
+native widget per platform. `scene3d` is just another widget in that set.
+
+When a platform's native toolkit is present the VM drives it directly (the
+single `<VictorSurface/>` host on mobile, the container element on web);
+otherwise the React `<VictorHost/>` renders the retained store — the same graceful
+fallback everywhere.
+
 ## Platform notes
 
-- **Web / Expo web** — runs the real `elpian_rn.wasm` today. Godot 3D can be a
-  Godot HTML5 export wired to an `RnScene3dEngine`.
-- **iOS / Android / desktop** — Hermes has no WebAssembly runtime, so the
-  production native path is a JSI `VmBackend` (build `native/elpian-rn` as a
-  static lib behind an Expo module) plus a native Godot view. The seams for both
-  are defined (`VmBackend`, `RnScene3dEngine`); until they're installed, native
-  shows a graceful placeholder while the 2D app runs.
+- **Web / Expo web** — runs the real `elpian_rn.wasm` and drives real DOM through
+  `DomWidgetRenderer` (jsdom-tested). `RN.Scene3D` renders through a Godot HTML5
+  export when loaded (`web/godot/`), else a blank canvas.
+- **Android** — the JSI `NativeVmBackend` runs the VM natively (Hermes has no
+  WebAssembly); `NativeWidgetRenderer` builds an `android.view.View` tree and the
+  embedded Godot module renders 3D. Built + shipped by the APK workflow.
+- **iOS** — the same three native modules, authored to the Expo/iOS build (Swift
+  + shared JSI C++); the Rust static lib, `libgodot.ios`, and the iOS GDExtension
+  are Mac-only build artifacts (see each module's `ios/README.md`).
+- **Desktop** — desktop *is* the web renderer: package the web build (real DOM
+  widgets + Godot HTML5) in a native shell (Tauri/Electron). No new widget code —
+  the same `mountDom` entry and guest program. Per-ABI/other-arch Godot binaries
+  beyond `arm64` are additional build artifacts, not code changes.

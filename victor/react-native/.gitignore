@@ -18,7 +18,7 @@ native/elpian-rn/target/
 /ios/
 
 # Native VM shared libs, cross-compiled by CI into the elpian-rn module
-modules/*/android/src/main/jniLibs/
+modules/elpian-rn/android/src/main/jniLibs/
 
 # Godot embed project editor cache (regenerated on pack)
 modules/elpian-godot/godot-project/.godot/

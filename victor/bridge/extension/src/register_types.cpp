@@ -6,6 +6,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "elpian_scene3d.h"
 #include "elpian_vm_node.h"
 #include "flutter_view.h"
 
@@ -15,6 +16,9 @@ void initialize_elpian_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
+	/* The React Native embed uses this VM-less op-sink; ElpianVM (below) is for
+	 * the Godot-hosted app where Godot owns the VM. */
+	GDREGISTER_CLASS(elpian::ElpianScene3D);
 	GDREGISTER_CLASS(elpian::ElpianVM);
 	/* The Flutter surface node. Registered in every build (the class is inert
 	 * without ELPIAN_WITH_FLUTTER) so scenes/tooling referencing it still load. */

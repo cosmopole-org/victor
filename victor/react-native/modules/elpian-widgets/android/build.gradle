@@ -1,0 +1,45 @@
+apply plugin: 'com.android.library'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+group = 'expo.modules.elpianwidgets'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(
+    project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+android {
+  namespace "expo.modules.elpianwidgets"
+  compileSdkVersion rootProject.hasProperty("compileSdkVersion") ? rootProject.compileSdkVersion : 34
+
+  defaultConfig {
+    minSdkVersion rootProject.hasProperty("minSdkVersion") ? rootProject.minSdkVersion : 24
+    externalNativeBuild {
+      cmake {
+        cppFlags "-std=c++17", "-fexceptions", "-frtti"
+        arguments "-DANDROID_STL=c++_shared"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake { path "CMakeLists.txt" }
+  }
+
+  packagingOptions {
+    pickFirst "**/libc++_shared.so"
+  }
+
+  buildFeatures { prefab true }
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+  // Native flexbox layout so the guest's flex styling lays out natively.
+  implementation "com.google.android.flexbox:flexbox:3.0.0"
+  implementation "androidx.appcompat:appcompat:1.6.1"
+  implementation "androidx.core:core-ktx:1.12.0"
+}

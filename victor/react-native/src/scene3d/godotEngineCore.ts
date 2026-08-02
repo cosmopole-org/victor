@@ -1,15 +1,19 @@
 // The op-servicing half of the native Godot engine, kept React-free so it stays
-// Node-testable (the `.tsx` subclass adds `renderSurface`). It forwards every
+// Node-testable (the `.tsx` subclass adds `renderSurface`). It enqueues every
 // `godot.op`/`godot.batch`/`scene3d_mount` the host dispatcher routes here to
-// the synchronous native binding (`globalThis.__ElpianGodot`), which drives a
-// real Godot 3D world — the same reflective GodotController proven headless in
-// `bridge/extension` (see the Godot Scene3D CI test).
+// the native binding (`globalThis.__ElpianGodot`), which feeds the embedded
+// Godot engine — the same reflective GodotController proven headless in
+// `bridge/extension` and `modules/elpian-godot/godot-project`.
+//
+// Handles are guest-allocated, so the reply the guest needs is just the `def`
+// it already chose; we echo it synchronously here while the engine renders the
+// op a frame later. No synchronous call into Godot.
 
 import type { Op, Wire } from "../core/protocol.ts";
 import type { Scene3dEngine } from "../core/scene3dEngine.ts";
 import { getElpianGodotNative, type ElpianGodotNative } from "./godotBinding.ts";
 
-/** Services 3D ops through the native Godot binding. */
+/** Services 3D ops by enqueuing them for the embedded Godot engine. */
 export class GodotScene3dEngineCore implements Scene3dEngine {
   protected native: ElpianGodotNative;
 
@@ -23,16 +27,14 @@ export class GodotScene3dEngineCore implements Scene3dEngine {
   }
 
   op(op: Op): Wire {
-    return parseReply(this.native.op(JSON.stringify(op)));
+    this.native.op(JSON.stringify(op));
+    // Echo the handle the guest allocated (creates carry `def`; `self`/`tree`
+    // do too); everything else the guest tolerates as null.
+    return typeof op.def === "number" && op.def !== 0 ? op.def : null;
   }
 
   batch(ops: Op[]): Wire[] {
-    const reply = parseReply(this.native.batch(JSON.stringify(ops)));
-    // A well-formed reply is one Wire per op; fall back to nulls on a mismatch
-    // so a malformed batch reply never desyncs the guest's handle expectations.
-    return Array.isArray(reply) && reply.length === ops.length
-      ? (reply as Wire[])
-      : ops.map(() => null);
+    return ops.map((o) => this.op(o));
   }
 
   mountSurface(surfaceId: number, mountNode: number): void {
@@ -41,16 +43,6 @@ export class GodotScene3dEngineCore implements Scene3dEngine {
 
   releaseSurface(surfaceId: number): void {
     this.native.releaseSurface(surfaceId);
-  }
-}
-
-/** Parse a native JSON reply; an empty/invalid reply becomes `null`. */
-function parseReply(reply: string): Wire {
-  if (!reply) return null;
-  try {
-    return JSON.parse(reply) as Wire;
-  } catch {
-    return null;
   }
 }
 

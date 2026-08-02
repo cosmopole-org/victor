@@ -1,29 +1,26 @@
-// The native Godot binding contract. On device, the embedded-Godot module (a
-// libgodot view + the reflective GodotController, the same C++ that services the
-// Godot host today) installs `globalThis.__ElpianGodot`: a synchronous JSI
-// surface that services the guest's `godot.op`/`godot.batch` calls against a
-// real Godot 3D world and binds each React Native `<Scene3D/>` widget to a
-// viewport into it.
+// The native Godot binding contract. On device, the embedded-Godot module
+// installs `globalThis.__ElpianGodot`: it enqueues each 3D op for the embedded
+// Godot engine (the OpSink scene drains the queue and applies ops through the
+// reflective GodotController, building a real 3D scene) and hosts the viewport
+// as a native view.
 //
-// It is the exact mirror of the GDExtension's `exec_op_json` scripting surface
-// (see `bridge/extension/src/elpian_vm_node.*`): one op in, its JSON reply out.
-// Synchronous by necessity — a `godot.op` that creates a node returns the node
-// handle the guest immediately uses.
+// Ops are enqueued fire-and-forget: the embedded engine renders a frame later,
+// and the guest's reply (the handle it allocated) is echoed synchronously on
+// the JS side (see GodotScene3dEngineCore), so no synchronous cross-thread call
+// into Godot is needed.
 
-/** The JSI binding the native embedded-Godot module installs. Synchronous. */
+/** The JSI binding the native embedded-Godot module installs. */
 export interface ElpianGodotNative {
-  /** Service one 3D op (`{new:"Node3D",…}` etc.); returns its JSON reply. */
-  op(opJson: string): string;
-  /** Service a batch of ops in one crossing; returns a JSON array of replies. */
-  batch(opsJson: string): string;
-  /** Bind a `Scene3D` widget (`surfaceId`) to a viewport over `mountNode`. */
+  /** Enqueue one 3D op (`{new:"Node3D",…}`) for the embedded engine. */
+  op(opJson: string): void;
+  /** Bind a `Scene3D` widget to a viewport rooted at `mountNode`. */
   mountSurface(surfaceId: number, mountNode: number): void;
   /** Release a surface's viewport when its `Scene3D` widget is freed. */
   releaseSurface(surfaceId: number): void;
   /**
-   * The registered native view component that displays a surface's viewport
-   * (`requireNativeComponent(viewName)`). Absent when the module ships the op
-   * seam but not (yet) the view — surfaces then show the placeholder.
+   * The registered native view component that displays the Godot viewport
+   * (`requireNativeComponent(viewName)`). Absent when the op seam ships without
+   * the view — surfaces then show the placeholder.
    */
   viewName?: string;
 }

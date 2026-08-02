@@ -18,6 +18,7 @@
 // (root swap / toast), which the top-level host observes.
 
 import type { Wire } from "./protocol.ts";
+import type { WidgetSink } from "./widgetSink.ts";
 
 export interface WidgetNode {
   /** Manager-namespaced handle id (unique across the whole VM tree). */
@@ -43,7 +44,7 @@ export type ChangeListener = () => void;
  * ops arrive; observed by `<VictorHost/>` (app-level) and one `<WidgetView/>`
  * per node (targeted) which re-render on the relevant version bump.
  */
-export class WidgetStore {
+export class WidgetStore implements WidgetSink {
   private nodes = new Map<number, WidgetNode>();
   private rootId = 0;
   private toastMessage: string | null = null;
@@ -125,6 +126,10 @@ export class WidgetStore {
   }
   get(id: number): WidgetNode | null {
     return this.nodes.get(id) ?? null;
+  }
+  /** WidgetSink: read one prop (the guest's `get` op). */
+  getProp(id: number, key: string): Wire {
+    return this.nodes.get(id)?.props[key] ?? null;
   }
   takeToast(): string | null {
     const t = this.toastMessage;

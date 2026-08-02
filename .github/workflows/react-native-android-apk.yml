@@ -83,9 +83,16 @@ jobs:
           node --experimental-strip-types test/patching.test.ts
           node --experimental-strip-types test/nativeBackend.test.ts
           node --experimental-strip-types test/godotEngine.test.ts
+          node --experimental-strip-types test/webGodotEngine.test.ts
+          node --experimental-strip-types test/widgetRenderer.test.ts
+          node --experimental-strip-types test/widgetCoverage.test.ts
+          node --experimental-strip-types test/nativeWidgetRenderer.test.ts
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+
+      - name: Web DOM renderer test (needs jsdom)
+        run: node --experimental-strip-types test/domWidgetRenderer.test.ts
 
       - name: Prebuild the native Android project (CNG)
         run: npx expo prebuild --platform android --no-install

@@ -15,6 +15,7 @@ import {
   wireError,
 } from "./protocol.ts";
 import { WidgetStore } from "./widgetStore.ts";
+import type { WidgetSink, WidgetRenderer } from "./widgetSink.ts";
 import type { Scene3dEngine } from "./scene3dEngine.ts";
 
 /** Called to push a guest function invocation back into the VM. */
@@ -25,12 +26,22 @@ export class HostDispatcher {
   readonly log: string[] = [];
   private engine: Scene3dEngine;
   private invokeSink: InvokeSink = () => {};
+  /**
+   * Where widget ops go. A native/DOM renderer (`opts.widgets`) drives the
+   * platform's own widgets directly; otherwise the retained WidgetStore backs
+   * the React `<VictorHost/>`. Sandbox governance stays on the store (only
+   * exercised by mini-app spawning, which uses the store path).
+   */
+  private readonly sink: WidgetSink;
+  private readonly widgets?: WidgetRenderer;
   /** Overridable commit strategy — the runtime debounces to one flush/frame. */
   commit: () => void;
 
-  constructor(engine: Scene3dEngine) {
+  constructor(engine: Scene3dEngine, widgets?: WidgetRenderer) {
     this.engine = engine;
-    this.commit = () => this.store.flush();
+    this.widgets = widgets;
+    this.sink = widgets ?? this.store;
+    this.commit = widgets ? () => widgets.flush() : () => this.store.flush();
   }
 
   setInvokeSink(fn: InvokeSink): void {
@@ -84,7 +95,7 @@ export class HostDispatcher {
     if (op.grant !== undefined) return this.store.addOwner(op.grant, op.sbx ?? 0);
 
     if (op.new !== undefined && op.def !== undefined) {
-      this.store.create(op.def, op.new, sbx);
+      this.sink.create(op.def, op.new, sbx);
       return op.def;
     }
     if (op.self === true) {
@@ -101,11 +112,11 @@ export class HostDispatcher {
           : typeof op.root === "number"
             ? op.root
             : 0;
-      if (rid) this.store.setRoot(rid);
+      if (rid) this.sink.setRoot(rid);
       return null;
     }
     if (op.toast !== undefined) {
-      this.store.toast(op.toast);
+      this.sink.toast(op.toast);
       return null;
     }
 
@@ -115,7 +126,7 @@ export class HostDispatcher {
         return wireError(`rn.op: widget ${ref} is outside this VM's sandbox`);
       }
       if (op.set !== undefined) {
-        this.store.setProp(ref, op.set, this.unwrap(op.value));
+        this.sink.setProp(ref, op.set, this.unwrap(op.value));
         return null;
       }
       if (op.props !== undefined) {
@@ -123,18 +134,18 @@ export class HostDispatcher {
         return null;
       }
       if (op.get !== undefined) {
-        return this.store.get(ref)?.props[op.get] ?? null;
+        return this.sink.getProp(ref, op.get);
       }
       if (op.connect !== undefined && op.cb !== undefined) {
-        this.store.connect(ref, op.connect, op.cb);
+        this.sink.connect(ref, op.connect, op.cb);
         return null;
       }
       if (op.disconnect !== undefined) {
-        this.store.disconnect(ref, op.disconnect);
+        this.sink.disconnect(ref, op.disconnect);
         return null;
       }
       if (op.free !== undefined) {
-        this.store.free(ref);
+        this.sink.free(ref);
         return null;
       }
       if (op.method !== undefined) {
@@ -148,22 +159,22 @@ export class HostDispatcher {
     switch (method) {
       case "add_child": {
         const child = childId(args[0]);
-        if (child) this.store.addChild(ref, child);
+        if (child) this.sink.addChild(ref, child);
         return null;
       }
       case "insert_child": {
         const child = childId(args[0]);
         const index = typeof args[1] === "number" ? args[1] : undefined;
-        if (child) this.store.addChild(ref, child, index);
+        if (child) this.sink.addChild(ref, child, index);
         return null;
       }
       case "remove_child": {
         const child = childId(args[0]);
-        if (child) this.store.removeChild(ref, child);
+        if (child) this.sink.removeChild(ref, child);
         return null;
       }
       case "clear_children": {
-        this.store.clearChildren(ref);
+        this.sink.clearChildren(ref);
         return null;
       }
       case "scene3d_mount": {
@@ -185,9 +196,9 @@ export class HostDispatcher {
     for (const key of Object.keys(props)) {
       const value = props[key];
       if (key.length > 2 && key.startsWith("on") && isCb(value)) {
-        this.store.connect(ref, eventName(key), value.cb);
+        this.sink.connect(ref, eventName(key), value.cb);
       } else {
-        this.store.setProp(ref, key, this.unwrap(value));
+        this.sink.setProp(ref, key, this.unwrap(value));
       }
     }
   }

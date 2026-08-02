@@ -27,6 +27,14 @@ export {
   GodotScene3dEngine,
   createGodotScene3dEngine,
 } from "./scene3d/GodotScene3dEngine.tsx";
+export {
+  getElpianGodotWeb,
+  type ElpianGodotWeb,
+} from "./scene3d/webGodotBinding.ts";
+export {
+  WebGodotEngine,
+  type SurfaceResolver,
+} from "./scene3d/webGodotEngine.ts";
 
 export {
   type VmBackend,
@@ -52,6 +60,20 @@ export {
 
 export { VictorHost, type VictorHostProps } from "./render/VictorHost.tsx";
 export { renderNode, WidgetView, type RenderContext } from "./render/renderNode.tsx";
+export {
+  type WidgetSink,
+  type WidgetRenderer,
+} from "./core/widgetSink.ts";
+export { WIDGET_CATALOG, type NativeWidgetMap } from "./render/widgetCatalog.ts";
+export { DomWidgetRenderer, type DomHost } from "./render/domWidgetRenderer.ts";
+export { mountDom, type MountDomOptions } from "./render/mountDom.ts";
+export {
+  NativeWidgetRenderer,
+  getElpianWidgetsNative,
+  MAIN_APP,
+  type ElpianWidgetsNative,
+  type NativeWidgetHost,
+} from "./render/nativeWidgetRenderer.ts";
 export { toStyle, STYLE_KEYS } from "./render/style.ts";
 export { componentFor, registerComponent } from "./render/components.ts";
 export {
