@@ -13,6 +13,7 @@ var _sink
 var _bridge
 var _seeded := {}
 var _frame := 0
+var _first := ""   # raw first op batch (to inspect actual device handles)
 const SELF_HANDLE := 1
 
 func _ready() -> void:
@@ -30,6 +31,8 @@ func _process(_dt: float) -> void:
 		return
 	var json: String = _bridge.pollOps()
 	if not json.is_empty():
+		if _first == "":
+			_first = json.substr(0, 220)
 		var msgs = JSON.parse_string(json)
 		if typeof(msgs) == TYPE_ARRAY:
 			for m in msgs:
@@ -82,7 +85,7 @@ func _summarize() -> String:
 		for c in n.get_children():
 			stack.push_back(c)
 	var vp = get_viewport().get_visible_rect().size if get_viewport() != null else Vector2.ZERO
-	return "nodes=%d cam=%d/%d mesh=%d env=%d vp=%s campos=%s" % [total, cur, cams, meshes, envs, str(vp), campos]
+	return "nodes=%d cam=%d/%d mesh=%d env=%d vp=%s mounts=%s first=%s" % [total, cur, cams, meshes, envs, str(vp), str(_seeded.keys()), _first]
 
 # A message is either a raw op {"op": {...}} or a surface mount
 # {"mount": <godot-handle>} the host establishes for a Scene3D viewport.
