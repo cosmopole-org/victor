@@ -72,11 +72,12 @@ class VictorSurfaceView(context: Context, appContext: AppContext) :
     }
   }
 
-  /** Called by WidgetController on a widget event; queued for this app's JS poll. */
-  fun pushEvent(id: Int, event: String, argJson: String?) = nativePushEvent(appId, id, event, argJson)
+  /** Called by WidgetController on a widget event; queued for this app's JS poll.
+   *  id is a 64-bit widget handle (VM id in the high bits) — must not truncate. */
+  fun pushEvent(id: Long, event: String, argJson: String?) = nativePushEvent(appId, id, event, argJson)
 
   private external fun nativePollOps(appId: String): String
-  private external fun nativePushEvent(appId: String, id: Int, event: String, argJson: String?)
+  private external fun nativePushEvent(appId: String, id: Long, event: String, argJson: String?)
 
   companion object {
     init {

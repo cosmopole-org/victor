@@ -39,10 +39,14 @@ class WidgetController(
     val content: ViewGroup, // where children attach (== view unless a scroller)
     val kind: String,
     val props: MutableMap<String, Any?> = HashMap(),
-    val events: MutableMap<String, Int> = HashMap(),
+    val events: MutableMap<String, Long> = HashMap(),
   )
 
-  private val entries = HashMap<Int, Entry>()
+  // Widget ids are 64-bit handles: the VM manager packs the owning VM id into the
+  // high 32 bits (encode_handle => 2^32*vm + local), so ids routinely exceed
+  // Int range. Parsing them as Int would truncate (2^32+9 -> 9) and desync the
+  // native id from the JS side, so every id is a Long end to end.
+  private val entries = HashMap<Long, Entry>()
   private val density = context.resources.displayMetrics.density
 
   private fun dp(v: Double): Int = (v * density).toInt()
@@ -50,20 +54,20 @@ class WidgetController(
   // Apply one op message (see NativeWidgetRenderer.send).
   fun apply(op: JSONObject) {
     when (op.optString("t")) {
-      "create" -> create(op.getInt("id"), op.optString("cls"), op.optString("k", "view"))
-      "set" -> setProp(op.getInt("id"), op.optString("k"), op.opt("v"))
-      "connect" -> connect(op.getInt("id"), op.optString("e"), op.optInt("cb"))
-      "disconnect" -> entries[op.getInt("id")]?.events?.remove(op.optString("e"))
-      "add" -> addChild(op.getInt("p"), op.getInt("c"), op.optInt("i", -1))
-      "remove" -> removeChild(op.getInt("p"), op.getInt("c"))
-      "clear" -> entries[op.getInt("p")]?.content?.removeAllViews()
-      "free" -> entries.remove(op.getInt("id"))
-      "root" -> setRoot(op.getInt("id"))
+      "create" -> create(op.getLong("id"), op.optString("cls"), op.optString("k", "view"))
+      "set" -> setProp(op.getLong("id"), op.optString("k"), op.opt("v"))
+      "connect" -> connect(op.getLong("id"), op.optString("e"), op.optLong("cb"))
+      "disconnect" -> entries[op.getLong("id")]?.events?.remove(op.optString("e"))
+      "add" -> addChild(op.getLong("p"), op.getLong("c"), op.optInt("i", -1))
+      "remove" -> removeChild(op.getLong("p"), op.getLong("c"))
+      "clear" -> entries[op.getLong("p")]?.content?.removeAllViews()
+      "free" -> entries.remove(op.getLong("id"))
+      "root" -> setRoot(op.getLong("id"))
       "toast" -> android.widget.Toast.makeText(context, op.optString("m"), android.widget.Toast.LENGTH_SHORT).show()
     }
   }
 
-  private fun create(id: Int, cls: String, kind: String) {
+  private fun create(id: Long, cls: String, kind: String) {
     val (view, content) = build(kind)
     entries[id] = Entry(view, content, kind)
   }
@@ -97,7 +101,7 @@ class WidgetController(
     }
   }
 
-  private fun setProp(id: Int, key: String, value: Any?) {
+  private fun setProp(id: Long, key: String, value: Any?) {
     val e = entries[id] ?: return
     e.props[key] = value
     val v = e.view
@@ -149,7 +153,7 @@ class WidgetController(
     v.layoutParams = lp
   }
 
-  private fun connect(id: Int, event: String, cb: Int) {
+  private fun connect(id: Long, event: String, cb: Long) {
     val e = entries[id] ?: return
     e.events[event] = cb
     val v = e.view
@@ -171,7 +175,7 @@ class WidgetController(
     }
   }
 
-  private fun addChild(parentId: Int, childId: Int, index: Int) {
+  private fun addChild(parentId: Long, childId: Long, index: Int) {
     val p = entries[parentId] ?: return
     val c = entries[childId] ?: return
     (c.view.parent as? ViewGroup)?.removeView(c.view)
@@ -193,13 +197,13 @@ class WidgetController(
     return base
   }
 
-  private fun removeChild(parentId: Int, childId: Int) {
+  private fun removeChild(parentId: Long, childId: Long) {
     val p = entries[parentId] ?: return
     val c = entries[childId] ?: return
     p.content.removeView(c.view)
   }
 
-  private fun setRoot(id: Int) {
+  private fun setRoot(id: Long) {
     val e = entries[id] ?: return
     root.removeAllViews()
     (e.view.parent as? ViewGroup)?.removeView(e.view)

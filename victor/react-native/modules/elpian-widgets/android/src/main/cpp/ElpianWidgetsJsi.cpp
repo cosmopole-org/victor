@@ -104,7 +104,7 @@ std::string drain_ops(const std::string &app) {
   return out;
 }
 
-void push_event(const std::string &app, int id, const std::string &event,
+void push_event(const std::string &app, long long id, const std::string &event,
                 const char *argJson) {
   std::string elem = "[" + std::to_string(id) + ",\"" + event + "\"," +
                      std::string(argJson && argJson[0] ? argJson : "null") + "]";
@@ -134,7 +134,7 @@ Java_expo_modules_elpianwidgets_VictorSurfaceView_nativePollOps(JNIEnv *env, job
 
 extern "C" JNIEXPORT void JNICALL
 Java_expo_modules_elpianwidgets_VictorSurfaceView_nativePushEvent(
-    JNIEnv *env, jobject, jstring appId, jint id, jstring event, jstring argJson) {
+    JNIEnv *env, jobject, jstring appId, jlong id, jstring event, jstring argJson) {
   const char *app = env->GetStringUTFChars(appId, nullptr);
   const char *e = env->GetStringUTFChars(event, nullptr);
   const char *a = argJson ? env->GetStringUTFChars(argJson, nullptr) : nullptr;
@@ -161,7 +161,7 @@ extern "C" const char *ElpianWidgetsDrainOps(const char *appId) {
   return buf;
 }
 
-extern "C" void ElpianWidgetsPushEvent(const char *appId, int id, const char *event,
+extern "C" void ElpianWidgetsPushEvent(const char *appId, long long id, const char *event,
                                        const char *argJson) {
   elpianwidgets::push_event(appId ? appId : "main", id, event ? event : "", argJson);
 }
