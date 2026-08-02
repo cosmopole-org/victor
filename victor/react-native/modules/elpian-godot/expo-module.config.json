@@ -1,6 +1,9 @@
 {
-  "platforms": ["android"],
+  "platforms": ["android", "apple"],
   "android": {
     "modules": ["expo.modules.elpiangodot.ElpianGodotModule"]
+  },
+  "apple": {
+    "modules": ["ElpianGodotModule"]
   }
 }

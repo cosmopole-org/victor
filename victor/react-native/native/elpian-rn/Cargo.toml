@@ -7,8 +7,9 @@ description = "WebAssembly bridge that runs the Elpian VM multi-VM tree under a 
 
 [lib]
 name = "elpian_rn"
-# cdylib -> a .wasm module for the RN/Expo host; rlib -> host-side Rust tests.
-crate-type = ["cdylib", "rlib"]
+# cdylib -> a .wasm module for the web host and a .so for Android; staticlib -> a
+# libelpian_rn.a linked into the iOS module (xcframework); rlib -> host tests.
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # The whole multi-VM manager (spawn / pause / resume / terminate, per-VM

@@ -11,13 +11,16 @@
 // its JSON reply back to Rust — all on this one thread — so the globals below
 // are safe without locking.
 
-#include <jni.h>
 #include <jsi/jsi.h>
 
 #include <cstring>
 #include <memory>
 #include <string>
 #include <unordered_map>
+
+#if defined(__ANDROID__)
+#include <jni.h>
+#endif
 
 #include "elpian_rn_capi.h"
 
@@ -214,9 +217,20 @@ void install(jsi::Runtime &rt) {
 
 } // namespace elpianrn
 
+#if defined(__ANDROID__)
+// Android: the Kotlin module hands us the JSI runtime pointer over JNI.
 extern "C" JNIEXPORT void JNICALL
 Java_expo_modules_elpianrn_ElpianRnModule_nativeInstall(JNIEnv *, jobject, jlong jsiPtr) {
   if (jsiPtr != 0) {
     elpianrn::install(*reinterpret_cast<jsi::Runtime *>(jsiPtr));
+  }
+}
+#endif
+
+// iOS: the Swift/ObjC++ module resolves the runtime and calls this plain-C entry
+// (no JNI). Same shared elpianrn::install used on both platforms.
+extern "C" void ElpianRnInstall(void *jsiRuntimePtr) {
+  if (jsiRuntimePtr != nullptr) {
+    elpianrn::install(*reinterpret_cast<jsi::Runtime *>(jsiRuntimePtr));
   }
 }

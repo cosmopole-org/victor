@@ -6,12 +6,17 @@
 // call into Godot is needed. The queue is the one shared point between the JS
 // thread (push) and the Godot thread (poll), guarded by a mutex.
 
-#include <jni.h>
 #include <jsi/jsi.h>
 
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#if defined(__ANDROID__)
+#include <jni.h>
+#endif
 
 using namespace facebook;
 
@@ -86,8 +91,27 @@ void install(jsi::Runtime &rt) {
   rt.global().setProperty(rt, "__ElpianGodot", api);
 }
 
+// Platform-agnostic drain the Godot-side OpSink polls each frame (Android over
+// JNI; iOS over ObjC++). Returns the pending messages as a JSON array string, or
+// "" when none.
+std::string drain_queue() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_queue.empty()) return {};
+  std::string out;
+  out.reserve(g_queue.size() * 32 + 2);
+  out.push_back('[');
+  for (size_t i = 0; i < g_queue.size(); ++i) {
+    if (i) out.push_back(',');
+    out += g_queue[i];
+  }
+  out.push_back(']');
+  g_queue.clear();
+  return out;
+}
+
 } // namespace elpiangodot
 
+#if defined(__ANDROID__)
 extern "C" JNIEXPORT void JNICALL
 Java_expo_modules_elpiangodot_ElpianGodotModule_nativeInstall(JNIEnv *, jobject, jlong jsiPtr) {
   if (jsiPtr != 0) {
@@ -95,24 +119,23 @@ Java_expo_modules_elpiangodot_ElpianGodotModule_nativeInstall(JNIEnv *, jobject,
   }
 }
 
-// Drain the op queue for the Godot-side OpSink (ElpianGodotBridge.pollOps).
-// Returns a JSON array string of the pending messages, or "" when none.
 extern "C" JNIEXPORT jstring JNICALL
 Java_expo_modules_elpiangodot_ElpianGodotBridge_nativePollOps(JNIEnv *env, jobject) {
-  std::string out;
-  {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_queue.empty()) {
-      return env->NewStringUTF("");
-    }
-    out.reserve(g_queue.size() * 32 + 2);
-    out.push_back('[');
-    for (size_t i = 0; i < g_queue.size(); ++i) {
-      if (i) out.push_back(',');
-      out += g_queue[i];
-    }
-    out.push_back(']');
-    g_queue.clear();
+  return env->NewStringUTF(elpiangodot::drain_queue().c_str());
+}
+#endif // __ANDROID__
+
+// iOS plain-C entries (no JNI): install on a runtime pointer, and drain the
+// queue (returns a malloc'd C string the caller frees).
+extern "C" void ElpianGodotInstall(void *jsiRuntimePtr) {
+  if (jsiRuntimePtr != nullptr) {
+    elpiangodot::install(*reinterpret_cast<jsi::Runtime *>(jsiRuntimePtr));
   }
-  return env->NewStringUTF(out.c_str());
+}
+
+extern "C" const char *ElpianGodotDrainOps() {
+  std::string out = elpiangodot::drain_queue();
+  char *buf = static_cast<char *>(malloc(out.size() + 1));
+  std::memcpy(buf, out.c_str(), out.size() + 1);
+  return buf;
 }

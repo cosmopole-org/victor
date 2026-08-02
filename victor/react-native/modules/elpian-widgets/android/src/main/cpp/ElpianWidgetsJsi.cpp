@@ -6,13 +6,18 @@
 // drains them each frame (pollEvents) — so there is no native→JS cross-thread
 // call. Two mutex-guarded queues are the only shared state.
 
-#include <jni.h>
 #include <jsi/jsi.h>
 
+#include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#if defined(__ANDROID__)
+#include <jni.h>
+#endif
 
 using namespace facebook;
 
@@ -87,8 +92,31 @@ void install(jsi::Runtime &rt) {
   rt.global().setProperty(rt, "__ElpianWidgets", api);
 }
 
+// Platform-agnostic queue accessors the host surface (Android VictorSurfaceView
+// over JNI; iOS VictorSurface over ObjC++) calls to drain ops / enqueue events
+// for one mini app. The op/pollEvents *JSI* side above is shared verbatim.
+std::string drain_ops(const std::string &app) {
+  std::lock_guard<std::mutex> lock(g_op_mutex);
+  auto it = g_ops.find(app);
+  if (it == g_ops.end() || it->second.empty()) return {};
+  std::string out = join_array(it->second);
+  it->second.clear();
+  return out;
+}
+
+void push_event(const std::string &app, int id, const std::string &event,
+                const char *argJson) {
+  std::string elem = "[" + std::to_string(id) + ",\"" + event + "\"," +
+                     std::string(argJson && argJson[0] ? argJson : "null") + "]";
+  std::lock_guard<std::mutex> lock(g_ev_mutex);
+  g_events[app].push_back(std::move(elem));
+}
+
 } // namespace elpianwidgets
 
+#if defined(__ANDROID__)
+// Android: the Kotlin module hands us the JSI runtime pointer, and the
+// VictorSurfaceView drains ops / pushes events over JNI (→ shared accessors).
 extern "C" JNIEXPORT void JNICALL
 Java_expo_modules_elpianwidgets_ElpianWidgetsModule_nativeInstall(JNIEnv *, jobject, jlong jsiPtr) {
   if (jsiPtr != 0) {
@@ -96,40 +124,44 @@ Java_expo_modules_elpianwidgets_ElpianWidgetsModule_nativeInstall(JNIEnv *, jobj
   }
 }
 
-// The VictorSurfaceView controller (one per mini app) drains its app's queued
-// widget ops each frame.
 extern "C" JNIEXPORT jstring JNICALL
 Java_expo_modules_elpianwidgets_VictorSurfaceView_nativePollOps(JNIEnv *env, jobject, jstring appId) {
   const char *app = env->GetStringUTFChars(appId, nullptr);
-  std::string out;
-  {
-    std::lock_guard<std::mutex> lock(g_op_mutex);
-    auto it = g_ops.find(app);
-    if (it == g_ops.end() || it->second.empty()) {
-      env->ReleaseStringUTFChars(appId, app);
-      return env->NewStringUTF("");
-    }
-    out = join_array(it->second);
-    it->second.clear();
-  }
+  std::string out = elpianwidgets::drain_ops(app);
   env->ReleaseStringUTFChars(appId, app);
   return env->NewStringUTF(out.c_str());
 }
 
-// The controller enqueues a widget event for its app: [id, "event", <arg json>].
 extern "C" JNIEXPORT void JNICALL
 Java_expo_modules_elpianwidgets_VictorSurfaceView_nativePushEvent(
     JNIEnv *env, jobject, jstring appId, jint id, jstring event, jstring argJson) {
   const char *app = env->GetStringUTFChars(appId, nullptr);
   const char *e = env->GetStringUTFChars(event, nullptr);
-  const char *a = argJson ? env->GetStringUTFChars(argJson, nullptr) : "null";
-  std::string elem = "[" + std::to_string(id) + ",\"" + std::string(e) + "\"," +
-                     std::string(a && a[0] ? a : "null") + "]";
-  {
-    std::lock_guard<std::mutex> lock(g_ev_mutex);
-    g_events[app].push_back(std::move(elem));
-  }
+  const char *a = argJson ? env->GetStringUTFChars(argJson, nullptr) : nullptr;
+  elpianwidgets::push_event(app, id, e, a);
   env->ReleaseStringUTFChars(event, e);
   if (argJson) env->ReleaseStringUTFChars(argJson, a);
   env->ReleaseStringUTFChars(appId, app);
+}
+#endif // __ANDROID__
+
+// iOS: the ObjC++ module resolves the runtime and calls these plain-C entries
+// (no JNI). Same shared install / queue accessors on both platforms.
+extern "C" void ElpianWidgetsInstall(void *jsiRuntimePtr) {
+  if (jsiRuntimePtr != nullptr) {
+    elpianwidgets::install(*reinterpret_cast<jsi::Runtime *>(jsiRuntimePtr));
+  }
+}
+
+// Returns a malloc'd C string (JSON array, or "" when none) the caller frees.
+extern "C" const char *ElpianWidgetsDrainOps(const char *appId) {
+  std::string out = elpianwidgets::drain_ops(appId ? appId : "main");
+  char *buf = static_cast<char *>(malloc(out.size() + 1));
+  std::memcpy(buf, out.c_str(), out.size() + 1);
+  return buf;
+}
+
+extern "C" void ElpianWidgetsPushEvent(const char *appId, int id, const char *event,
+                                       const char *argJson) {
+  elpianwidgets::push_event(appId ? appId : "main", id, event ? event : "", argJson);
 }
