@@ -37,18 +37,21 @@ class ElpianGodotView(context: Context, appContext: AppContext) :
     } catch (t: Throwable) {
       Log.e(TAG, "failed to attach GodotFragment", t)
     }
-    // Godot's engine startup calls setRequestedOrientation on the host activity
-    // from its embed project's handheld/orientation setting. Belt-and-suspenders:
-    // re-assert portrait after Godot has initialized (it flips orientation a beat
-    // after attach), so the app never gets stuck in landscape even if the pck
-    // setting is ignored in embedded mode.
-    lockPortrait(activity)
-    postDelayed({ appContext.currentActivity?.let { lockPortrait(it) } }, 2000)
+    // Godot's engine startup forces the host activity to landscape (embedded mode
+    // ignores the pck's handheld/orientation, confirmed on device). We can't stop
+    // that call, so we out-last it: re-assert portrait across the whole init
+    // window. Godot sets orientation only once at startup, so once these re-asserts
+    // cover that moment, portrait sticks.
+    for (delay in longArrayOf(0, 500, 1000, 2000, 3500, 5000, 8000)) {
+      postDelayed({ appContext.currentActivity?.let { lockPortrait(it) } }, delay)
+    }
   }
 
   private fun lockPortrait(activity: android.app.Activity) {
     try {
-      activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+      if (activity.requestedOrientation != ActivityInfo.SCREEN_ORIENTATION_PORTRAIT) {
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+      }
     } catch (t: Throwable) {
       Log.w(TAG, "could not lock portrait", t)
     }
