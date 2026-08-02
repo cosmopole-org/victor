@@ -93,9 +93,10 @@ export default function App(): React.ReactElement {
       const w = widgetsRef.current;
       const r = runtimeRef.current;
       if (!r) return;
-      const err = r.lastFrameError ?? w?.lastEventError ?? "—";
+      const d = r.dispatcher;
+      const err = r.lastFrameError ?? w?.lastEventError ?? d.lastFireMiss ?? "—";
       setDiag(
-        `frames ${r.frameCount} · polls ${w?.pollCalls ?? 0} · events ${w?.firedEvents ?? 0}\nerr: ${err}`,
+        `frames ${r.frameCount} · events ${w?.firedEvents ?? 0} · fire ${d.fireCount} · inv ${d.invokeCount} · ops ${d.rnOpCount}\nerr/miss: ${err}`,
       );
     }, 500);
     return () => clearInterval(t);
