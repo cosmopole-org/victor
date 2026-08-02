@@ -24,3 +24,7 @@ modules/elpian-rn/android/src/main/jniLibs/
 modules/elpian-godot/godot-project/.godot/
 modules/elpian-godot/godot-project/**/*.import
 modules/elpian-godot/godot-project/bin/*.so
+
+# Web build/test artifacts (built by build:web / test:web)
+web/main.js
+web/e2e-screenshot.png
