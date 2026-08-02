@@ -34,11 +34,30 @@ func _process(_dt: float) -> void:
 		if typeof(msgs) == TYPE_ARRAY:
 			for m in msgs:
 				_apply(m)
-	# Report the built scene back to the RN overlay ~1x/sec so a blank viewport can
-	# be diagnosed on-device (is there a current camera? meshes? a sized viewport?).
+	# The guest's G3.camera sets current=true BEFORE add_child, which can fail to
+	# register the active camera once it enters the tree — leaving the viewport
+	# with no camera (renders grey). Force the first camera current each frame.
+	_ensure_camera()
+	# Report the built scene back to the RN overlay ~1x/sec (diagnostics). Call
+	# report() directly: Godot Android plugin methods are callable but has_method()
+	# returns false for them, so a has_method guard silently skips the call.
 	_frame += 1
-	if _frame % 60 == 0 and _bridge.has_method("report"):
+	if _frame % 60 == 0:
 		_bridge.call("report", _summarize())
+
+func _ensure_camera() -> void:
+	var cam = _find_camera(_sink)
+	if cam != null and not cam.current:
+		cam.make_current()
+
+func _find_camera(n: Node):
+	if n is Camera3D:
+		return n
+	for c in n.get_children():
+		var r = _find_camera(c)
+		if r != null:
+			return r
+	return null
 
 func _summarize() -> String:
 	var total := 0
