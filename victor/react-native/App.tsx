@@ -95,8 +95,15 @@ export default function App(): React.ReactElement {
       if (!r) return;
       const d = r.dispatcher;
       const err = r.lastFrameError ?? w?.lastEventError ?? d.lastFireMiss ?? "—";
+      const g = (globalThis as { __ElpianGodot?: { stats?(): string } }).__ElpianGodot;
+      let gstats = "n/a";
+      try {
+        gstats = g?.stats?.() ?? "n/a";
+      } catch {
+        gstats = "err";
+      }
       setDiag(
-        `fire ${d.fireCount} · inv ${d.invokeCount} · ops ${d.rnOpCount} · 3d ${engine ? "native" : "none"} · gops ${d.godotOpCount}\nmiss: ${err}`,
+        `ops ${d.rnOpCount} · 3d ${engine ? "native" : "none"} · gops ${d.godotOpCount}\ngodot ${gstats}`,
       );
     }, 500);
     return () => clearInterval(t);

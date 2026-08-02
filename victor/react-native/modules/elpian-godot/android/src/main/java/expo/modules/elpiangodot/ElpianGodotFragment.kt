@@ -23,10 +23,19 @@ class ElpianGodotFragment : GodotFragment() {
 
   companion object {
     // Godot reads --main-pack from the filesystem, not the APK assets, so copy
-    // the packed op-sink project out to the app's files dir once.
+    // the packed op-sink project out to the app's files dir. Always overwrite:
+    // app data (filesDir) survives an install-over, so an only-if-absent copy
+    // would keep serving a stale pck from a previous build (e.g. the old
+    // orientation / scene) forever. Re-copy when the bundled asset differs in
+    // size — cheap for a few-KB pck.
     private fun extractPck(ctx: Context): File {
       val out = File(ctx.filesDir, "elpian-embed.pck")
-      if (!out.exists() || out.length() == 0L) {
+      val assetLen = try {
+        ctx.assets.openFd("godot/embed.pck").use { it.length }
+      } catch (_: Throwable) {
+        -1L // some assets can't stat; fall through to a copy
+      }
+      if (!out.exists() || out.length() == 0L || out.length() != assetLen) {
         ctx.assets.open("godot/embed.pck").use { input ->
           out.outputStream().use { input.copyTo(it) }
         }
