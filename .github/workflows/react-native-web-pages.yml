@@ -1,0 +1,82 @@
+# Build and deploy the Victor React-Native/Expo showcase to the web, and verify
+# it end-to-end in a real browser before publishing.
+#
+# This is the exact example that ships as the Android APK: one Elpian VM
+# (elpian_rn.wasm) drives the widget set, rendered as real DOM by mountDom (no
+# React). The job cross-compiles the VM to wasm, bundles the zero-React web
+# entry with esbuild, boots it in headless Chromium via Playwright and asserts
+# the showcase renders AND is interactive (counter increments, input echoes) —
+# so a broken build never reaches Pages — then deploys web/ to GitHub Pages.
+#
+# Requires GitHub Pages with "GitHub Actions" as the source
+# (Settings -> Pages -> Build and deployment -> GitHub Actions).
+
+name: React Native web (GitHub Pages)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "victor/react-native/**"
+      - "victor/bridge/**"
+      - ".github/workflows/react-native-web-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: victor/react-native
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Add the wasm Rust target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cross-compile the Elpian VM to wasm
+        run: |
+          cd ..
+          cargo build -p elpian-rn --target wasm32-unknown-unknown --release
+          cp target/wasm32-unknown-unknown/release/elpian_rn.wasm react-native/web/elpian_rn.wasm
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Bundle the zero-React web entry
+        run: npx esbuild web/main.ts --bundle --format=esm --outfile=web/main.js --minify
+
+      - name: Install the Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end test in a real browser (must pass to deploy)
+        run: node test/web-e2e.mjs
+
+      - name: Upload the Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: victor/react-native/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

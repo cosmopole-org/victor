@@ -8,8 +8,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
-const CHROME =
-  process.env.CHROME_PATH || "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
+
+// Resolve a Chromium: an explicit CHROME_PATH, else this env's pre-installed
+// browser, else Playwright's own managed download (CI runs `playwright install`).
+function resolveChrome() {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  for (const p of [
+    "/opt/pw-browsers/chromium-1194/chrome-linux/chrome",
+    "/opt/pw-browsers/chromium/chrome-linux/chrome",
+  ]) {
+    if (fs.existsSync(p)) return p;
+  }
+  return undefined; // let Playwright pick its managed browser
+}
+const CHROME = resolveChrome();
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -56,7 +68,10 @@ async function main() {
   const server = await serve(WEB_DIR);
   const port = server.address().port;
   const url = `http://localhost:${port}/`;
-  const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+  const browser = await chromium.launch({
+    ...(CHROME ? { executablePath: CHROME } : {}),
+    headless: true,
+  });
   const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
   const errors = [];
   page.on("console", (m) => {
