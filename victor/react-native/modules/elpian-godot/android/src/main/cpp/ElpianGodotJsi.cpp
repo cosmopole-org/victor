@@ -32,6 +32,17 @@ jsi::Runtime *g_runtime = nullptr;
 long long g_pushed = 0;
 long long g_polls = 0;
 long long g_drained = 0;
+std::string g_status; // the OpSink's built-scene summary (see OpSink._summarize)
+
+std::string json_escape(const std::string &s) {
+  std::string out;
+  for (char c : s) {
+    if (c == '"' || c == '\\') out.push_back('\\');
+    if (c == '\n' || c == '\r') { out += ' '; continue; }
+    out.push_back(c);
+  }
+  return out;
+}
 
 void enqueue(std::string message) {
   std::lock_guard<std::mutex> lock(g_mutex);
@@ -104,7 +115,8 @@ void install(jsi::Runtime &rt) {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 std::string s = "{\"pushed\":" + std::to_string(g_pushed) +
                                 ",\"polls\":" + std::to_string(g_polls) +
-                                ",\"drained\":" + std::to_string(g_drained) + "}";
+                                ",\"drained\":" + std::to_string(g_drained) +
+                                ",\"scene\":\"" + json_escape(g_status) + "\"}";
                 return jsi::String::createFromUtf8(rt, s);
               }));
 
@@ -131,6 +143,12 @@ std::string drain_queue() {
   return out;
 }
 
+// Store the OpSink's scene summary (called from the Godot thread via JNI/ObjC++).
+void set_status(const std::string &s) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_status = s;
+}
+
 } // namespace elpiangodot
 
 #if defined(__ANDROID__)
@@ -144,6 +162,13 @@ Java_expo_modules_elpiangodot_ElpianGodotModule_nativeInstall(JNIEnv *, jobject,
 extern "C" JNIEXPORT jstring JNICALL
 Java_expo_modules_elpiangodot_ElpianGodotBridge_nativePollOps(JNIEnv *env, jobject) {
   return env->NewStringUTF(elpiangodot::drain_queue().c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_expo_modules_elpiangodot_ElpianGodotBridge_nativeReport(JNIEnv *env, jobject, jstring s) {
+  const char *c = env->GetStringUTFChars(s, nullptr);
+  elpiangodot::set_status(c ? c : "");
+  env->ReleaseStringUTFChars(s, c);
 }
 #endif // __ANDROID__
 

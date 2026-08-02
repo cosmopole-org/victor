@@ -14,7 +14,13 @@ class ElpianGodotBridge(godot: Godot) : GodotPlugin(godot) {
   @UsedByGodot
   fun pollOps(): String = nativePollOps()
 
+  // Diagnostics: the OpSink reports its built-scene summary here (~1x/sec); the
+  // RN overlay surfaces it via __ElpianGodot.stats() to diagnose a blank viewport.
+  @UsedByGodot
+  fun report(summary: String) = nativeReport(summary)
+
   private external fun nativePollOps(): String
+  private external fun nativeReport(summary: String)
 
   companion object {
     init {
