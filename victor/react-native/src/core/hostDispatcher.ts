@@ -42,6 +42,11 @@ export class HostDispatcher {
   private readonly eventCbs = new Map<string, number>();
   /** Overridable commit strategy — the runtime debounces to one flush/frame. */
   commit: () => void;
+  /** Diagnostics (on-device overlay): rn.ops handled, fireEvent calls, invokes. */
+  rnOpCount = 0;
+  fireCount = 0;
+  invokeCount = 0;
+  lastFireMiss: string | null = null;
 
   constructor(engine: Scene3dEngine, widgets?: WidgetRenderer) {
     this.engine = engine;
@@ -68,12 +73,14 @@ export class HostDispatcher {
         return null;
       }
       case "rn.op": {
+        this.rnOpCount++;
         const r = this.execRn(args[0] as Op);
         this.commit();
         return r === null || r === undefined ? null : JSON.stringify(r);
       }
       case "rn.batch": {
         const ops = (args[0] as Op[]) ?? [];
+        this.rnOpCount += ops.length;
         const results = ops.map((o) => this.execRn(o));
         this.commit();
         return JSON.stringify(results);
@@ -252,10 +259,15 @@ export class HostDispatcher {
   // --- event delivery (renderer -> VM) -----------------------------------
   /** Fire a widget event: route it to the owning VM's guest closure. */
   fireEvent(widgetId: number, event: string, arg: Wire): void {
+    this.fireCount++;
     const cb =
       this.eventCbs.get(cbKey(widgetId, event)) ||
       this.store.callbackFor(widgetId, event);
-    if (!cb) return;
+    if (!cb) {
+      this.lastFireMiss = `${widgetId}:${event}`;
+      return;
+    }
+    this.invokeCount++;
     // Mirror the Godot signal path: __godotDispatch([cbId, arg]) — the manager
     // decodes the namespaced cb id and routes to the VM that owns it.
     this.invokeSink("__godotDispatch", JSON.stringify([cb, arg ?? null]));
