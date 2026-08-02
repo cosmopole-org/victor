@@ -31,6 +31,9 @@ export class ElpianRuntime {
   private rafId: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private widgets?: WidgetRenderer;
+  /** Diagnostics: frames pumped and the last frame error (surfaced on-device). */
+  frameCount = 0;
+  lastFrameError: string | null = null;
 
   constructor(backend: VmBackend, opts: RuntimeOptions = {}) {
     this.backend = backend;
@@ -94,7 +97,9 @@ export class ElpianRuntime {
     if (raf) {
       const step = (ts: number) => {
         if (!this.running) return;
-        this.frame(ts);
+        // Never let a single bad frame kill the loop — reschedule regardless, or
+        // buttons/timers silently stop after the first throw (initial UI stays).
+        this.safeFrame(ts);
         this.rafId = raf(step);
       };
       this.rafId = raf(step);
@@ -102,8 +107,17 @@ export class ElpianRuntime {
       // Node / headless: a ~60fps interval keeps timers advancing.
       this.timer = setInterval(() => {
         if (!this.running) return;
-        this.frame(Date.now());
+        this.safeFrame(Date.now());
       }, 16);
+    }
+  }
+
+  private safeFrame(ts: number): void {
+    try {
+      this.frame(ts);
+    } catch (e) {
+      this.lastFrameError = String(e);
+      this.onLog?.(`[frame error] ${String(e)}`);
     }
   }
 
@@ -113,6 +127,7 @@ export class ElpianRuntime {
   }
 
   private frame(ts: number): void {
+    this.frameCount++;
     const dt = Math.max(0, ts - this.lastTs);
     this.lastTs = ts;
     this.backend.pump(dt);

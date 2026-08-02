@@ -2,7 +2,7 @@
 // and present its widget tree with <VictorHost/>. The VM does all the logic;
 // this file only wires the platform (wasm loader + render host) together.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { createRuntime, NativeVmBackend, NativeWidgetRenderer, VictorHost } from "./src/index.ts";
@@ -21,6 +21,11 @@ export default function App(): React.ReactElement {
   // True once the native widget toolkit is driving the UI (no React below the
   // single host view); false → the React <VictorHost/> renders the tree.
   const [nativeWidgets, setNativeWidgets] = useState(false);
+  // Live diagnostics for the native-widget path (temporary on-screen overlay):
+  // is the frame loop running, are widget events reaching the VM, any errors.
+  const widgetsRef = useRef<NativeWidgetRenderer | null>(null);
+  const runtimeRef = useRef<ElpianRuntime | null>(null);
+  const [diag, setDiag] = useState("");
 
   // The embedded-Godot engine, when a device build bundles it. One instance
   // drives both the guest's 3D ops (as the runtime's scene3d engine) and the
@@ -57,11 +62,12 @@ export default function App(): React.ReactElement {
         // with zero React below it; the fire host late-binds to the runtime we
         // build just below (only invoked once it's running, so rt is set by then).
         installWidgets();
-        let widgets: WidgetRenderer | undefined;
+        let widgets: NativeWidgetRenderer | undefined;
         if (NativeWidgetRenderer.isAvailable()) {
           widgets = new NativeWidgetRenderer({
             fire: (id, ev, arg) => rt?.fireEvent(id, ev, arg),
           });
+          widgetsRef.current = widgets;
         }
 
         rt = await createRuntime({
@@ -70,6 +76,7 @@ export default function App(): React.ReactElement {
           scene3d: engine ?? undefined,
           onLog: (line) => console.log("[guest]", line),
         });
+        runtimeRef.current = rt;
         rt.start(SHOWCASE_GUEST_SOURCE, { lang: "js" });
         if (widgets) setNativeWidgets(true);
         setRuntime(rt);
@@ -79,6 +86,20 @@ export default function App(): React.ReactElement {
     })();
     return () => rt?.stop();
   }, [engine]);
+
+  // Poll the live diagnostics ~2×/s for the on-screen overlay.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const w = widgetsRef.current;
+      const r = runtimeRef.current;
+      if (!r) return;
+      const err = r.lastFrameError ?? w?.lastEventError ?? "—";
+      setDiag(
+        `frames ${r.frameCount} · polls ${w?.pollCalls ?? 0} · events ${w?.firedEvents ?? 0}\nerr: ${err}`,
+      );
+    }, 500);
+    return () => clearInterval(t);
+  }, []);
 
   if (error) {
     return (
@@ -113,13 +134,31 @@ export default function App(): React.ReactElement {
   // host view (no React below it). Otherwise the React <VictorHost/> renders the
   // retained WidgetStore (web / Expo Go / platforms without the native toolkit).
   if (nativeWidgets) {
-    return <VictorSurface style={styles.fill} />;
+    return (
+      <View style={styles.fill}>
+        <VictorSurface style={styles.fill} />
+        {/* Temporary diagnostics overlay (native-widget event path). */}
+        <View style={styles.diag} pointerEvents="none">
+          <Text style={styles.diagText}>{diag}</Text>
+        </View>
+      </View>
+    );
   }
   return <VictorHost runtime={runtime} engine={engine ?? undefined} />;
 }
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  diag: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(2,6,23,0.85)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  diagText: { color: "#38bdf8", fontSize: 11, fontFamily: "monospace" },
   center: {
     flexGrow: 1,
     alignItems: "center",

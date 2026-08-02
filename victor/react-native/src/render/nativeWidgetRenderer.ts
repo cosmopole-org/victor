@@ -59,6 +59,10 @@ export class NativeWidgetRenderer implements WidgetRenderer {
   private native: ElpianWidgetsNative;
   private host: NativeWidgetHost;
   private appId: string;
+  /** Diagnostics: flush calls, events delivered, last event error (on-device). */
+  pollCalls = 0;
+  firedEvents = 0;
+  lastEventError: string | null = null;
 
   constructor(host: NativeWidgetHost, native: ElpianWidgetsNative = requireNative()) {
     this.native = native;
@@ -118,23 +122,32 @@ export class NativeWidgetRenderer implements WidgetRenderer {
   }
   /** Applied each frame by the runtime: drain native widget events into the VM. */
   flush(): void {
+    this.pollCalls++;
     let json: string;
     try {
       json = this.native.pollEvents(this.appId);
-    } catch {
+    } catch (e) {
+      this.lastEventError = `poll: ${String(e)}`;
       return;
     }
     if (!json) return;
     let events: unknown;
     try {
       events = JSON.parse(json);
-    } catch {
+    } catch (e) {
+      this.lastEventError = `parse: ${String(e)}`;
       return;
     }
     if (!Array.isArray(events)) return;
     for (const ev of events) {
       if (Array.isArray(ev) && typeof ev[0] === "number" && typeof ev[1] === "string") {
-        this.host.fire(ev[0], ev[1], (ev[2] ?? null) as Wire);
+        this.firedEvents++;
+        // One bad event must not stop draining the rest (or kill the frame).
+        try {
+          this.host.fire(ev[0], ev[1], (ev[2] ?? null) as Wire);
+        } catch (e) {
+          this.lastEventError = `fire: ${String(e)}`;
+        }
       }
     }
   }
