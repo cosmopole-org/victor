@@ -20,6 +20,11 @@ class VictorSurfaceView(context: Context, appContext: AppContext) :
   private val controller = WidgetController(context, root, this)
   private var frameCb: Choreographer.FrameCallback? = null
 
+  // The mini-app scope this surface hosts (matches NativeWidgetRenderer's appId).
+  // Ops/events are routed by it so many mini apps can share the one JSI binding.
+  // A lone app (the showcase) uses "main".
+  var appId: String = "main"
+
   init {
     addView(
       root,
@@ -50,7 +55,7 @@ class VictorSurfaceView(context: Context, appContext: AppContext) :
   }
 
   private fun drainOps() {
-    val json = nativePollOps()
+    val json = nativePollOps(appId)
     if (json.isEmpty()) return
     try {
       val arr = JSONArray(json)
@@ -60,11 +65,11 @@ class VictorSurfaceView(context: Context, appContext: AppContext) :
     }
   }
 
-  /** Called by WidgetController on a widget event; queued for the JS poll. */
-  fun pushEvent(id: Int, event: String, argJson: String?) = nativePushEvent(id, event, argJson)
+  /** Called by WidgetController on a widget event; queued for this app's JS poll. */
+  fun pushEvent(id: Int, event: String, argJson: String?) = nativePushEvent(appId, id, event, argJson)
 
-  private external fun nativePollOps(): String
-  private external fun nativePushEvent(id: Int, event: String, argJson: String?)
+  private external fun nativePollOps(appId: String): String
+  private external fun nativePushEvent(appId: String, id: Int, event: String, argJson: String?)
 
   companion object {
     init {

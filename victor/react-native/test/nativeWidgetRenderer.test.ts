@@ -25,27 +25,32 @@ function test(name: string, fn: () => void): void {
 interface Fake {
   native: ElpianWidgetsNative;
   msgs: Array<Record<string, Wire>>;
-  queueEvent: (id: number, event: string, arg: Wire) => void;
+  msgsFor: (appId: string) => Array<Record<string, Wire>>;
+  queueEvent: (appId: string, id: number, event: string, arg: Wire) => void;
 }
 
 function fakeWidgets(): Fake {
   const msgs: Array<Record<string, Wire>> = [];
-  let events: Array<[number, string, Wire]> = [];
+  const byApp: Record<string, Array<Record<string, Wire>>> = {};
+  const events: Record<string, Array<[number, string, Wire]>> = {};
   const native: ElpianWidgetsNative = {
-    op(json) {
-      msgs.push(JSON.parse(json) as Record<string, Wire>);
+    op(appId, json) {
+      const m = JSON.parse(json) as Record<string, Wire>;
+      msgs.push(m);
+      (byApp[appId] ??= []).push(m);
     },
-    pollEvents() {
-      const out = JSON.stringify(events);
-      events = [];
-      return out;
+    pollEvents(appId) {
+      const q = events[appId] ?? [];
+      events[appId] = [];
+      return JSON.stringify(q);
     },
     viewName: "VictorSurfaceView",
   };
   return {
     native,
     msgs,
-    queueEvent: (id, event, arg) => events.push([id, event, arg]),
+    msgsFor: (appId) => byApp[appId] ?? [],
+    queueEvent: (appId, id, event, arg) => ((events[appId] ??= []).push([id, event, arg])),
   };
 }
 
@@ -88,10 +93,32 @@ test("native widget events are drained on flush() and routed into the VM", () =>
   const fake = fakeWidgets();
   const fired: Array<[number, string, Wire]> = [];
   const r = new NativeWidgetRenderer({ fire: (id, e, a) => fired.push([id, e, a ?? null]) }, fake.native);
-  fake.queueEvent(2, "changeText", "bob");
-  fake.queueEvent(3, "press", null);
+  fake.queueEvent("main", 2, "changeText", "bob");
+  fake.queueEvent("main", 3, "press", null);
   r.flush(); // the runtime calls this each frame
   assert.deepStrictEqual(fired, [[2, "changeText", "bob"], [3, "press", null]], "events → VM");
+});
+
+test("mini apps are isolated: ops route by appId and polls don't cross", () => {
+  const fake = fakeWidgets();
+  const firedA: Array<[number, string]> = [];
+  const firedB: Array<[number, string]> = [];
+  const a = new NativeWidgetRenderer({ appId: "a", fire: (id, e) => firedA.push([id, e]) }, fake.native);
+  const b = new NativeWidgetRenderer({ appId: "b", fire: (id, e) => firedB.push([id, e]) }, fake.native);
+
+  a.create(1, "RNView");
+  b.create(1, "RNText"); // same local id, different app — must not collide
+  assert.ok(fake.msgsFor("a").some((m) => m.t === "create" && m.cls === "RNView"), "a's op tagged a");
+  assert.ok(fake.msgsFor("b").some((m) => m.t === "create" && m.cls === "RNText"), "b's op tagged b");
+  assert.strictEqual(fake.msgsFor("a").some((m) => m.cls === "RNText"), false, "b's op didn't leak to a");
+
+  fake.queueEvent("a", 1, "press", null);
+  fake.queueEvent("b", 1, "press", null);
+  a.flush(); // must only drain a's events
+  assert.deepStrictEqual(firedA, [[1, "press"]], "a got only its event");
+  assert.deepStrictEqual(firedB, [], "b's event untouched by a's poll");
+  b.flush();
+  assert.deepStrictEqual(firedB, [[1, "press"]], "b drains its own event");
 });
 
 test("without a binding, constructing throws a clear error", () => {

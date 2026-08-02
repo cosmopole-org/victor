@@ -13,17 +13,26 @@ import { specFor } from "./rnComponents.ts";
 
 /** The JSI binding the native widget module installs. */
 export interface ElpianWidgetsNative {
-  /** Enqueue one widget op (a JSON message) for the UI-thread controller. */
-  op(messageJson: string): void;
   /**
-   * Drain widget events the native controller queued (a JSON array of
-   * `[widgetId, event, arg]`), applied on the JS thread each frame. Polling
-   * avoids any native→JS cross-thread call.
+   * Enqueue one widget op (a JSON message) for the UI-thread controller of the
+   * mini-app `appId`. Each mini app (isolated VM) drives its own VictorSurface;
+   * `appId` routes ops to that surface's controller so many mini apps can share
+   * the one JSI binding without id collisions.
    */
-  pollEvents(): string;
+  op(appId: string, messageJson: string): void;
+  /**
+   * Drain the widget events `appId`'s controller queued (a JSON array of
+   * `[widgetId, event, arg]`), applied on the JS thread each frame. Per-app so
+   * one mini app's poll never steals another's events. Polling avoids any
+   * native→JS cross-thread call.
+   */
+  pollEvents(appId: string): string;
   /** The registered native view component that hosts the widget tree. */
   viewName?: string;
 }
+
+/** The default mini-app scope for a lone app (the showcase host). */
+export const MAIN_APP = "main";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -38,15 +47,23 @@ export function getElpianWidgetsNative(): ElpianWidgetsNative | null {
 export interface NativeWidgetHost {
   /** Fire a widget event back into the VM (wired to runtime.fireEvent). */
   fire: (widgetId: number, event: string, arg?: Wire) => void;
+  /**
+   * This renderer's mini-app scope (matches its VictorSurface's `appId` prop).
+   * Ops and event polling are routed under it so many mini apps can share the
+   * one native binding. Defaults to {@link MAIN_APP} for a lone app.
+   */
+  appId?: string;
 }
 
 export class NativeWidgetRenderer implements WidgetRenderer {
   private native: ElpianWidgetsNative;
   private host: NativeWidgetHost;
+  private appId: string;
 
   constructor(host: NativeWidgetHost, native: ElpianWidgetsNative = requireNative()) {
     this.native = native;
     this.host = host;
+    this.appId = host.appId ?? MAIN_APP;
   }
 
   static isAvailable(): boolean {
@@ -54,7 +71,7 @@ export class NativeWidgetRenderer implements WidgetRenderer {
   }
 
   private send(msg: Record<string, Wire>): void {
-    this.native.op(JSON.stringify(msg));
+    this.native.op(this.appId, JSON.stringify(msg));
   }
 
   create(id: number, className: string): void {
@@ -103,7 +120,7 @@ export class NativeWidgetRenderer implements WidgetRenderer {
   flush(): void {
     let json: string;
     try {
-      json = this.native.pollEvents();
+      json = this.native.pollEvents(this.appId);
     } catch {
       return;
     }

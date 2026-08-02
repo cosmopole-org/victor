@@ -70,6 +70,7 @@ export { mountDom, type MountDomOptions } from "./render/mountDom.ts";
 export {
   NativeWidgetRenderer,
   getElpianWidgetsNative,
+  MAIN_APP,
   type ElpianWidgetsNative,
   type NativeWidgetHost,
 } from "./render/nativeWidgetRenderer.ts";

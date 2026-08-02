@@ -17,7 +17,11 @@ class ElpianWidgetsModule : Module() {
     Function("install") { tryInstall() }
 
     View(VictorSurfaceView::class) {
-      // No props: the VM drives the tree through the op stream, not view props.
+      // The only prop: which mini-app scope this surface hosts. The VM drives the
+      // tree through the op stream; appId just routes that stream to this surface.
+      Prop("appId") { view: VictorSurfaceView, appId: String ->
+        view.appId = appId
+      }
     }
   }
 
