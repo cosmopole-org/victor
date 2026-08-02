@@ -1,11 +1,23 @@
-# Build and deploy the Victor React-Native/Expo showcase to the web, and verify
-# it end-to-end in a real browser before publishing.
+# Build and deploy the Victor React-Native/Expo showcase to the web — 2D widgets
+# AND the embedded Godot 3D scene — and verify both end-to-end in a real browser
+# before publishing.
 #
-# This is the exact example that ships as the Android APK: one Elpian VM
-# (elpian_rn.wasm) drives the widget set, rendered as real DOM by mountDom (no
-# React). The job cross-compiles the VM to wasm, bundles the zero-React web
-# entry with esbuild, boots it in headless Chromium via Playwright and asserts
-# the showcase renders AND is interactive (counter increments, input echoes) —
+# This is the exact example that ships as the Android APK: one Elpian VM drives
+# the widget set (rendered as real DOM by mountDom, no React) and a Scene3D
+# Godot world. Two engines are cross-compiled to wasm:
+#   * elpian_rn.wasm            — the VM for the DOM app (wasm32-unknown-unknown)
+#   * the Godot HTML5 export     — the 3D widget: Godot 4.3 + the elpian_godot
+#     GDExtension compiled to a wasm side module (Emscripten 3.1.64, nothreads),
+#     with the Elpian VM cross-compiled to wasm32-unknown-emscripten inside it.
+#
+# The GDExtension side module is served flat next to index.html by its basename
+# (libelpian_godot.web.wasm32.wasm): Godot web dlopens libraries by basename and
+# Emscripten registers each gdextensionLibs entry under that exact string, so
+# the flat basename layout is what makes the extension load.
+#
+# Playwright boots the page in headless Chromium and asserts the showcase
+# renders AND is interactive (2D), and that the Godot extension loads, the
+# RN→Godot op pipeline drains, and the Scene3D canvas paints real 3D pixels —
 # so a broken build never reaches Pages — then deploys web/ to GitHub Pages.
 #
 # Requires GitHub Pages with "GitHub Actions" as the source
@@ -31,9 +43,18 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  GODOT_RELEASE: "4.3-stable"
+  GODOT_TEMPLATE_DIR: "4.3.stable"
+  # Godot 4.3's official web templates are built with this Emscripten; the
+  # GDExtension side module must match it exactly.
+  EMSDK_VERSION: "3.1.64"
+  GODOT_CPP_BRANCH: "godot-4.3-stable"
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: victor/react-native
@@ -44,10 +65,132 @@ jobs:
         with:
           node-version: 20
 
-      - name: Add the wasm Rust target
-        run: rustup target add wasm32-unknown-unknown
+      # --- Toolchains ------------------------------------------------------
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          actions-cache-folder: emsdk-cache
 
-      - name: Cross-compile the Elpian VM to wasm
+      # 1.81.0 for the emscripten target ONLY (current stable rustc emits wasm
+      # target features emsdk 3.1.64's wasm-opt rejects); stable for the linux
+      # HOST library the headless editor loads during import/export.
+      - name: Set up Rust 1.81.0 (wasm32-unknown-emscripten)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.81.0"
+          targets: wasm32-unknown-emscripten
+
+      - name: Set up Rust stable (+ wasm32-unknown-unknown for the DOM VM)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: victor
+
+      - name: Install SCons
+        run: pip3 install scons
+
+      # --- Godot HTML5 export (the 3D widget) ------------------------------
+      - name: Clone godot-cpp
+        run: |
+          git clone --depth 1 -b "$GODOT_CPP_BRANCH" \
+            https://github.com/godotengine/godot-cpp \
+            ../bridge/extension/godot-cpp
+
+      - name: Cache godot-cpp web build
+        uses: actions/cache@v4
+        with:
+          path: |
+            victor/bridge/extension/godot-cpp/bin
+            victor/bridge/extension/godot-cpp/gen
+            victor/bridge/extension/godot-cpp/src
+            victor/bridge/extension/.sconsign.dblite
+          key: godot-cpp-web-${{ env.GODOT_CPP_BRANCH }}-${{ env.EMSDK_VERSION }}-v1
+
+      # SIDE_MODULE=2 so cargo's byproduct cdylib targets link inertly on 1.81
+      # (emcc would otherwise try to link them as executables and fail on main()).
+      - name: Build the Elpian VM C-ABI library (emscripten)
+        working-directory: victor
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS: "-C link-arg=-sSIDE_MODULE=2"
+        run: cargo +1.81.0 build -p elpian-godot-capi --release --target wasm32-unknown-emscripten
+
+      # threads=no: Rust's prebuilt emscripten std has no atomics, and Godot's
+      # nothreads web templates also drop the SharedArrayBuffer/COOP/COEP
+      # requirement GitHub Pages can't satisfy. generate_bindings=yes on BOTH
+      # scons calls (wasm32 is 32-bit, linux is 64-bit; scons won't regenerate
+      # on an arch switch, and a size mismatch aborts the editor at export).
+      - name: Build the GDExtension (.wasm side module, nothreads)
+        working-directory: victor/bridge/extension
+        run: |
+          scons platform=web threads=no target=template_release generate_bindings=yes \
+            elpian_capi=../../target/wasm32-unknown-emscripten/release/libelpian_godot.a
+          ls -la ../project/bin/
+
+      - name: Build the GDExtension for the host platform (headless editor loads it)
+        working-directory: victor/bridge/extension
+        run: scons platform=linux target=template_release generate_bindings=yes
+
+      # The RN Scene3D reuses the same GDExtension binary as the bridge; drop the
+      # freshly-built web + host libs into the RN godot-project so its export and
+      # the headless editor both resolve res://bin/…
+      - name: Stage the GDExtension libs into the RN godot-project
+        run: |
+          mkdir -p modules/elpian-godot/godot-project/bin
+          cp ../bridge/project/bin/libelpian_godot.web.wasm32.wasm \
+             ../bridge/project/bin/libelpian_godot.linux.x86_64.so \
+             modules/elpian-godot/godot-project/bin/
+          ls -la modules/elpian-godot/godot-project/bin/
+
+      - name: Install the Godot editor + export templates
+        run: |
+          curl -sSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          sudo mv "/tmp/godot/Godot_v${GODOT_RELEASE}_linux.x86_64" /usr/local/bin/godot
+          curl -sSL -o /tmp/templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}/Godot_v${GODOT_RELEASE}_export_templates.tpz"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}"
+          unzip -q /tmp/templates.tpz -d /tmp/templates
+          mv /tmp/templates/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATE_DIR}/"
+
+      - name: Import the godot-project
+        working-directory: victor/react-native/modules/elpian-godot/godot-project
+        run: godot --headless --import || true
+
+      - name: Export the Godot web build
+        working-directory: victor/react-native/modules/elpian-godot/godot-project
+        run: |
+          mkdir -p web-export
+          godot --headless --verbose --export-release "Web" \
+            "$GITHUB_WORKSPACE/victor/react-native/modules/elpian-godot/godot-project/web-export/elpian_godot.html"
+          ls -la web-export
+
+      # Rust's prebuilt emscripten std unwinds panics emscripten-style, so the
+      # side module imports invoke_* thunks Godot's exception-free template glue
+      # never defines; teach the exported glue to synthesize them.
+      - name: Patch the exported Godot JS glue for the Rust side module
+        run: node ../bridge/patch-web-export.mjs \
+          modules/elpian-godot/godot-project/web-export/elpian_godot.js
+
+      # Serve the Godot runtime flat next to index.html, by basename (see header).
+      - name: Stage the Godot runtime into web/
+        run: |
+          cp modules/elpian-godot/godot-project/web-export/elpian_godot.js \
+             modules/elpian-godot/godot-project/web-export/elpian_godot.wasm \
+             modules/elpian-godot/godot-project/web-export/elpian_godot.side.wasm \
+             modules/elpian-godot/godot-project/web-export/elpian_godot.pck \
+             modules/elpian-godot/godot-project/web-export/elpian_godot.audio.worklet.js \
+             modules/elpian-godot/godot-project/web-export/libelpian_godot.web.wasm32.wasm \
+             web/
+          ls -la web/
+
+      # --- DOM app (the 2D widgets) ----------------------------------------
+      - name: Cross-compile the Elpian VM to wasm (DOM app)
         run: |
           cd ..
           cargo build -p elpian-rn --target wasm32-unknown-unknown --release
@@ -62,8 +205,12 @@ jobs:
       - name: Install the Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: End-to-end test in a real browser (must pass to deploy)
+      # --- End-to-end verification (must pass to deploy) -------------------
+      - name: End-to-end test — 2D showcase
         run: node test/web-e2e.mjs
+
+      - name: End-to-end test — Godot 3D scene
+        run: node test/web-godot-e2e.mjs
 
       - name: Upload the Pages artifact
         uses: actions/upload-pages-artifact@v3
