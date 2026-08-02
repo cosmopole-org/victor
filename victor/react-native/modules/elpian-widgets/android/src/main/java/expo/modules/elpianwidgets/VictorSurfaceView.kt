@@ -17,7 +17,7 @@ class VictorSurfaceView(context: Context, appContext: AppContext) :
   ExpoView(context, appContext) {
 
   private val root = FlexboxLayout(context)
-  private val controller = WidgetController(context, root, this)
+  private val controller = WidgetController(context, appContext, root, this)
   private var frameCb: Choreographer.FrameCallback? = null
 
   // The mini-app scope this surface hosts (matches NativeWidgetRenderer's appId).

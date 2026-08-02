@@ -16,6 +16,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.widget.NestedScrollView
+import expo.modules.kotlin.AppContext
 import com.google.android.flexbox.AlignItems
 import com.google.android.flexbox.FlexDirection
 import com.google.android.flexbox.FlexWrap
@@ -31,6 +32,7 @@ import org.json.JSONObject
 // listeners that enqueue back to the VM via the host.
 class WidgetController(
   private val context: Context,
+  private val appContext: AppContext,
   private val root: FlexboxLayout,
   private val host: VictorSurfaceView,
 ) {
@@ -87,7 +89,7 @@ class WidgetController(
       "button", "victorButton" -> Pair(Button(context), root)
       "activity" -> Pair(ProgressBar(context), root)
       "image" -> Pair(ImageView(context), root)
-      "scene3d" -> Pair(View(context), root) // GodotView is attached by the Godot module
+      "scene3d" -> Pair(makeScene3dView(), root) // hosts the embedded Godot viewport
       "scroll" -> {
         val sv = NestedScrollView(context)
         val inner = FlexboxLayout(context).apply { flexDirection = FlexDirection.COLUMN }
@@ -98,6 +100,22 @@ class WidgetController(
         val f = FlexboxLayout(context).apply { flexDirection = FlexDirection.COLUMN }
         Pair(f, f)
       }
+    }
+  }
+
+  // Host the embedded Godot viewport for a Scene3D widget. Reflection keeps
+  // elpian-widgets decoupled from elpian-godot (no compile dependency): if the
+  // Godot module is in the build, its ElpianGodotView (an ExpoView that attaches
+  // a GodotFragment) renders the shared 3D world the guest drives through
+  // godot.op; if it isn't, Scene3D falls back to a plain View — the same graceful
+  // degradation as the rest of the toolkit.
+  private fun makeScene3dView(): View {
+    return try {
+      val cls = Class.forName("expo.modules.elpiangodot.ElpianGodotView")
+      val ctor = cls.getConstructor(Context::class.java, AppContext::class.java)
+      ctor.newInstance(context, appContext) as View
+    } catch (t: Throwable) {
+      View(context)
     }
   }
 
