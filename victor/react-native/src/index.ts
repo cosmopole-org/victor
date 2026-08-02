@@ -27,6 +27,14 @@ export {
   GodotScene3dEngine,
   createGodotScene3dEngine,
 } from "./scene3d/GodotScene3dEngine.tsx";
+export {
+  getElpianGodotWeb,
+  type ElpianGodotWeb,
+} from "./scene3d/webGodotBinding.ts";
+export {
+  WebGodotEngine,
+  type SurfaceResolver,
+} from "./scene3d/webGodotEngine.ts";
 
 export {
   type VmBackend,

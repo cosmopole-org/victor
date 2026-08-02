@@ -10,6 +10,7 @@
 import { WasmBackend, type HostCall } from "../vm/backend.ts";
 import { ElpianRuntime } from "../vm/runtime.ts";
 import type { Scene3dEngine } from "../core/scene3dEngine.ts";
+import { WebGodotEngine } from "../scene3d/webGodotEngine.ts";
 import { DomWidgetRenderer, type DomDocument, type DomEl } from "./domWidgetRenderer.ts";
 
 export interface MountDomOptions {
@@ -43,13 +44,23 @@ export async function mountDom(opts: MountDomOptions): Promise<ElpianRuntime> {
     fire: (id, event, arg) => runtime.fireEvent(id, event, arg),
   });
 
+  // Real 3D on web: when a Godot HTML5 export is loaded, drive Scene3D surfaces
+  // through it, binding each surface to the canvas DomWidgetRenderer created for
+  // that widget id. Absent (no export) → surfaces stay blank canvases. An
+  // explicit `scene3d` option always wins.
+  const scene3d: Scene3dEngine | undefined =
+    opts.scene3d ??
+    (WebGodotEngine.isAvailable()
+      ? new WebGodotEngine((id) => renderer.elementFor(id))
+      : undefined);
+
   // Late-bound host: the wasm import needs a callback at instantiate time, but
   // the dispatcher that services it exists only once the runtime is built.
   let host: HostCall = () => null;
   const backend = await WasmBackend.instantiate(opts.wasmBytes, (n, a) => host(n, a));
   runtime = new ElpianRuntime(backend, {
     widgets: renderer,
-    scene3d: opts.scene3d,
+    scene3d,
     onLog: opts.onLog,
   });
   host = (n, a) => runtime.dispatcher.handle(n, a);
