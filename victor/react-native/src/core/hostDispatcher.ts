@@ -46,6 +46,7 @@ export class HostDispatcher {
   rnOpCount = 0;
   fireCount = 0;
   invokeCount = 0;
+  godotOpCount = 0;
   lastFireMiss: string | null = null;
 
   constructor(engine: Scene3dEngine, widgets?: WidgetRenderer) {
@@ -91,11 +92,13 @@ export class HostDispatcher {
         return JSON.stringify(results);
       }
       case "godot.op": {
+        this.godotOpCount++;
         const r = this.execGodot(args[0] as Op);
         return r === null || r === undefined ? null : JSON.stringify(r);
       }
       case "godot.batch": {
         const ops = (args[0] as Op[]) ?? [];
+        this.godotOpCount += ops.length;
         const results = ops.map((o) => this.execGodot(o));
         return JSON.stringify(results);
       }
