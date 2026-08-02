@@ -169,13 +169,16 @@ jobs:
           godot --headless --verbose --export-release "Web" \
             "$GITHUB_WORKSPACE/victor/react-native/modules/elpian-godot/godot-project/web-export/elpian_godot.html"
           ls -la web-export
+          # --export-release can exit 0 even when it produced nothing usable;
+          # fail loudly here so a broken export isn't blamed on a later step.
+          test -f web-export/elpian_godot.js || { echo "::error::Godot web export produced no elpian_godot.js"; exit 1; }
+          test -f web-export/libelpian_godot.web.wasm32.wasm || { echo "::error::export dropped the GDExtension side module"; exit 1; }
 
       # Rust's prebuilt emscripten std unwinds panics emscripten-style, so the
       # side module imports invoke_* thunks Godot's exception-free template glue
       # never defines; teach the exported glue to synthesize them.
       - name: Patch the exported Godot JS glue for the Rust side module
-        run: node ../bridge/patch-web-export.mjs \
-          modules/elpian-godot/godot-project/web-export/elpian_godot.js
+        run: node ../bridge/patch-web-export.mjs modules/elpian-godot/godot-project/web-export/elpian_godot.js
 
       # Serve the Godot runtime flat next to index.html, by basename (see header).
       - name: Stage the Godot runtime into web/
