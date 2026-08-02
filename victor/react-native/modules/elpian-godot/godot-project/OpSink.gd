@@ -12,6 +12,7 @@ extends Node3D
 var _sink
 var _bridge
 var _seeded := {}
+var _frame := 0
 const SELF_HANDLE := 1
 
 func _ready() -> void:
@@ -28,13 +29,41 @@ func _process(_dt: float) -> void:
 	if _bridge == null or _sink == null:
 		return
 	var json: String = _bridge.pollOps()
-	if json.is_empty():
-		return
-	var msgs = JSON.parse_string(json)
-	if typeof(msgs) != TYPE_ARRAY:
-		return
-	for m in msgs:
-		_apply(m)
+	if not json.is_empty():
+		var msgs = JSON.parse_string(json)
+		if typeof(msgs) == TYPE_ARRAY:
+			for m in msgs:
+				_apply(m)
+	# Report the built scene back to the RN overlay ~1x/sec so a blank viewport can
+	# be diagnosed on-device (is there a current camera? meshes? a sized viewport?).
+	_frame += 1
+	if _frame % 60 == 0 and _bridge.has_method("report"):
+		_bridge.call("report", _summarize())
+
+func _summarize() -> String:
+	var total := 0
+	var cams := 0
+	var cur := 0
+	var meshes := 0
+	var envs := 0
+	var campos := "-"
+	var stack: Array = [_sink]
+	while not stack.is_empty():
+		var n = stack.pop_back()
+		total += 1
+		if n is Camera3D:
+			cams += 1
+			if n.current:
+				cur += 1
+				campos = str(n.global_position)
+		if n is MeshInstance3D:
+			meshes += 1
+		if n is WorldEnvironment:
+			envs += 1
+		for c in n.get_children():
+			stack.push_back(c)
+	var vp = get_viewport().get_visible_rect().size if get_viewport() != null else Vector2.ZERO
+	return "nodes=%d cam=%d/%d mesh=%d env=%d vp=%s campos=%s" % [total, cur, cams, meshes, envs, str(vp), campos]
 
 # A message is either a raw op {"op": {...}} or a surface mount
 # {"mount": <godot-handle>} the host establishes for a Scene3D viewport.
