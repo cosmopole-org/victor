@@ -339,6 +339,15 @@ class RN {
     // and bind the Scene3D surface to it. Subsequent GD/G3 calls on the same
     // handle then address the same node consistently.
     var nodeId = __gdAllocId();
+    // Create the mount node EAGERLY on the immediate godot stream, before any
+    // 3D content the guest builds under it. `scene3d_mount` is an rn.op and rn.op
+    // is batched (flushed at RN.commit(), i.e. after the guest's build), while
+    // godot.op is immediate — so if the host created the mount node from the
+    // (late) mount message, every add_child in between would hit an unknown
+    // handle and the whole 3D subtree would fail to attach. Creating it here
+    // keeps it ahead of the content; the mount message then only re-parents it
+    // into the Scene3D viewport.
+    __gdRun({ new: "Node3D", def: nodeId });
     __rnRun({ ref: w.id, method: "scene3d_mount", args: [{ ref: nodeId }] });
     w.scene3d = new GObj(nodeId);
     return w;
