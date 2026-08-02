@@ -96,7 +96,7 @@ export default function App(): React.ReactElement {
       const d = r.dispatcher;
       const err = r.lastFrameError ?? w?.lastEventError ?? d.lastFireMiss ?? "—";
       setDiag(
-        `fire ${d.fireCount} · inv ${d.invokeCount} · ops ${d.rnOpCount} · cbs ${d.cbDebug()}\nmiss: ${err}`,
+        `fire ${d.fireCount} · inv ${d.invokeCount} · ops ${d.rnOpCount} · 3d ${engine ? "native" : "none"} · gops ${d.godotOpCount}\nmiss: ${err}`,
       );
     }, 500);
     return () => clearInterval(t);
