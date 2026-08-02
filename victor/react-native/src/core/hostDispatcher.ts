@@ -59,6 +59,11 @@ export class HostDispatcher {
     this.invokeSink = fn;
   }
 
+  /** Diagnostics: how many event callbacks are registered + a few sample keys. */
+  cbDebug(): string {
+    return `${this.eventCbs.size}[${Array.from(this.eventCbs.keys()).slice(0, 3).join(",")}]`;
+  }
+
   // --- the wasm host_call contract: (name, argsJson) -> replyJson | null ---
   handle(name: string, argsJson: string): string | null {
     let args: Wire[];
