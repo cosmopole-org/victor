@@ -10,7 +10,8 @@
 extends Node3D
 
 var _sink
-var _bridge
+var _bridge          # Android: the ElpianGodotBridge JNI singleton
+var _web := false    # Web: drain the op queue over JavaScriptBridge instead
 var _seeded := {}
 var _frame := 0
 var _first := ""   # raw first op batch (to inspect actual device handles)
@@ -25,11 +26,26 @@ func _ready() -> void:
 	_sink.call("exec_op_json", JSON.stringify({"self": true, "def": SELF_HANDLE}))
 	if Engine.has_singleton("ElpianGodotBridge"):
 		_bridge = Engine.get_singleton("ElpianGodotBridge")
+	elif OS.has_feature("web") and _has_web_bridge():
+		# The RN web page (WebGodotEngine → globalThis.__ElpianGodotWeb) queues 3D
+		# ops on the page; drain them over JavaScriptBridge each frame.
+		_web = true
+
+func _has_web_bridge() -> bool:
+	return bool(JavaScriptBridge.eval("typeof window.__elpianGodotDrain === 'function'", true))
+
+func _drain() -> String:
+	if _bridge != null:
+		return _bridge.pollOps()
+	if _web:
+		var r = JavaScriptBridge.eval("window.__elpianGodotDrain()", true)
+		return str(r) if r != null else ""
+	return ""
 
 func _process(_dt: float) -> void:
-	if _bridge == null or _sink == null:
+	if _sink == null or (_bridge == null and not _web):
 		return
-	var json: String = _bridge.pollOps()
+	var json: String = _drain()
 	if not json.is_empty():
 		if _first == "":
 			_first = json.substr(0, 220)
@@ -41,11 +57,11 @@ func _process(_dt: float) -> void:
 	# register the active camera once it enters the tree — leaving the viewport
 	# with no camera (renders grey). Force the first camera current each frame.
 	_ensure_camera()
-	# Report the built scene back to the RN overlay ~1x/sec (diagnostics). Call
-	# report() directly: Godot Android plugin methods are callable but has_method()
-	# returns false for them, so a has_method guard silently skips the call.
+	# Report the built scene back to the RN overlay ~1x/sec (Android diagnostics).
+	# Call report() directly: Godot Android plugin methods are callable but
+	# has_method() returns false for them, so a has_method guard would skip it.
 	_frame += 1
-	if _frame % 60 == 0:
+	if _frame % 60 == 0 and _bridge != null:
 		_bridge.call("report", _summarize())
 
 func _ensure_camera() -> void:

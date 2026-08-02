@@ -58,6 +58,7 @@
     "build:wasm": "cd ../ && cargo build -p elpian-rn --target wasm32-unknown-unknown --release && cp target/wasm32-unknown-unknown/release/elpian_rn.wasm react-native/web/elpian_rn.wasm",
     "build:web": "npm run build:wasm && esbuild web/main.ts --bundle --format=esm --outfile=web/main.js --minify",
     "test:web": "node test/web-e2e.mjs",
+    "test:web:godot": "node test/web-godot-e2e.mjs",
     "prepack": "npm run build:wasm"
   },
   "peerDependencies": {
