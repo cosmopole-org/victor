@@ -12,7 +12,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// Drain one mini app's queued ops as a JSON array string ("" when none).
 + (NSString *)drainOps:(NSString *)appId;
 /// Enqueue a widget event for one mini app: [id, event, <argJson or null>].
-+ (void)pushEvent:(NSString *)appId id:(int)widgetId event:(NSString *)event arg:(nullable NSString *)argJson;
+/// widgetId is a 64-bit handle (VM id in the high bits) — must not truncate.
++ (void)pushEvent:(NSString *)appId id:(long long)widgetId event:(NSString *)event arg:(nullable NSString *)argJson;
 @end
 
 NS_ASSUME_NONNULL_END

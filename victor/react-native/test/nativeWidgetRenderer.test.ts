@@ -136,6 +136,29 @@ test("events fire back into the VM on the sink path (callback not in store)", ()
   assert.deepStrictEqual(invokes, [["__godotDispatch", JSON.stringify([42, null])]]);
 });
 
+test("64-bit widget handles round-trip (VM id packed in the high 32 bits)", () => {
+  // The manager encodes the owning VM in the high 32 bits, so ids exceed Int
+  // range (e.g. 2^32 + 9). The event id fired back by the native controller must
+  // equal the connected id exactly — any 32-bit truncation on the native side
+  // (e.g. Kotlin Int) desyncs 2^32+9 -> 9 and the lookup misses. Guard the JS
+  // contract: a big id connects and fires without truncation.
+  const fake = fakeWidgets();
+  const r = new NativeWidgetRenderer({ fire: () => {} }, fake.native);
+  const d = new HostDispatcher(new MockScene3dEngine(), r);
+  const invokes: Array<[string, string]> = [];
+  d.setInvokeSink((fn, arg) => invokes.push([fn, arg]));
+
+  const bigId = 2 ** 32 + 9; // 4294967305 — what encode_handle(vm=1, 9) produces
+  rn(d, { ref: bigId, connect: "press", cb: 77 });
+  assert.ok(fake.msgs.some((m) => m.t === "connect" && m.id === bigId), "full id in op");
+
+  d.fireEvent(bigId, "press", null); // the native controller must fire the full id
+  assert.deepStrictEqual(invokes, [["__godotDispatch", JSON.stringify([77, null])]]);
+  // The truncated id must NOT resolve — proves the lookup is exact, not modular.
+  d.fireEvent(9, "press", null);
+  assert.strictEqual(invokes.length, 1, "truncated id 9 must miss");
+});
+
 test("without a binding, constructing throws a clear error", () => {
   delete (globalThis as { __ElpianWidgets?: ElpianWidgetsNative }).__ElpianWidgets;
   assert.throws(() => new NativeWidgetRenderer({ fire: () => {} }), /native widget backend .* not installed/);

@@ -4,7 +4,7 @@
 
 extern "C" void ElpianWidgetsInstall(void *jsiRuntimePtr);
 extern "C" const char *ElpianWidgetsDrainOps(const char *appId);
-extern "C" void ElpianWidgetsPushEvent(const char *appId, int id, const char *event,
+extern "C" void ElpianWidgetsPushEvent(const char *appId, long long id, const char *event,
                                        const char *argJson);
 
 @implementation ElpianWidgetsBridge
@@ -26,7 +26,7 @@ extern "C" void ElpianWidgetsPushEvent(const char *appId, int id, const char *ev
   return s;
 }
 
-+ (void)pushEvent:(NSString *)appId id:(int)widgetId event:(NSString *)event arg:(NSString *)argJson {
++ (void)pushEvent:(NSString *)appId id:(long long)widgetId event:(NSString *)event arg:(NSString *)argJson {
   ElpianWidgetsPushEvent(appId.UTF8String, widgetId, event.UTF8String,
                          argJson ? argJson.UTF8String : NULL);
 }
