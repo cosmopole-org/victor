@@ -194,9 +194,11 @@ The guest side is ordinary JS you ship inside the mini app (no prelude change):
 
 ```js
 import 'reactnative.js';
+// rid is a STRING: the Elpian VM keys objects by string only, so `__hostCbs[<int>]`
+// traps the guest ("__setIndex expects a string, got i64") before askHost runs.
 var __hostSeq = 0, __hostCbs = {};
-function __hostReply(a){ var cb = __hostCbs[a[0]]; if (cb){ delete __hostCbs[a[0]]; cb(a[1] ? null : a[2], a[1] ? a[2] : null); } }
-function hostCall(method, payload, cb){ var rid = ++__hostSeq; __hostCbs[rid] = cb; askHost("host.call", [{ rid: rid, method: method, payload: payload }]); }
+function __hostReply(a){ var cb = __hostCbs['' + a[0]]; if (cb){ delete __hostCbs['' + a[0]]; cb(a[1] ? null : a[2], a[1] ? a[2] : null); } }
+function hostCall(method, payload, cb){ var rid = '' + (++__hostSeq); __hostCbs[rid] = cb; askHost("host.call", [{ rid: rid, method: method, payload: payload }]); }
 
 hostCall("sandbox.invoke", { function: "list_dir", path: "/" }, function(err, res){
   if (err) { /* show the error */ } else { /* render res */ }

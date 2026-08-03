@@ -54,7 +54,7 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types test/host.test.ts && node --experimental-strip-types test/hostBridge.test.ts && node --experimental-strip-types test/style.test.ts && node --experimental-strip-types test/components.test.ts && node --experimental-strip-types test/patching.test.ts && node --experimental-strip-types test/nativeBackend.test.ts && node --experimental-strip-types test/godotEngine.test.ts && node --experimental-strip-types test/webGodotEngine.test.ts && node --experimental-strip-types test/widgetRenderer.test.ts && node --experimental-strip-types test/widgetCoverage.test.ts && node --experimental-strip-types test/nativeWidgetRenderer.test.ts && node --experimental-strip-types test/domWidgetRenderer.test.ts",
-    "test:wasm": "node --experimental-strip-types test/miniapps.test.ts && node --experimental-strip-types test/miniappsController.test.ts && node --experimental-strip-types test/wasm.test.ts",
+    "test:wasm": "node --experimental-strip-types test/miniapps.test.ts && node --experimental-strip-types test/miniappsController.test.ts && node --experimental-strip-types test/hostBridgeVm.test.ts && node --experimental-strip-types test/wasm.test.ts",
     "build:wasm": "cd ../ && cargo build -p elpian-rn --target wasm32-unknown-unknown --release && cp target/wasm32-unknown-unknown/release/elpian_rn.wasm react-native/web/elpian_rn.wasm",
     "build:web": "npm run build:wasm && esbuild web/main.ts --bundle --format=esm --outfile=web/main.js --minify",
     "test:web": "node test/web-e2e.mjs",
