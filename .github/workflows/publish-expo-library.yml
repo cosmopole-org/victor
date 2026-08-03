@@ -1,0 +1,89 @@
+# Publish `victor-react-native` to the npm registry so any Expo / React Native
+# app can `npm install victor-react-native` and use Victor as a cross-platform
+# mini-app management system. (Expo libraries are ordinary npm packages — there
+# is no separate Expo registry; npm is where Expo apps resolve them from.)
+#
+# Runs on every push to the `release` branch. It builds the package — including
+# cross-compiling the Elpian VM to `web/elpian_rn.wasm`, which the package's
+# `files` list ships and which the `prepack` script rebuilds — then publishes it.
+# A version guard makes re-pushes idempotent: if package.json's version is
+# already on npm, it skips publishing instead of failing.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions):
+#   * Secret  NPM_TOKEN  — an npm automation access token with publish rights to
+#                          the `victor-react-native` package/owner. REQUIRED.
+#     (Without it the job skips publishing with a warning rather than failing.)
+
+name: Publish Expo library (npm)
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+# Serialize publishes so two quick pushes can't race to publish the same version.
+concurrency:
+  group: publish-expo-library
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: victor/react-native
+    steps:
+      - uses: actions/checkout@v4
+
+      # registry-url wires npm auth to use the NODE_AUTH_TOKEN env below and
+      # writes the correct .npmrc for publishing to the public registry.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Add the wasm Rust target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      # Cross-compile the VM the package ships (web/elpian_rn.wasm). `prepack`
+      # would also do this at publish time; running it here fails fast and makes
+      # the built artifact visible in the log before we publish.
+      - name: Build the Elpian VM wasm
+        run: npm run build:wasm
+
+      # Skip if this exact version is already published, so re-pushing `release`
+      # (docs tweaks, CI edits) doesn't fail on "You cannot publish over…".
+      - name: Skip if this version is already on npm
+        id: guard
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "package=$name@$version"
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "already-published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$name@$version is already published — nothing to do. Bump the version in package.json to publish a new release."
+          else
+            echo "already-published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.guard.outputs.already-published == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::warning::NPM_TOKEN secret is not set — skipping publish. Add it in Settings → Secrets and variables → Actions."
+            exit 0
+          fi
+          # --access public: publish this (unscoped) package publicly. prepack
+          # runs again here and rebuilds the wasm; that's fine (idempotent).
+          # (Add --provenance later for signed provenance — it needs a public
+          # repo and `id-token: write` permission.)
+          npm publish --access public
