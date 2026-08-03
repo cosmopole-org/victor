@@ -57,6 +57,16 @@ export {
   type MiniAppDef,
   type MiniAppsLayout,
 } from "./miniapps/VictorMiniApps.tsx";
+// Object-oriented controller: add/remove/update/start/stop mini apps imperatively
+// instead of re-passing an `apps` array (drive `<VictorMiniApps controller={…}/>`).
+export {
+  VictorMiniAppsController,
+  createMiniAppsController,
+  type VictorMiniAppsControllerOptions,
+  type MiniAppHandle,
+  type MiniAppStatus,
+  type AddOptions,
+} from "./miniapps/controller.ts";
 
 export { VictorHost, type VictorHostProps } from "./render/VictorHost.tsx";
 export { renderNode, WidgetView, type RenderContext } from "./render/renderNode.tsx";
