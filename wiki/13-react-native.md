@@ -148,11 +148,25 @@ only the parent; writes coalesce) directly against the store, framework-free.
 ## Mini-app management (the installable package)
 
 `victor-react-native` publishes as an npm/Expo package whose headline API is a
-**mini-app manager**: `<VictorMiniApps width height apps=[…]/>` hosts a set of
-Elpian programs, each rendering its own React Native tree (with optional embedded
-Godot 3D), reconciled by `id`. `VictorEngine.load(wasmBytes)` compiles the VM
-module once; each mini app is a fresh **isolated instance** (`createRuntime()` →
-`ElpianRuntime` over `WasmBackend.fromModule`).
+**mini-app manager**. Two ways to drive it, sharing one implementation:
+
+- **Imperative (object-oriented):** construct a `VictorMiniAppsController`, hold
+  onto it, and `add`/`remove`/`update`/`start`/`stop`/`restart` mini apps through
+  method calls from anywhere in the app; `<VictorMiniApps controller={…}/>`
+  renders whatever the controller currently holds and re-renders (via
+  `useSyncExternalStore` on the controller's version) on every change. Each app
+  exposes a live `status` (`pending`→`running`→`stopped`/`error`); apps added
+  before the module compiles boot automatically once `ready()` resolves.
+- **Declarative:** `<VictorMiniApps width height apps=[…]/>` hosts a set of
+  Elpian programs reconciled by `id`. Internally this builds a controller and
+  reconciles it from `apps` via `setApps` — same lifecycle, no new machinery.
+
+Either way `VictorEngine.load(wasmBytes)` compiles the VM module once; each mini
+app is a fresh **isolated instance** (`createRuntime()` → `ElpianRuntime` over
+`WasmBackend.fromModule`). The controller owns the engine and the per-app runtime
+map; `test/miniappsController.test.ts` exercises the full lifecycle on the real
+VM (add/stop/start/restart, `replaceSource` restart scope, sizing-only update
+keeps the VM, pending→running on ready).
 
 Why one instance per mini app rather than one shared instance with a VM subtree
 each: the `js2elpian` front-end keeps **process-global compile-time state**, so

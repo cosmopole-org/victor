@@ -33,7 +33,9 @@ npm install victor-react-native
 ```
 
 ```tsx
-import { VictorMiniApps } from "victor-react-native";
+import { useEffect, useRef } from "react";
+import { Button, View } from "react-native";
+import { VictorMiniApps, VictorMiniAppsController } from "victor-react-native";
 
 // The VM module (elpian_rn.wasm) as bytes. On web, fetch the shipped asset;
 // pass whatever returns an ArrayBuffer for your platform.
@@ -68,23 +70,72 @@ const counter = `
   main();
 `;
 
+// The headline API is an object-oriented controller: construct it once, hold
+// onto it, and add / remove / update / start / stop / restart mini apps through
+// method calls from anywhere in your app. The <VictorMiniApps/> view just
+// renders whatever the controller currently holds.
 export function MiniAppBoard() {
+  const controllerRef = useRef<VictorMiniAppsController>();
+  if (!controllerRef.current) {
+    controllerRef.current = new VictorMiniAppsController({
+      wasm: loadWasm,          // or engine: preloadedVictorEngine
+      onLog: (appId, line) => console.log(appId, line),
+    });
+  }
+  const controller = controllerRef.current;
+
+  useEffect(() => {
+    // Add the two mini apps (they boot as soon as the VM module compiles).
+    controller.add({ id: "clock",   source: clock });
+    controller.add({ id: "counter", source: counter });
+    return () => controller.dispose(); // frees every mini app's VM
+  }, [controller]);
+
   return (
-    <VictorMiniApps
-      width="100%"
-      height={480}
-      wasm={loadWasm}          // or engine={preloadedVictorEngine}
-      layout="grid"
-      columns={2}
-      gap={8}
-      apps={[
-        { id: "clock",   source: clock },
-        { id: "counter", source: counter },
-      ]}
-      onLog={(appId, line) => console.log(appId, line)}
-    />
+    <View style={{ gap: 8 }}>
+      <VictorMiniApps
+        controller={controller}
+        width="100%"
+        height={480}
+        layout="grid"
+        columns={2}
+        gap={8}
+      />
+      {/* Drive lifecycle imperatively from ordinary RN controls. */}
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        <Button title="Restart clock" onPress={() => controller.restart("clock")} />
+        <Button title="Stop counter"  onPress={() => controller.stop("counter")} />
+        <Button
+          title="Swap counter → clock"
+          onPress={() => controller.replaceSource("counter", clock)}
+        />
+      </View>
+    </View>
   );
 }
+```
+
+The controller owns the shared `VictorEngine` and each mini app's runtime:
+`add` boots an isolated VM, `remove` frees it, `stop`/`start` pause and resume
+one, `replaceSource`/`update` restarts just that mini app with new code (a
+sizing-only `update` re-renders without touching the VM), and `list()`/`get(id)`
+report each app's live `status` (`pending` → `running` → `stopped`/`error`).
+Every mutation notifies subscribers, so the view stays in sync. `await
+controller.ready()` resolves once the VM module has compiled.
+
+Prefer a **declarative** set instead? Pass `apps={[…]}` and skip the controller
+— the component reconciles the same way internally:
+
+```tsx
+<VictorMiniApps
+  width="100%" height={480} wasm={loadWasm}
+  layout="grid" columns={2} gap={8}
+  apps={[
+    { id: "clock",   source: clock },
+    { id: "counter", source: counter },
+  ]}
+  onLog={(appId, line) => console.log(appId, line)}
+/>
 ```
 
 Each mini app's program is ordinary JavaScript compiled by `js2elpian` and run
