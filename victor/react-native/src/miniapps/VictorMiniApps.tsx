@@ -91,6 +91,13 @@ export interface VictorMiniAppsProps {
 
   /** Per-mini-app log sink. */
   onLog?: (appId: string, line: string) => void;
+  /**
+   * Host-side service for guest `askHost("host.call", …)`, scoped per mini app.
+   * The seam a tool frontend uses to reach the embedding app (e.g. sign a Caspar
+   * request with the user's identity). Ignored when a `controller` is supplied
+   * (set it on the controller instead).
+   */
+  onHostCall?: (appId: string, method: string, payload: unknown) => Promise<unknown> | unknown;
   /** Called if the shared VM module fails to load. */
   onError?: (error: unknown) => void;
 
@@ -113,11 +120,13 @@ function signature(apps: MiniAppDef[]): string {
  * owns it).
  */
 function useResolvedController(props: VictorMiniAppsProps): VictorMiniAppsController {
-  const { controller, apps, engine, wasm, scene3dEngine, onLog, onError } = props;
+  const { controller, apps, engine, wasm, scene3dEngine, onLog, onHostCall, onError } = props;
 
   // Keep callbacks reachable without recreating the internal controller.
   const onLogRef = React.useRef(onLog);
   onLogRef.current = onLog;
+  const onHostCallRef = React.useRef(onHostCall);
+  onHostCallRef.current = onHostCall;
   const onErrorRef = React.useRef(onError);
   onErrorRef.current = onError;
 
@@ -131,6 +140,7 @@ function useResolvedController(props: VictorMiniAppsProps): VictorMiniAppsContro
       wasm,
       scene3dEngine,
       onLog: (id, line) => onLogRef.current?.(id, line),
+      onHostCall: (id, method, payload) => onHostCallRef.current?.(id, method, payload),
       onError: (e) => onErrorRef.current?.(e),
     });
   }

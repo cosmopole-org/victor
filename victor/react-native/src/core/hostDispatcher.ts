@@ -21,6 +21,21 @@ import type { Scene3dEngine } from "./scene3dEngine.ts";
 /** Called to push a guest function invocation back into the VM. */
 export type InvokeSink = (fnName: string, argJson: string) => void;
 
+/**
+ * A host-side service the guest reaches through `askHost("host.call", …)`. This
+ * is how a mini app talks to the outside world *without* doing the networking
+ * itself: the embedding app (not the sandboxed VM) performs the work — signing a
+ * Caspar signal with the human user's identity, calling an HTTP API, reading a
+ * secret — and resolves the value. The bridge is asynchronous by construction
+ * (a Caspar round-trip is not synchronous), so the reply is delivered back into
+ * the guest out-of-band via `__hostReply` rather than through the synchronous
+ * `host_call` return. Rejecting (or throwing) surfaces to the guest as an error.
+ */
+export type HostBridge = (
+  method: string,
+  payload: unknown,
+) => Promise<unknown> | unknown;
+
 export class HostDispatcher {
   readonly store = new WidgetStore();
   readonly log: string[] = [];
@@ -40,6 +55,15 @@ export class HostDispatcher {
    * where `connect` goes to the platform renderer and never touches the store.
    */
   private readonly eventCbs = new Map<string, number>();
+  /**
+   * The host-side service for `host.call` (see {@link HostBridge}). Absent by
+   * default — an unset bridge answers every `host.call` with an error, so a mini
+   * app that reaches for the host in a host that never wired one gets a clean
+   * failure instead of a silent hang.
+   */
+  private hostBridge?: HostBridge;
+  /** Diagnostics: host.call requests serviced. */
+  hostCallCount = 0;
   /** Overridable commit strategy — the runtime debounces to one flush/frame. */
   commit: () => void;
   /** Diagnostics (on-device overlay): rn.ops handled, fireEvent calls, invokes. */
@@ -60,9 +84,30 @@ export class HostDispatcher {
     this.invokeSink = fn;
   }
 
+  /** Install (or replace) the host-side service for `host.call`. */
+  setHostBridge(fn: HostBridge | undefined): void {
+    this.hostBridge = fn;
+  }
+
   /** Diagnostics: how many event callbacks are registered + a few sample keys. */
   cbDebug(): string {
     return `${this.eventCbs.size}[${Array.from(this.eventCbs.keys()).slice(0, 3).join(",")}]`;
+  }
+
+  /**
+   * Deliver a `host.call` outcome back into the guest as
+   * `__hostReply([rid, ok, data])`. Invoking a named guest global (the same
+   * seam widget events use) reaches this exact VM instance without needing the
+   * manager's callback namespacing. Guarded because the reply may land after the
+   * mini app was stopped/freed — a dead VM must not throw into a microtask.
+   */
+  private replyHost(rid: number | string, ok: boolean, data: unknown): void {
+    try {
+      this.invokeSink("__hostReply", JSON.stringify([rid, ok, data ?? null]));
+      this.commit();
+    } catch {
+      /* the VM was torn down before the reply arrived — drop it */
+    }
   }
 
   // --- the wasm host_call contract: (name, argsJson) -> replyJson | null ---
@@ -76,6 +121,33 @@ export class HostDispatcher {
     switch (name) {
       case "log": {
         this.log.push(String(args[0] ?? ""));
+        return null;
+      }
+      case "host.call": {
+        // Guest → host async request. The guest passes `{ rid, method, payload }`
+        // and registers a closure keyed by `rid`; we service it off the frame
+        // path and deliver the outcome back with `__hostReply([rid, ok, data])`.
+        // `host.call` is not a widget/godot op, so the VM manager forwards it
+        // here untouched — and because each mini app is its own isolated VM
+        // instance, `rid` correlation is purely the guest's own book-keeping.
+        this.hostCallCount++;
+        const req = (args[0] ?? {}) as {
+          rid?: number | string;
+          method?: string;
+          payload?: unknown;
+        };
+        const rid = req.rid ?? 0;
+        const bridge = this.hostBridge;
+        if (!bridge) {
+          this.replyHost(rid, false, "no host bridge is installed");
+          return null;
+        }
+        Promise.resolve()
+          .then(() => bridge(String(req.method ?? ""), req.payload))
+          .then((result) => this.replyHost(rid, true, result ?? null))
+          .catch((err) =>
+            this.replyHost(rid, false, String((err && (err as Error).message) ?? err)),
+          );
         return null;
       }
       case "rn.op": {

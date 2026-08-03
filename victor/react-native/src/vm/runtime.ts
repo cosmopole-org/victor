@@ -3,7 +3,7 @@
 // timers/microtasks and coalesces widget-tree changes into one React commit per
 // frame. Framework-agnostic (uses global rAF when present) so it stays Node-safe.
 
-import { HostDispatcher } from "../core/hostDispatcher.ts";
+import { HostDispatcher, type HostBridge } from "../core/hostDispatcher.ts";
 import { MockScene3dEngine, type Scene3dEngine } from "../core/scene3dEngine.ts";
 import type { WidgetRenderer } from "../core/widgetSink.ts";
 import type { VmBackend } from "./backend.ts";
@@ -19,6 +19,13 @@ export interface RuntimeOptions {
    */
   widgets?: WidgetRenderer;
   onLog?: (line: string) => void;
+  /**
+   * Host-side service for guest `askHost("host.call", …)` requests. Lets a mini
+   * app reach the embedding app (e.g. to make a Caspar signal signed with the
+   * human user's identity) without doing privileged work itself. See
+   * {@link HostBridge}.
+   */
+  onHostCall?: HostBridge;
 }
 
 export class ElpianRuntime {
@@ -50,6 +57,7 @@ export class ElpianRuntime {
     };
     // Widget events route back into the VM through invoke().
     this.dispatcher.setInvokeSink((fn, arg) => this.backend.invoke(fn, arg));
+    if (opts.onHostCall) this.dispatcher.setHostBridge(opts.onHostCall);
   }
 
   /** Boot the guest program and start pumping. */
