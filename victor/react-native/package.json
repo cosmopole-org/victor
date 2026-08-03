@@ -1,6 +1,6 @@
 {
   "name": "victor-react-native",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run the Elpian VM as a cross-platform Expo engine: a mini-app management system that hosts many isolated Elpian JS programs, each rendering its own React Native (2D) widget tree with embedded Godot (3D) Scene3D worlds — no JIT, App-Store-legal, web + native.",
   "license": "BSD-3-Clause",
   "keywords": [
