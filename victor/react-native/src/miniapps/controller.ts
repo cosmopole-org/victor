@@ -60,6 +60,14 @@ export interface VictorMiniAppsControllerOptions {
   scene3dEngine?: RnScene3dEngine;
   /** Per-mini-app log sink. */
   onLog?: (appId: string, line: string) => void;
+  /**
+   * Host-side service for guest `askHost("host.call", …)` requests, scoped per
+   * mini app (the app's id is the first argument). This is the seam a Decillion
+   * "desktop" uses to sign a tool frontend's Caspar request with the human
+   * user's identity — the mini app asks, the host performs and returns the
+   * value. Absent → every `host.call` from any mini app fails cleanly.
+   */
+  onHostCall?: (appId: string, method: string, payload: unknown) => Promise<unknown> | unknown;
   /** Called if the shared VM module fails to load. */
   onError?: (error: unknown) => void;
   /** Called after any change to the set (add/remove/update/start/stop/engine-ready). */
@@ -382,10 +390,16 @@ export class VictorMiniAppsController {
     const engine = this.engineRef;
     if (!engine) return; // stays pending until the engine loads
     const lang = entry.lang;
+    const onHostCall = this.opts.onHostCall;
     const runtime = engine.createRuntime({
       lang,
       scene3d: this.opts.scene3dEngine,
       onLog: (line) => this.opts.onLog?.(entry.id, line),
+      // Bind the bridge to this mini app's id so the host knows which frontend
+      // (and thus which tool/creature) is asking.
+      ...(onHostCall
+        ? { onHostCall: (method: string, payload: unknown) => onHostCall(entry.id, method, payload) }
+        : {}),
     });
     try {
       runtime.start(entry.source, { lang });
