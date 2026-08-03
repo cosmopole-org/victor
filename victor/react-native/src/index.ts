@@ -11,7 +11,11 @@
 
 export * from "./core/protocol.ts";
 export { WidgetStore, type WidgetNode } from "./core/widgetStore.ts";
-export { HostDispatcher, type InvokeSink } from "./core/hostDispatcher.ts";
+export {
+  HostDispatcher,
+  type InvokeSink,
+  type HostBridge,
+} from "./core/hostDispatcher.ts";
 export {
   MockScene3dEngine,
   type Scene3dEngine,

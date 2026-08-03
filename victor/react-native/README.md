@@ -164,6 +164,51 @@ app.start(source, { lang: "js" });
 > live on **Expo web**; the native JSI `VmBackend` seam is where a device
 > runtime plugs in (see “Platform notes”).
 
+## The host bridge — a mini app reaching the embedding app (`host.call`)
+
+A mini app is a **sandboxed** VM: it cannot open sockets, hold secrets, or sign
+requests. When a mini app *is* a tool's front-end and must call that tool's
+back-end **as the human user** (signing the request with the user's identity),
+the privileged work has to happen in the embedding app, not in the guest. That
+seam is the **host bridge**.
+
+The guest calls `askHost("host.call", [{ rid, method, payload }])` and the host
+answers **asynchronously** — a Caspar round-trip is not synchronous — by invoking
+the guest global `__hostReply([rid, ok, data])`. Supply the host side with
+`onHostCall` (on the controller, the component, or a low-level runtime); it is
+scoped per mini app so the host knows *which* front-end is asking:
+
+```tsx
+const controller = new VictorMiniAppsController({
+  wasm: loadWasm,
+  onHostCall: async (appId, method, payload) => {
+    // `appId` tells you which tool front-end this is; perform the privileged
+    // work here (e.g. POST to your server, which signs the Caspar signal with
+    // the logged-in user's custodial key) and return the value.
+    return await myServer.invokeTool(appId, method, payload);
+  },
+});
+```
+
+The guest side is ordinary JS you ship inside the mini app (no prelude change):
+
+```js
+import 'reactnative.js';
+var __hostSeq = 0, __hostCbs = {};
+function __hostReply(a){ var cb = __hostCbs[a[0]]; if (cb){ delete __hostCbs[a[0]]; cb(a[1] ? null : a[2], a[1] ? a[2] : null); } }
+function hostCall(method, payload, cb){ var rid = ++__hostSeq; __hostCbs[rid] = cb; askHost("host.call", [{ rid: rid, method: method, payload: payload }]); }
+
+hostCall("sandbox.invoke", { function: "list_dir", path: "/" }, function(err, res){
+  if (err) { /* show the error */ } else { /* render res */ }
+});
+```
+
+Because every mini app is its **own isolated VM instance**, `rid` correlation is
+purely the guest's own book-keeping and needs no manager namespacing. An unset
+bridge answers every `host.call` with an error rather than hanging, and a reply
+that lands after the mini app was stopped is dropped safely.
+`test/hostBridge.test.ts` covers resolve/reject/no-bridge/sync-value/concurrency.
+
 ## Complete coverage + efficient patching
 
 - **Every React Native element, by construction.** The renderer has no
