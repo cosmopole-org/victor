@@ -1,0 +1,31 @@
+{
+  "name": "expo-miniapps-example",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "pack:lib": "npm pack ../../victor/react-native --pack-destination .",
+    "sync:wasm": "node scripts/sync-wasm.mjs",
+    "start": "expo start",
+    "web": "expo start --web",
+    "export:web": "npm run sync:wasm && expo export --platform web --output-dir dist",
+    "test:web": "node test/web-e2e.mjs",
+    "e2e": "npm run export:web && npm run test:web"
+  },
+  "dependencies": {
+    "@expo/metro-runtime": "~4.0.1",
+    "expo": "~52.0.0",
+    "expo-status-bar": "~2.0.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-native": "0.76.3",
+    "react-native-web": "~0.19.13",
+    "victor-react-native": "file:./victor-react-native-0.1.0.tgz"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@types/react": "~18.3.12",
+    "playwright": "^1.48.0",
+    "typescript": "~5.6.3"
+  }
+}

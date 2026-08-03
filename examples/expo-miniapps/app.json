@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Victor Mini Apps",
+    "slug": "victor-miniapps-example",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "platforms": ["ios", "android", "web"],
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}
