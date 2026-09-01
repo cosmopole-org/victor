@@ -135,3 +135,38 @@ fn is_type_accepts_pre_neutral_spellings() {
     assert_eq!(run("ist-num", "function f() { if (__isType(3, \"num\")) { return 1; } return 0; }"), "1");
     assert_eq!(run("ist-not", "function f() { if (__isType(3, \"List\")) { return 1; } return 0; }"), "0");
 }
+
+/// A minifying codegen (oxc, which the Elpian CLI runs ahead of this front-end)
+/// emits `0.45` as `.45`. Before this was handled, every fractional literal
+/// between -1 and 1 in a TypeScript source failed to compile with
+/// "unexpected token '.'".
+#[test]
+fn leading_dot_fractions_tokenize() {
+    for src in [
+        "let a = .5; let b = a;",
+        "let a = .45e2; let b = a;",
+        "let a = [.1, .25, .75]; let b = a;",
+        "let a = { x: .5 }; let b = a;",
+    ] {
+        assert!(
+            js2elpian::try_parse_js(src).is_ok(),
+            "leading-dot fraction rejected: {src}"
+        );
+    }
+}
+
+/// The leading-dot branch must not swallow member access or spread.
+#[test]
+fn leading_dot_does_not_break_member_access_or_spread() {
+    for src in [
+        "let o = { b: 1 }; let v = o.b;",
+        "let a = [1, 2]; let b = [...a, 3];",
+        "let s = 'x'; let n = s.length;",
+        "let a = [1]; a.push(2);",
+    ] {
+        assert!(
+            js2elpian::try_parse_js(src).is_ok(),
+            "regressed: {src}"
+        );
+    }
+}

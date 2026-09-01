@@ -328,6 +328,34 @@ fn tokenize_js(src: &str) -> Vec<JsTok> {
         }
         // Numeric literals (integer, fractional, exponent, and the 0x / 0b / 0o
         // radix forms — normalised to their decimal value at lex time).
+        //
+        // A leading-dot fraction (`.45`) is legal JavaScript and is exactly what
+        // a minifying codegen emits for `0.45` — oxc, which the Elpian CLI runs
+        // ahead of this front-end, does so. Without this branch every fractional
+        // literal between -1 and 1 in a TypeScript source failed to compile with
+        // "unexpected token '.'", which for graphics-shaped code is most of
+        // them. Guarded on a following digit so member access (`a.b`) and the
+        // spread token still tokenize as punctuation.
+        if c == '.' && i + 1 < n && chars[i + 1].is_ascii_digit() {
+            let start = i;
+            i += 1;
+            while i < n && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < n && (chars[i] == 'e' || chars[i] == 'E') {
+                i += 1;
+                if i < n && (chars[i] == '+' || chars[i] == '-') {
+                    i += 1;
+                }
+                while i < n && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+            }
+            // Emit with the leading zero restored so every downstream consumer
+            // sees a conventional literal.
+            toks.push(JsTok::Num(format!("0{}", chars[start..i].iter().collect::<String>())));
+            continue;
+        }
         if c.is_ascii_digit() {
             if c == '0' && i + 1 < n && matches!(chars[i + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
                 let radix = match chars[i + 1] {
@@ -760,6 +788,9 @@ impl JsParser {
     fn parse_statement_inner(&mut self) -> Vec<Value> {
         if self.eat_punct(";") {
             return vec![];
+        }
+        if self.at_ident("async") {
+            panic!("js: `async` functions are not supported — the Elpian VM has no event loop; use the timer host APIs (setTimeout/setInterval) and callback style instead");
         }
         if self.at_ident("function") {
             return vec![self.parse_function_decl()];
@@ -1726,6 +1757,21 @@ impl JsParser {
             let v = self.parse_unary();
             return json!({ "type": "functionCall", "data": { "callee": js_ident("__bnot"), "args": [v] } });
         }
+        // `async` / `await` are not in the subset. The VM is a pausing
+        // interpreter, not an event loop: there is no Promise, no microtask
+        // queue, and no opcode to suspend on one. Left unhandled these tokenize
+        // as ordinary identifiers and compile to a program that traps at run
+        // time ("non object value can not be indexed by string"), so reject
+        // them here where the diagnostic can still name the construct.
+        if self.at_ident("await") {
+            panic!("js: `await` is not supported — the Elpian VM has no event loop; use the timer host APIs (setTimeout/setInterval) and callback style instead");
+        }
+        // `async` in expression position: `async () => …`, `async function () {}`.
+        // Without this the `async` token parses as a bare identifier and the
+        // failure surfaces later as a confusing "unexpected token '=>'".
+        if self.at_ident("async") {
+            panic!("js: `async` functions are not supported — the Elpian VM has no event loop; use the timer host APIs (setTimeout/setInterval) and callback style instead");
+        }
         // Prefix keyword operators (`typeof`, `void`, `delete`) — identifiers in
         // our tokenizer.
         if self.at_ident("typeof") {
@@ -2314,11 +2360,35 @@ pub fn parse_js(src: &str) -> serde_json::Value {
     program
 }
 
+/// Run `f`, catching the panic the parser uses to report "outside the subset".
+///
+/// The parser signals rejection by panicking, so the default hook prints a crash
+/// dump before the caller ever sees the message. That makes a *rejected input*
+/// look like a *compiler bug*. Silence the hook for the duration of the attempt
+/// and hand the message back instead.
+///
+/// The hook is process-global, so a panic on another thread during this window
+/// also prints nothing. Compilation is serial in every current caller, and the
+/// message is still returned to whoever asked, so the trade is worth the clean
+/// diagnostic.
+fn catch_subset_panic<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    std::panic::set_hook(previous);
+    outcome.map_err(|payload| {
+        payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "javascript parse error".to_string())
+    })
+}
+
 /// Parse JavaScript source into Elpian AST JSON, returning an error instead of
 /// panicking when the source is outside the supported subset.
 pub fn try_parse_js(src: &str) -> Result<serde_json::Value, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_js(src)))
-        .map_err(|_| "javascript parse error".to_string())
+    catch_subset_panic(|| parse_js(src))
 }
 
 /// Compile JavaScript source straight to bytecode by lowering it to the Elpian
@@ -2343,14 +2413,14 @@ pub fn compile_js_to_ast(code: String) -> String {
 /// Compile JS source to Elpian **bytecode** (via the VM's AST serialiser).
 /// Returns `None` if the source is outside the supported subset.
 pub fn compile_js_to_bytecode(code: &str) -> Option<Vec<u8>> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_js(code))).ok()
+    catch_subset_panic(|| compile_js(code)).ok()
 }
 
 /// Validate that JS source parses + compiles, without registering a VM.
 pub fn validate_js(code: String) -> bool {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    catch_subset_panic(|| {
         let _ = compile_js(&code);
-    }))
+    })
     .is_ok()
 }
 
